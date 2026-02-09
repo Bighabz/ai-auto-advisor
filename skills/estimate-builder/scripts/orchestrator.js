@@ -818,65 +818,26 @@ async function buildEstimate(params) {
     console.error(`  → History check failed (non-fatal): ${err.message}`);
   }
 
-  // ─── Step 3: Parallel Research ───
+  // ─── Step 3: Sequential Research (browser skills share one tab) ───
   console.log("\n[Step 3] Researching across databases...");
 
-  const researchPromises = [];
+  let alldata = null, identifix = null, prodemand = null;
+  const researchQuery = {
+    vin: vehicle.vin,
+    year: vehicle.year,
+    make: vehicle.make,
+    model: vehicle.model,
+    engine: vehicle.engine?.displacement,
+    query: params.query,
+  };
+
   if (requestInfo.type === "diagnostic") {
-    researchPromises.push(
-      searchAllData({
-        vin: vehicle.vin,
-        year: vehicle.year,
-        make: vehicle.make,
-        model: vehicle.model,
-        engine: vehicle.engine?.displacement,
-        query: params.query,
-      }).catch((e) => ({ error: e.message })),
-
-      searchDirectHit({
-        year: vehicle.year,
-        make: vehicle.make,
-        model: vehicle.model,
-        engine: vehicle.engine?.displacement,
-        query: params.query,
-      }).catch((e) => ({ error: e.message })),
-
-      searchProDemand({
-        vin: vehicle.vin,
-        year: vehicle.year,
-        make: vehicle.make,
-        model: vehicle.model,
-        engine: vehicle.engine?.displacement,
-        query: params.query,
-      }).catch((e) => ({ error: e.message }))
-    );
+    alldata = await searchAllData(researchQuery).catch((e) => ({ error: e.message }));
+    identifix = await searchDirectHit(researchQuery).catch((e) => ({ error: e.message }));
+    prodemand = await searchProDemand(researchQuery).catch((e) => ({ error: e.message }));
   } else {
     // Maintenance — just labor times
-    researchPromises.push(
-      searchProDemand({
-        vin: vehicle.vin,
-        year: vehicle.year,
-        make: vehicle.make,
-        model: vehicle.model,
-        engine: vehicle.engine?.displacement,
-        query: params.query,
-      }).catch((e) => ({ error: e.message }))
-    );
-  }
-
-  const researchResults = await Promise.all(researchPromises);
-
-  // Map results to platform keys based on request type
-  let alldata, identifix, prodemand;
-  if (requestInfo.type === "diagnostic") {
-    alldata = researchResults[0];
-    identifix = researchResults[1];
-    prodemand = researchResults[2];
-  } else {
-    // Maintenance — only ProDemand was queried
-    alldata = null;
-    identifix = null;
-    prodemand = researchResults[0];
+    prodemand = await searchProDemand(researchQuery).catch((e) => ({ error: e.message }));
   }
 
   results.diagnosis = {
