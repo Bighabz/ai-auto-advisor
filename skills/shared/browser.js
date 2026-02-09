@@ -97,10 +97,16 @@ function typeInRef(ref, text, submit = false) {
 
 /**
  * Wait for the page to reach a specific load state.
- * @param {string} [state="networkidle"] - Load state (networkidle, load, domcontentloaded)
+ * Defaults to "load" (faster than "networkidle" which can timeout on heavy pages).
+ * Non-fatal — swallows timeout errors so callers can continue.
+ * @param {string} [state="load"] - Load state (networkidle, load, domcontentloaded)
  */
-function waitForLoad(state = "networkidle") {
-  browserCmd("wait", "--load", state);
+function waitForLoad(state = "load") {
+  try {
+    browserCmd("wait", "--load", state);
+  } catch {
+    // Timeout is non-fatal — page may still be usable
+  }
 }
 
 /**
