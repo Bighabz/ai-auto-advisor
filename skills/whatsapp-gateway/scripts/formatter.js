@@ -201,10 +201,13 @@ function formatForWhatsApp(results) {
 
   // ── Final: Quick-reply prompt ──
   let prompt = "";
-  if (results.cartStatus?.ready_to_order) {
+  if (results.estimateSent?.success) {
+    prompt += `\u2705 Estimate sent to customer via ${results.estimateSent.sentVia}\n`;
+    prompt += `\u{1F4E6} Reply *APPROVED* when customer confirms\n`;
+  } else if (results.cartStatus?.ready_to_order) {
     prompt += `\u{1F4E6} Reply *ORDER* to place parts ($${results.cartStatus.total})\n`;
   }
-  if (estimate?.estimateId) {
+  if (estimate?.estimateId && !results.estimateSent?.success) {
     prompt += `\u{1F4E9} Reply *SEND* to email estimate to customer\n`;
   }
   prompt += `\u2753 Reply *HELP* for more options`;
@@ -233,6 +236,7 @@ function formatHelp() {
     ``,
     `*Commands:*`,
     `\u2022 *ORDER* — Place parts from last estimate`,
+    `\u2022 *APPROVED* — Customer approved, order parts`,
     `\u2022 *SEND* — Email estimate to customer`,
     `\u2022 *HELP* — Show this message`,
   ].join("\n");
@@ -246,4 +250,67 @@ function formatStatus() {
   return `*SAM is online* \u2713\nReady to build estimates.`;
 }
 
-module.exports = { formatForWhatsApp, formatHelp, formatStatus };
+/**
+ * Format research results for immediate delivery to tech.
+ * Sent before the estimate is built so tech can start working.
+ *
+ * @param {object} results - Partial results (diagnosis + research, no estimate yet)
+ * @returns {string[]} Array of WhatsApp messages
+ */
+function formatResearchFirst(results) {
+  const messages = [];
+  const { vehicle, diagnosis } = results;
+
+  const vName = `${vehicle.year} ${vehicle.make} ${vehicle.model}`.trim();
+  let msg = `*RESEARCH READY* \u{1F50D}\n${vName}\n\n`;
+
+  // Diagnosis
+  if (diagnosis?.ai?.diagnoses?.length > 0) {
+    const top = diagnosis.ai.diagnoses[0];
+    const conf = Math.round((top.confidence || 0) * 100);
+    msg += `*Diagnosis:* ${top.cause} (${conf}%)\n`;
+    if (top.reasoning) msg += `_${top.reasoning}_\n`;
+    msg += `\n`;
+  }
+
+  // Diagnostic steps
+  if (diagnosis?.ai?.diagnostic_steps?.length > 0) {
+    msg += `*Steps:*\n`;
+    for (let i = 0; i < Math.min(diagnosis.ai.diagnostic_steps.length, 4); i++) {
+      msg += `${i + 1}. ${diagnosis.ai.diagnostic_steps[i]}\n`;
+    }
+    msg += `\n`;
+  }
+
+  // Platform research
+  if (diagnosis?.identifix && !diagnosis.identifix.error && diagnosis.identifix.fixCount > 0) {
+    msg += `*Identifix:* ${diagnosis.identifix.fixCount} known fixes\n`;
+    if (diagnosis.identifix.topFix?.description) {
+      msg += `\u2192 ${diagnosis.identifix.topFix.description.substring(0, 100)}\n`;
+    }
+  }
+
+  if (diagnosis?.alldata && !diagnosis.alldata.error) {
+    const procCount = diagnosis.alldata.procedures?.length || 0;
+    if (procCount > 0) {
+      msg += `*AllData:* ${procCount} procedure steps\n`;
+    }
+    if (diagnosis.alldata.torqueSpecs && Object.keys(diagnosis.alldata.torqueSpecs).length > 0) {
+      msg += `_Torque specs available_\n`;
+    }
+  }
+
+  if (diagnosis?.prodemand && !diagnosis.prodemand.error) {
+    const rfCount = diagnosis.prodemand.realFixes?.length || 0;
+    if (rfCount > 0) {
+      msg += `*ProDemand:* ${rfCount} Real Fixes\n`;
+    }
+  }
+
+  msg += `\n_Building estimate in AutoLeap..._`;
+
+  messages.push(msg.trim());
+  return messages;
+}
+
+module.exports = { formatForWhatsApp, formatHelp, formatStatus, formatResearchFirst };

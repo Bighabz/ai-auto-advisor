@@ -45,6 +45,22 @@ if (process.env.PARTSTECH_URL) {
   }
 }
 
+// AutoLeap browser automation — optional, replaces API-based estimate when available
+let autoLeapBrowser = null;
+if (process.env.AUTOLEAP_EMAIL) {
+  try {
+    autoLeapBrowser = {
+      login: require("../../autoleap-browser/scripts/login"),
+      customer: require("../../autoleap-browser/scripts/customer"),
+      estimate: require("../../autoleap-browser/scripts/estimate"),
+      send: require("../../autoleap-browser/scripts/send"),
+      order: require("../../autoleap-browser/scripts/order"),
+    };
+  } catch {
+    // autoleap-browser skill not installed — browser automation disabled
+  }
+}
+
 /**
  * Classify request type for routing
  */
@@ -524,15 +540,57 @@ ${diagnosis?.summary || "See research results"}
 }
 
 /**
+ * Handle approval and place parts order via AutoLeap browser.
+ *
+ * Called when SA texts "approved" — goes back into AutoLeap and
+ * places the parts order through the embedded PartsTech.
+ *
+ * @param {object} lastEstimateResults - Results from the last buildEstimate() call
+ * @returns {object} { success, orderId, total, partsOrdered, error }
+ */
+async function handleApprovalAndOrder(lastEstimateResults) {
+  if (!autoLeapBrowser) {
+    return { success: false, error: "AutoLeap browser not configured" };
+  }
+
+  if (!lastEstimateResults?.estimate?.estimateId) {
+    return { success: false, error: "No estimate ID from previous estimate" };
+  }
+
+  const orderResult = autoLeapBrowser.order.placePartsOrder(
+    lastEstimateResults.estimate.estimateId
+  );
+
+  // Track order event
+  if (orderResult.success) {
+    const vehicle = lastEstimateResults.vehicle;
+    const orderShopId = lastEstimateResults.shopId || process.env.SHOP_ID || null;
+    trackEvent(orderShopId, "order_placed", {
+      vehicle: { year: vehicle.year, make: vehicle.make, model: vehicle.model },
+      partsOrdered: orderResult.partsOrdered || 0,
+      total: orderResult.total,
+      source: "autoleap_browser",
+    }).catch(() => {});
+  }
+
+  return orderResult;
+}
+
+/**
  * Handle "order those parts" request from SA.
  *
  * Takes the parts from the last estimate's bestValueBundle and
- * places an order via PartsTech browser automation.
+ * places an order via PartsTech browser automation or AutoLeap browser.
  *
  * @param {object} lastEstimateResults - Results from the last buildEstimate() call
  * @returns {object} { success, order, cart_summary, error }
  */
 async function handleOrderRequest(lastEstimateResults) {
+  // If estimate was created via browser, use AutoLeap browser for ordering
+  if (lastEstimateResults?.estimateSource === "browser" && autoLeapBrowser) {
+    return handleApprovalAndOrder(lastEstimateResults);
+  }
+
   if (!partstechOrder) {
     return { success: false, error: "PartsTech browser ordering not available (set PARTSTECH_URL env var)" };
   }
@@ -959,8 +1017,81 @@ async function buildEstimate(params) {
   }
 
   // ─── Step 6: Build Estimate in AutoLeap ───
-  if (params.customer) {
-    console.log("\n[Step 6] Creating estimate in AutoLeap...");
+  if (autoLeapBrowser && params.customer) {
+    // Browser path: full AutoLeap web UI automation
+    console.log("\n[Step 6] Creating estimate in AutoLeap (browser)...");
+
+    try {
+      const custResult = autoLeapBrowser.customer.findOrCreateCustomer(params.customer);
+      if (!custResult.success) {
+        console.error(`  → Customer error: ${custResult.error}`);
+      } else {
+        console.log(`  → Customer: ${params.customer.name} (${custResult.created ? "created" : "found"})`);
+
+        const vehResult = autoLeapBrowser.customer.addVehicleToCustomer({
+          year: vehicle.year,
+          make: vehicle.make,
+          model: vehicle.model,
+          vin: vehicle.vin,
+          mileage: vehicle.mileage,
+        });
+
+        if (vehResult.success) {
+          console.log(`  → Vehicle added: ${vehicle.year} ${vehicle.make} ${vehicle.model}`);
+        }
+
+        // Build estimate with MOTORS labor + PartsTech parts
+        const estParts = results.parts?.bestValueBundle?.parts || [];
+        const browserEstimate = autoLeapBrowser.estimate.createEstimate({
+          diagnosis: results.diagnosis,
+          parts: estParts,
+          customerName: params.customer.name,
+          vehicleDesc: `${vehicle.year} ${vehicle.make} ${vehicle.model}`,
+        });
+
+        if (browserEstimate.success) {
+          results.estimate = browserEstimate;
+          results.estimateSource = "browser";
+          console.log(`  → Estimate created: ${browserEstimate.estimateId || "pending"}`);
+          console.log(`  → Total: $${browserEstimate.total}`);
+
+          // Send to customer
+          if (params.customer.email || params.customer.phone) {
+            const sendResult = autoLeapBrowser.send.sendEstimate({
+              estimateId: browserEstimate.estimateId,
+              method: params.customer.email ? "email" : "sms",
+            });
+            results.estimateSent = sendResult;
+            if (sendResult.success) {
+              console.log(`  → Estimate sent via ${sendResult.sentVia}`);
+            }
+          }
+        } else {
+          console.error(`  → Browser estimate failed: ${browserEstimate.error}`);
+          results.estimate = { error: browserEstimate.error };
+        }
+
+        // Track estimate creation event
+        trackEvent(shopId, "estimate_created", {
+          vehicle: { year: vehicle.year, make: vehicle.make, model: vehicle.model },
+          total: browserEstimate.total || 0,
+          estimateId: browserEstimate.estimateId,
+          source: "browser",
+          partsCount: estParts.length,
+          platformsUsed: [
+            alldata && !alldata.error ? "alldata" : null,
+            identifix && !identifix.error ? "identifix" : null,
+            prodemand && !prodemand.error ? "prodemand" : null,
+          ].filter(Boolean),
+        }).catch(() => {});
+      }
+    } catch (err) {
+      console.error(`  → AutoLeap browser error: ${err.message}`);
+      results.estimate = { error: err.message };
+    }
+  } else if (params.customer) {
+    // Fallback: API-based estimate (existing code)
+    console.log("\n[Step 6] Creating estimate in AutoLeap (API)...");
 
     try {
       const customer = await findOrCreateCustomer(params.customer);
@@ -1018,6 +1149,7 @@ async function buildEstimate(params) {
         lineItems,
         shopConfig,
       });
+      results.estimateSource = "api";
 
       console.log(`  → Estimate created: ${results.estimate.estimateId}`);
       console.log(`  → Total: $${results.estimate.total}`);
@@ -1027,6 +1159,7 @@ async function buildEstimate(params) {
         vehicle: { year: vehicle.year, make: vehicle.make, model: vehicle.model },
         total: results.estimate.total,
         estimateId: results.estimate.estimateId,
+        source: "api",
         partsCount: results.parts?.bestValueBundle?.parts?.length || 0,
         platformsUsed: [
           alldata && !alldata.error ? "alldata" : null,
@@ -1149,6 +1282,7 @@ async function buildEstimate(params) {
 module.exports = {
   buildEstimate,
   handleOrderRequest,
+  handleApprovalAndOrder,
   classifyRequest,
   extractPartsNeeded,
   formatDiagnosisSummary,

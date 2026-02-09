@@ -45,7 +45,7 @@ if (fs.existsSync(envPath)) {
 
 const { parseMessage, detectCommand } = require("./parser");
 const { formatForWhatsApp, formatHelp, formatStatus } = require("./formatter");
-const { buildEstimate, handleOrderRequest } = require("../../estimate-builder/scripts/orchestrator");
+const { buildEstimate, handleOrderRequest, handleApprovalAndOrder } = require("../../estimate-builder/scripts/orchestrator");
 
 const LOG = "[wa-gateway]";
 const PORT = parseInt(process.env.PORT, 10) || 3000;
@@ -150,7 +150,42 @@ async function handleMessage(from, messageText) {
     }
   }
 
+  if (command?.type === "approved") {
+    const lastResults = sessions.get(from);
+    if (!lastResults) {
+      return { messages: ["No recent estimate found. Send a vehicle + problem first."] };
+    }
+    try {
+      const orderResult = await handleApprovalAndOrder(lastResults);
+      if (orderResult.success) {
+        return { messages: [
+          `*Customer approved! Parts ordered.*\n` +
+          `Order: ${orderResult.orderId || "confirmed"}\n` +
+          `Parts: ${orderResult.partsOrdered || "?"} items\n` +
+          `Total: $${orderResult.total || "?"}\n\n` +
+          `Parts will be delivered to the shop.`,
+        ] };
+      } else {
+        // Fall back to standard order flow
+        const fallbackResult = await handleOrderRequest(lastResults);
+        if (fallbackResult.success) {
+          return { messages: [`*Parts ordered!* ${fallbackResult.added?.length || 0} parts.\nTotal: $${fallbackResult.cart_summary?.total || "?"}`] };
+        }
+        return { messages: [`Order failed: ${orderResult.error || fallbackResult.error}`] };
+      }
+    } catch (err) {
+      return { messages: [`Order error: ${err.message}`] };
+    }
+  }
+
   if (command?.type === "send_estimate") {
+    const lastResults = sessions.get(from);
+    if (!lastResults) {
+      return { messages: ["No recent estimate found. Send a vehicle + problem first."] };
+    }
+    if (lastResults.estimateSent?.success) {
+      return { messages: [`Estimate already sent via ${lastResults.estimateSent.sentVia}.`] };
+    }
     return { messages: ["Estimate sending coming soon. For now, the PDF is attached above."] };
   }
 

@@ -191,6 +191,10 @@ function detectCommand(message) {
     return { type: "order" };
   }
 
+  if (text === "approved" || text === "approve" || text.startsWith("customer approved") || text === "yes approved") {
+    return { type: "approved" };
+  }
+
   if (text === "send" || text.startsWith("send estimate") || text.startsWith("send to customer")) {
     return { type: "send_estimate" };
   }
