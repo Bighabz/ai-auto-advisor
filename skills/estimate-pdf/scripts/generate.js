@@ -57,10 +57,11 @@ async function generateEstimatePDF(params) {
     day: "numeric",
   });
 
-  // Create PDF document
+  // Create PDF document (bufferPages required for switchToPage)
   const doc = new PDFDocument({
     size: "LETTER",
     margins: { top: 50, bottom: 50, left: 50, right: 50 },
+    bufferPages: true,
   });
 
   // Pipe to file
