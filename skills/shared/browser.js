@@ -115,11 +115,11 @@ function navigateTo(url) {
 /**
  * Capture a screenshot of the current page.
  * @param {string} outputPath - Full file path for the screenshot
- * @returns {string} The output path
+ * @returns {string} The output path (or the MEDIA path if no outputPath)
  */
 function captureScreenshot(outputPath) {
-  browserCmd("screenshot", "--path", outputPath);
-  return outputPath;
+  const result = browserCmd("screenshot");
+  return handleScreenshotResult(result, outputPath);
 }
 
 /**
@@ -128,8 +128,31 @@ function captureScreenshot(outputPath) {
  * @returns {string}
  */
 function captureFullPageScreenshot(outputPath) {
-  browserCmd("screenshot", "--full-page", "--path", outputPath);
-  return outputPath;
+  const result = browserCmd("screenshot", "--full-page");
+  return handleScreenshotResult(result, outputPath);
+}
+
+/**
+ * Parse MEDIA:<path> from screenshot output and copy to desired location.
+ * @param {string} result - stdout from screenshot command
+ * @param {string} [outputPath] - desired output path
+ * @returns {string} final screenshot path
+ */
+function handleScreenshotResult(result, outputPath) {
+  const mediaMatch = result.match(/MEDIA:(.+)/);
+  if (mediaMatch) {
+    let srcPath = mediaMatch[1].trim();
+    // Expand ~ to HOME
+    if (srcPath.startsWith("~")) {
+      srcPath = srcPath.replace("~", process.env.HOME || "/root");
+    }
+    if (outputPath && srcPath !== outputPath) {
+      require("fs").copyFileSync(srcPath, outputPath);
+      return outputPath;
+    }
+    return srcPath;
+  }
+  return outputPath || result.trim();
 }
 
 /**
