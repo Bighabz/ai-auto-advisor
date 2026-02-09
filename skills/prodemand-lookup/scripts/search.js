@@ -20,7 +20,7 @@
 const browser = require("../../shared/browser");
 
 // --- Config ---
-const PRODEMAND_URL = process.env.PRODEMAND_URL || "https://prodemand.mitchell1.com";
+const PRODEMAND_URL = process.env.PRODEMAND_URL || "https://www.prodemand.com";
 const PRODEMAND_USERNAME = process.env.PRODEMAND_USERNAME;
 const PRODEMAND_PASSWORD = process.env.PRODEMAND_PASSWORD;
 const PRODEMAND_TAPE_TOKEN = process.env.PRODEMAND_TAPE_TOKEN || null;

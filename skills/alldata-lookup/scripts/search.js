@@ -19,7 +19,7 @@ const { execFileSync } = require("child_process");
 const browser = require("../../shared/browser");
 
 // --- Config ---
-const ALLDATA_URL = process.env.ALLDATA_URL || "https://repair.alldata.com";
+const ALLDATA_URL = process.env.ALLDATA_URL || "https://my.alldata.com";
 const ALLDATA_USERNAME = process.env.ALLDATA_USERNAME;
 const ALLDATA_PASSWORD = process.env.ALLDATA_PASSWORD;
 const LOG = "[alldata]";
