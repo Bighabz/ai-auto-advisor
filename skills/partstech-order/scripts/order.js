@@ -114,7 +114,7 @@ function navigateTo(url) {
   if (!["http:", "https:"].includes(parsed.protocol)) {
     throw new Error(`Invalid URL protocol: ${parsed.protocol}`);
   }
-  browserCmd("open", url);
+  browserCmd("navigate", url);
 }
 
 // --- Snapshot Parsing ---

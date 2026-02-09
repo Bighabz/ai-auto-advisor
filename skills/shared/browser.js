@@ -46,18 +46,22 @@ function browserCmd(...args) {
 
 /**
  * Ensure the OpenClaw managed browser is running.
- * Waits after starting to let the browser initialize.
+ * Opens about:blank if no tab exists (headless Chrome starts with no tabs).
  */
 function ensureBrowser() {
   try {
     const status = browserCmd("status");
     if (!status.includes("running")) {
       browserCmd("start");
-      browserCmd("wait", "--load", "networkidle");
     }
   } catch {
     browserCmd("start");
-    browserCmd("wait", "--load", "networkidle");
+  }
+  // Headless Chrome may start with no tabs — open one if needed
+  try {
+    browserCmd("snapshot");
+  } catch {
+    browserCmd("open", "about:blank");
   }
 }
 
@@ -100,7 +104,7 @@ function waitForLoad(state = "networkidle") {
 }
 
 /**
- * Navigate to a URL in the managed browser.
+ * Navigate to a URL in the managed browser (current tab).
  * Validates URL protocol before navigating.
  * @param {string} url
  */
@@ -109,7 +113,7 @@ function navigateTo(url) {
   if (!["http:", "https:"].includes(parsed.protocol)) {
     throw new Error(`Invalid URL protocol: ${parsed.protocol}`);
   }
-  browserCmd("open", url);
+  browserCmd("navigate", url);
 }
 
 /**
