@@ -1,0 +1,20 @@
+{
+  "name": "ai-auto-advisor",
+  "version": "1.0.0",
+  "description": "> AI-powered \"done-for-you\" package that replaces a virtual assistant for auto repair shops. One text message → complete estimate with diagnosis, best-value parts ready to order, PDF for customer, and full mechanic reference specs.",
+  "main": "index.js",
+  "directories": {
+    "doc": "docs"
+  },
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "@supabase/supabase-js": "^2.95.3",
+    "node-fetch": "^3.3.2",
+    "pdfkit": "^0.17.2"
+  }
+}

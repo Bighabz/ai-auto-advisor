@@ -1,0 +1,30 @@
+# Environment & credentials
+config/.env
+*.env
+.env.*
+!.env.example
+.mcp.json
+
+# Node
+node_modules/
+package-lock.json
+
+# OS
+.DS_Store
+Thumbs.db
+nul
+
+# Generated files
+*.pdf
+
+# OpenClaw runtime
+.openclaw/
+*.log
+
+# Screenshots cache
+screenshots/
+cache/
+
+# IDE
+.vscode/
+.idea/

@@ -1,0 +1,1156 @@
+/**
+ * Estimate Builder — Master Orchestrator (Enhanced)
+ *
+ * Complete pipeline that produces:
+ * 1. Diagnosis from AllData/Identifix/ProDemand
+ * 2. Best-value parts from PartsTech with vendor comparison
+ * 3. Estimate in AutoLeap ready to send to customer
+ * 4. Downloadable PDF estimate
+ * 5. Full mechanic reference (sensor locations, fluids, torque, tools)
+ */
+
+const { decodeVin, isValidVin } = require("../../vin-decoder/scripts/decode");
+const { search: searchAllData, captureScreenshots } = require("../../alldata-lookup/scripts/search");
+const { searchDirectHit } = require("../../identifix-search/scripts/search");
+const { search: searchProDemand } = require("../../prodemand-lookup/scripts/search");
+const {
+  searchParts,
+  searchMultipleParts,
+  formatForAutoLeap,
+} = require("../../partstech-search/scripts/search");
+const {
+  findOrCreateCustomer,
+  findOrCreateVehicle,
+  createEstimate,
+} = require("../../autoleap-estimate/scripts/estimate");
+const { getVehicleSpecs } = require("../../vehicle-specs/scripts/specs");
+const { generateEstimatePDF } = require("../../estimate-pdf/scripts/generate");
+const { diagnose } = require("../../ai-diagnostics/scripts/diagnose");
+const {
+  getVehicleHistory,
+  getShopRepairStats,
+  findRelatedPriorRepairs,
+} = require("../../autoleap-estimate/scripts/history");
+const { getCannedJobs } = require("../../autoleap-estimate/scripts/canned-jobs");
+const { getShopConfig } = require("../../shop-management/scripts/config");
+const { trackEvent } = require("../../shop-management/scripts/usage");
+
+// PartsTech browser ordering — optional, only used when PARTSTECH_URL is set
+let partstechOrder = null;
+if (process.env.PARTSTECH_URL) {
+  try {
+    partstechOrder = require("../../partstech-order/scripts/order");
+  } catch {
+    // partstech-order skill not installed — ordering disabled
+  }
+}
+
+/**
+ * Classify request type for routing
+ */
+function classifyRequest(query) {
+  const maintenanceKeywords = [
+    "oil change", "brake", "pad", "rotor", "tire rotation",
+    "alignment", "tune up", "spark plug", "transmission fluid",
+    "coolant flush", "cabin filter", "air filter", "battery",
+    "belt", "hose", "wiper",
+  ];
+
+  const dtcMatch = query.match(/[PBCU][0-9]{4}/gi);
+  const isDTC = dtcMatch && dtcMatch.length > 0;
+  const isMaintenance = maintenanceKeywords.some((kw) =>
+    query.toLowerCase().includes(kw)
+  );
+
+  return {
+    type: isDTC ? "diagnostic" : isMaintenance ? "maintenance" : "general",
+    dtcCodes: dtcMatch || [],
+  };
+}
+
+/**
+ * Determine what parts are needed based on diagnosis
+ */
+function extractPartsNeeded(query, researchResults) {
+  const partsNeeded = [];
+
+  // Priority 1: Use repair plan parts (richest data — includes position, qty, search terms)
+  if (researchResults?.ai?.repair_plan?.parts?.length > 0) {
+    for (const part of researchResults.ai.repair_plan.parts) {
+      if (part.conditional && part.condition) {
+        // Conditional parts — still include but mark as conditional
+        partsNeeded.push({
+          partType: part.search_terms?.[0] || part.name,
+          searchTerms: part.search_terms || [part.name],
+          position: part.position || null,
+          qty: part.qty || 1,
+          oemPreferred: part.oem_preferred || false,
+          conditional: true,
+          condition: part.condition,
+        });
+      } else {
+        partsNeeded.push({
+          partType: part.search_terms?.[0] || part.name,
+          searchTerms: part.search_terms || [part.name],
+          position: part.position || null,
+          qty: part.qty || 1,
+          oemPreferred: part.oem_preferred || false,
+        });
+      }
+    }
+    if (partsNeeded.length > 0) {
+      return partsNeeded;
+    }
+  }
+
+  // Priority 2: Use AI diagnosis parts (flat list, less data)
+  if (researchResults?.ai?.diagnoses?.length > 0) {
+    for (const diag of researchResults.ai.diagnoses) {
+      if (diag.parts_needed && diag.confidence >= 0.5) {
+        for (const part of diag.parts_needed) {
+          if (!partsNeeded.some((p) => p.partType === part)) {
+            partsNeeded.push({ partType: part });
+          }
+        }
+      }
+    }
+    if (partsNeeded.length > 0) {
+      return partsNeeded;
+    }
+  }
+
+  // Fallback: Extract from query keywords
+  const queryLower = query.toLowerCase();
+
+  // O2 sensor / catalyst codes
+  if (queryLower.includes("p0420") || queryLower.includes("catalyst") || queryLower.includes("o2 sensor")) {
+    partsNeeded.push({ partType: "oxygen sensor", position: "downstream" });
+    partsNeeded.push({ partType: "oxygen sensor", position: "upstream" });
+    // Might also need cat, but don't auto-add — let diagnosis guide
+  }
+
+  // Common DTC to parts mapping
+  const dtcPartsMap = {
+    "P0171": [{ partType: "mass air flow sensor" }, { partType: "fuel injector" }],
+    "P0300": [{ partType: "spark plug" }, { partType: "ignition coil" }],
+    "P0442": [{ partType: "gas cap" }, { partType: "evap canister purge valve" }],
+  };
+
+  const dtcMatch = query.match(/[PBCU][0-9]{4}/gi);
+  if (dtcMatch) {
+    for (const dtc of dtcMatch) {
+      const mapped = dtcPartsMap[dtc.toUpperCase()];
+      if (mapped) partsNeeded.push(...mapped);
+    }
+  }
+
+  // Brake job
+  if (queryLower.includes("brake") || queryLower.includes("pad") || queryLower.includes("rotor")) {
+    if (queryLower.includes("front") || !queryLower.includes("rear")) {
+      partsNeeded.push({ partType: "brake pads", position: "front" });
+      if (queryLower.includes("rotor")) partsNeeded.push({ partType: "brake rotor", position: "front" });
+    }
+    if (queryLower.includes("rear") || !queryLower.includes("front")) {
+      partsNeeded.push({ partType: "brake pads", position: "rear" });
+      if (queryLower.includes("rotor")) partsNeeded.push({ partType: "brake rotor", position: "rear" });
+    }
+  }
+
+  // Oil change
+  if (queryLower.includes("oil change")) {
+    partsNeeded.push({ partType: "oil filter" });
+    partsNeeded.push({ partType: "drain plug gasket" });
+  }
+
+  return partsNeeded;
+}
+
+/**
+ * Format AI diagnosis into a readable summary
+ */
+function formatDiagnosisSummary(aiDiagnosis) {
+  if (!aiDiagnosis?.diagnoses?.length) return "No AI diagnosis available";
+
+  const lines = ["AI DIAGNOSTIC RESULTS:"];
+  for (let i = 0; i < aiDiagnosis.diagnoses.length; i++) {
+    const d = aiDiagnosis.diagnoses[i];
+    const pct = Math.round(d.confidence * 100);
+    lines.push(`   ${i + 1}. ${d.cause} — ${pct}% confidence`);
+    if (d.reasoning) lines.push(`      ${d.reasoning}`);
+  }
+
+  if (aiDiagnosis.low_confidence_warning) {
+    lines.push("   ⚠️ Low confidence — recommend further diagnostic verification");
+  }
+
+  if (aiDiagnosis.recalls?.length > 0) {
+    lines.push(`   📋 ${aiDiagnosis.recalls.length} open recall(s) found for this vehicle`);
+  }
+
+  return lines.join("\n");
+}
+
+/**
+ * Format the final response for service advisor
+ */
+function formatServiceAdvisorResponse(results) {
+  const { vehicle, diagnosis, parts, estimate, mechanicSpecs, pdfPath } = results;
+
+  let response = `
+═══════════════════════════════════════════════════════════════
+  ESTIMATE READY — ${vehicle.year} ${vehicle.make} ${vehicle.model} ${vehicle.trim || ""}
+═══════════════════════════════════════════════════════════════
+
+📋 VEHICLE (Exact for Parts Accuracy)
+   ${vehicle.year} ${vehicle.make} ${vehicle.model} ${vehicle.trim || ""}
+   Engine: ${vehicle.engine?.displacement || "?"} ${vehicle.engine?.cylinders || "?"}cyl ${vehicle.engine?.fuelType || ""}
+   VIN: ${vehicle.vin || "N/A"}
+   Trans: ${vehicle.transmission || "N/A"} | Drive: ${vehicle.driveType || "N/A"}
+
+🔍 DIAGNOSIS
+${diagnosis?.summary || "See research results"}
+`;
+
+  // AI Diagnosis confidence details
+  if (diagnosis?.ai?.diagnoses?.length > 0) {
+    response += `
+   CONFIDENCE SCORES:
+`;
+    for (const d of diagnosis.ai.diagnoses) {
+      const bar = "█".repeat(Math.round(d.confidence * 20)) + "░".repeat(20 - Math.round(d.confidence * 20));
+      const corr = d.identifix_corroborated ? ` ✓ Identifix ${d.identifix_success_rate}%` : "";
+      const hist = d.history_adjusted ? " ★ History" : "";
+      response += `   ${bar} ${Math.round(d.confidence * 100)}% ${d.cause}${corr}${hist}\n`;
+    }
+
+    // Show diagnostic path
+    if (diagnosis.ai.diagnostic_path) {
+      const pathLabels = {
+        kb_direct: "Knowledge Base (high confidence)",
+        kb_with_claude: "Knowledge Base + AI verification",
+        claude_only: "AI Analysis",
+      };
+      response += `   Source: ${pathLabels[diagnosis.ai.diagnostic_path] || diagnosis.ai.diagnostic_path}\n`;
+    }
+
+    if (diagnosis.ai.diagnostic_steps?.length > 0) {
+      response += `
+   RECOMMENDED DIAGNOSTIC STEPS:
+`;
+      for (let i = 0; i < diagnosis.ai.diagnostic_steps.length; i++) {
+        response += `   ${i + 1}. ${diagnosis.ai.diagnostic_steps[i]}\n`;
+      }
+    }
+  }
+
+  // Research platform results
+  const alldata = diagnosis?.alldata;
+  const identifix = diagnosis?.identifix;
+  const prodemand = diagnosis?.prodemand;
+
+  if ((alldata && !alldata.error) || (identifix && !identifix.error) || (prodemand && !prodemand.error)) {
+    response += `
+🔬 PLATFORM RESEARCH
+`;
+    if (identifix && !identifix.error && identifix.fixCount > 0) {
+      response += `   Identifix Direct-Hit: ${identifix.fixCount} known fixes\n`;
+      if (identifix.topFix) {
+        response += `   → Top fix: ${identifix.topFix.description?.substring(0, 80) || "N/A"}`;
+        if (identifix.topFix.successRate) response += ` (${identifix.topFix.successRate}% success)`;
+        response += `\n`;
+      }
+      if (identifix.misdiagnosisWarnings?.length > 0) {
+        response += `   ⚠️ MISDIAGNOSIS WARNING: ${identifix.misdiagnosisWarnings[0]}\n`;
+      }
+    }
+
+    if (prodemand && !prodemand.error) {
+      const realFixCount = prodemand.realFixes?.length || 0;
+      const laborCount = prodemand.laborTimes?.length || 0;
+      if (realFixCount > 0 || laborCount > 0) {
+        response += `   ProDemand: ${realFixCount} Real Fixes, ${laborCount} labor times\n`;
+        if (prodemand.realFixes?.[0]) {
+          const rf = prodemand.realFixes[0];
+          if (rf.symptom) response += `   → ${rf.symptom}`;
+          if (rf.cause) response += ` → ${rf.cause}`;
+          response += `\n`;
+        }
+      }
+    }
+
+    if (alldata && !alldata.error) {
+      const procCount = alldata.procedures?.length || 0;
+      const torqueCount = Object.keys(alldata.torqueSpecs || {}).length;
+      if (procCount > 0 || torqueCount > 0) {
+        response += `   AllData: ${procCount} procedure steps, ${torqueCount} torque specs`;
+        if (alldata.diagrams_available) response += `, diagrams captured`;
+        response += `\n`;
+      }
+      if (alldata.notes?.length > 0) {
+        response += `   ⚠️ NOTE: ${alldata.notes[0]}\n`;
+      }
+    }
+  }
+
+  // Vehicle history
+  if (results.vehicleHistory?.vehicleVisits > 0) {
+    response += `
+📜 VEHICLE HISTORY (${results.vehicleHistory.vehicleVisits} prior visits)
+`;
+    if (results.vehicleHistory.lastVisit) {
+      const lastDate = new Date(results.vehicleHistory.lastVisit);
+      response += `   Last visit: ${lastDate.toLocaleDateString()}\n`;
+    }
+    if (results.vehicleHistory.totalSpent) {
+      response += `   Total spent: $${results.vehicleHistory.totalSpent.toFixed(2)}\n`;
+    }
+    if (results.vehicleHistory.insight) {
+      response += `   → ${results.vehicleHistory.insight}\n`;
+    }
+    if (results.vehicleHistory.relatedRepairs?.length > 0) {
+      for (const repair of results.vehicleHistory.relatedRepairs.slice(0, 3)) {
+        const date = repair.completed_at ? new Date(repair.completed_at).toLocaleDateString() : "?";
+        response += `   • ${date}: ${repair.repair_description} ($${repair.total_cost || 0})\n`;
+      }
+    }
+  }
+
+  // Shop-wide stats
+  if (results.shopStats?.totalRepairs > 0) {
+    const stats = results.shopStats;
+    response += `
+📊 SHOP EXPERIENCE
+   ${stats.totalRepairs} similar repairs on ${vehicle.make} ${vehicle.model}`;
+    if (stats.successRate !== null) response += ` — ${stats.successRate}% success rate`;
+    response += `\n`;
+    if (stats.avgLaborHours) response += `   Avg labor: ${stats.avgLaborHours}h | Avg cost: $${stats.avgCost}\n`;
+    if (stats.comebacks > 0) response += `   ⚠️ ${stats.comebacks} comeback(s) recorded\n`;
+  }
+
+  // Canned jobs (maintenance requests)
+  if (results.cannedJobs?.length > 0) {
+    response += `
+📋 CANNED JOBS AVAILABLE
+`;
+    for (const job of results.cannedJobs.slice(0, 3)) {
+      response += `   • ${job.name}: ~${job.avg_labor_hours}h labor, ~$${job.avg_total_cost} total (${job.frequency}x performed)\n`;
+    }
+  }
+
+  // Repair Plan details (when available)
+  const rp = diagnosis?.ai?.repair_plan;
+  if (rp) {
+    // Labor source
+    if (rp.labor) {
+      const sourceLabel = rp.labor.source === "ari" ? "ARI Labor Guide" :
+                          rp.labor.source === "labor_cache" ? "Cached Labor Data" :
+                          rp.labor.source === "prodemand" ? "ProDemand" :
+                          rp.labor.source === "claude" ? "AI Estimated" :
+                          rp.labor.source || "Estimated";
+      response += `
+   LABOR: ${rp.labor.hours}h (${sourceLabel}) — ${rp.labor.category || "standard"}
+`;
+      if (rp.labor.requires_lift) response += `   Requires lift: Yes\n`;
+      if (rp.labor.special_notes) response += `   Note: ${rp.labor.special_notes}\n`;
+    }
+
+    // Verification steps
+    if (rp.verification) {
+      response += `
+   VERIFICATION:
+`;
+      if (rp.verification.before_repair) response += `   Before: ${rp.verification.before_repair}\n`;
+      if (rp.verification.after_repair) response += `   After:  ${rp.verification.after_repair}\n`;
+    }
+
+    // Tools needed
+    if (rp.tools?.length > 0) {
+      response += `
+   TOOLS NEEDED:
+`;
+      for (const tool of rp.tools) {
+        response += `   - ${tool}\n`;
+      }
+    }
+
+    // Torque specs from repair plan
+    if (rp.torque_specs && Object.keys(rp.torque_specs).length > 0) {
+      response += `
+   TORQUE SPECS (from repair plan):
+`;
+      for (const [component, spec] of Object.entries(rp.torque_specs)) {
+        response += `   - ${component}: ${spec}\n`;
+      }
+    }
+  }
+
+  // Parts with best value highlighted
+  if (parts?.bestValueBundle?.parts?.length > 0) {
+    response += `
+🛒 PARTS — BEST VALUE (Ready to Order)
+`;
+    for (const item of parts.bestValueBundle.parts) {
+      if (item.selected) {
+        const p = item.selected;
+        response += `   ✓ ${p.brand} ${p.description}${p.position ? ` (${p.position})` : ""}
+     Part #: ${p.partNumber} | $${p.totalCost.toFixed(2)} | ${p.availability}
+     Supplier: ${p.supplier}
+`;
+      } else {
+        response += `   ✗ ${item.requested.partType} — NOT FOUND
+`;
+      }
+    }
+    response += `
+   PARTS TOTAL: $${parts.bestValueBundle.totalCost.toFixed(2)}
+   ${parts.bestValueBundle.allInStock ? "✓ All in stock" : "⚠️ Some parts need to be ordered"}
+`;
+
+    // OEM alternatives
+    if (parts.oemAlternatives?.length > 0) {
+      response += `
+   OEM ALTERNATIVES:
+`;
+      for (const alt of parts.oemAlternatives.slice(0, 3)) {
+        response += `   • ${alt.brand} ${alt.partNumber}: $${alt.totalCost.toFixed(2)}
+`;
+      }
+    }
+  }
+
+  // Estimate totals
+  if (estimate?.total) {
+    response += `
+💰 ESTIMATE TOTAL
+   Labor:        $${estimate.totalLabor}
+   Parts:        $${estimate.totalParts}
+   Shop Supplies: $${estimate.shopSupplies}
+   Tax:          $${estimate.tax}
+   ─────────────────
+   TOTAL:        $${estimate.total}
+`;
+    if (estimate.estimateId) {
+      response += `
+   AutoLeap Estimate: ${estimate.estimateId} (Ready to send to customer)
+`;
+    }
+  }
+
+  // Mechanic reference info
+  if (mechanicSpecs) {
+    response += `
+🔧 MECHANIC REFERENCE
+`;
+    // Sensor locations
+    if (mechanicSpecs.sensorLocations) {
+      response += `
+   SENSOR LOCATIONS:
+   ${mechanicSpecs.sensorLocations.bankIdentification || ""}
+`;
+      const sensors = mechanicSpecs.sensorLocations.sensors || {};
+      for (const [key, sensor] of Object.entries(sensors)) {
+        if (typeof sensor === "object" && sensor.name) {
+          response += `   • ${sensor.name}: ${sensor.location}
+`;
+        }
+      }
+    }
+
+    // Fluids
+    if (mechanicSpecs.fluids) {
+      const oil = mechanicSpecs.fluids.engineOil || {};
+      const coolant = mechanicSpecs.fluids.coolant || {};
+      response += `
+   FLUID SPECS:
+   • Oil: ${oil.capacityWithFilter || "?"} — ${oil.weight || "?"}
+   • Coolant: ${coolant.capacity || "?"} — ${coolant.type || "?"}
+`;
+    }
+
+    // Torque specs
+    if (mechanicSpecs.torqueSpecs) {
+      response += `
+   TORQUE SPECS:
+`;
+      const t = mechanicSpecs.torqueSpecs;
+      if (t.oilDrainPlug?.value) response += `   • Oil Drain Plug: ${t.oilDrainPlug.value}\n`;
+      if (t.o2Sensor?.value) response += `   • O2 Sensor: ${t.o2Sensor.value}\n`;
+      if (t.wheelLugNuts?.value) response += `   • Lug Nuts: ${t.wheelLugNuts.value}\n`;
+    }
+
+    // Special tools
+    if (mechanicSpecs.specialTools?.length > 0) {
+      response += `
+   SPECIAL TOOLS:
+`;
+      for (const tool of mechanicSpecs.specialTools.slice(0, 5)) {
+        response += `   • ${tool}\n`;
+      }
+    }
+  }
+
+  // Ordering status
+  if (results.cartStatus) {
+    if (results.cartStatus.ready_to_order) {
+      response += `
+📦 ORDERING: ${results.cartStatus.item_count} parts held in PartsTech cart ($${results.cartStatus.total})
+   Reply "order those parts" to place the order.
+`;
+    } else if (results.cartStatus.error) {
+      response += `
+📦 ORDERING: Browser ordering unavailable — ${results.cartStatus.error}
+   Parts can still be ordered manually from the estimate above.
+`;
+    }
+  } else if (partstechOrder) {
+    response += `
+📦 ORDERING: PartsTech browser ordering available — parts can be added to cart on request.
+`;
+  }
+
+  // PDF download
+  if (pdfPath) {
+    response += `
+📄 ESTIMATE PDF: ${pdfPath}
+   (Ready to download or email to customer)
+`;
+  }
+
+  response += `
+═══════════════════════════════════════════════════════════════
+`;
+
+  return response;
+}
+
+/**
+ * Handle "order those parts" request from SA.
+ *
+ * Takes the parts from the last estimate's bestValueBundle and
+ * places an order via PartsTech browser automation.
+ *
+ * @param {object} lastEstimateResults - Results from the last buildEstimate() call
+ * @returns {object} { success, order, cart_summary, error }
+ */
+async function handleOrderRequest(lastEstimateResults) {
+  if (!partstechOrder) {
+    return { success: false, error: "PartsTech browser ordering not available (set PARTSTECH_URL env var)" };
+  }
+
+  if (!lastEstimateResults?.parts?.bestValueBundle?.parts) {
+    return { success: false, error: "No parts from a previous estimate to order" };
+  }
+
+  const vehicle = lastEstimateResults.vehicle;
+  const bundleParts = lastEstimateResults.parts.bestValueBundle.parts;
+
+  // Filter to parts that were actually found (have a selected part)
+  const partsToOrder = bundleParts
+    .filter((item) => item.selected)
+    .map((item) => ({
+      partType: item.requested.partType,
+      position: item.requested.position || null,
+      partNumber: item.selected.partNumber,
+      brand: item.selected.brand,
+      supplier: item.selected.supplier,
+      qty: item.requested.qty || 1,
+    }));
+
+  if (partsToOrder.length === 0) {
+    return { success: false, error: "No orderable parts in the estimate" };
+  }
+
+  console.log(`[orchestrator] Ordering ${partsToOrder.length} parts via PartsTech browser...`);
+
+  // Add to cart
+  const cartResult = await partstechOrder.addMultipleToCart({
+    vin: vehicle.vin,
+    year: vehicle.year,
+    make: vehicle.make,
+    model: vehicle.model,
+    parts: partsToOrder,
+  });
+
+  if (cartResult.error) {
+    return { success: false, error: cartResult.error };
+  }
+
+  if (cartResult.failed?.length > 0) {
+    console.log(`[orchestrator] ${cartResult.failed.length} parts could not be added to cart`);
+  }
+
+  // Place the order
+  const orderResult = await partstechOrder.placeOrder();
+
+  // Track order event
+  const orderShopId = lastEstimateResults.shopId || process.env.SHOP_ID || null;
+  if (orderResult.success) {
+    trackEvent(orderShopId, "order_placed", {
+      vehicle: { year: vehicle.year, make: vehicle.make, model: vehicle.model },
+      partsOrdered: cartResult.added?.length || 0,
+      total: cartResult.cart_summary?.total,
+    }).catch(() => {});
+  }
+
+  return {
+    success: orderResult.success,
+    order: orderResult,
+    added: cartResult.added,
+    failed: cartResult.failed,
+    cart_summary: cartResult.cart_summary,
+    error: orderResult.error || null,
+  };
+}
+
+/**
+ * Main pipeline: Build complete estimate
+ */
+async function buildEstimate(params) {
+  const shopId = params.shopId || process.env.SHOP_ID || null;
+  const shopConfig = await getShopConfig(shopId);
+  const startTime = Date.now();
+  const results = {
+    shopId,
+    vehicle: null,
+    diagnosis: null,
+    parts: null,
+    estimate: null,
+    mechanicSpecs: null,
+    pdfPath: null,
+    screenshots: [],
+  };
+
+  console.log("═══════════════════════════════════════════════════════════════");
+  console.log("  ESTIMATE BUILDER — Starting Full Pipeline");
+  console.log("═══════════════════════════════════════════════════════════════");
+
+  // ─── Step 1: Vehicle Identification (Exact) ───
+  console.log("\n[Step 1] Decoding vehicle (exact specs for parts accuracy)...");
+  let vehicle;
+  if (params.vin && isValidVin(params.vin)) {
+    vehicle = await decodeVin(params.vin);
+  } else {
+    vehicle = {
+      vin: params.vin || null,
+      year: params.year,
+      make: params.make,
+      model: params.model,
+      trim: params.trim || null,
+      engine: {
+        displacement: params.engine,
+        cylinders: params.cylinders,
+        fuelType: params.fuelType,
+      },
+      transmission: params.transmission,
+      driveType: params.driveType,
+    };
+  }
+  vehicle.mileage = params.mileage;
+  results.vehicle = vehicle;
+
+  console.log(`  → ${vehicle.year} ${vehicle.make} ${vehicle.model} ${vehicle.trim || ""}`);
+  console.log(`  → Engine: ${vehicle.engine?.displacement || "?"}`);
+  console.log(`  → VIN: ${vehicle.vin || "Not provided"}`);
+
+  // ─── Step 2: Classify & Route ───
+  const requestInfo = classifyRequest(params.query);
+  console.log(`\n[Step 2] Request type: ${requestInfo.type}`);
+  if (requestInfo.dtcCodes.length > 0) {
+    console.log(`  → DTC codes: ${requestInfo.dtcCodes.join(", ")}`);
+  }
+
+  // ─── Step 2.5: AI Diagnosis ───
+  if (requestInfo.type === "diagnostic") {
+    console.log("\n[Step 2.5] Running AI diagnostic engine...");
+    try {
+      const aiDiagnosis = await diagnose({
+        vin: vehicle.vin,
+        year: vehicle.year,
+        make: vehicle.make,
+        model: vehicle.model,
+        engine: vehicle.engine?.displacement,
+        dtcCodes: requestInfo.dtcCodes,
+        symptoms: params.query,
+        mileage: vehicle.mileage,
+      });
+
+      if (!aiDiagnosis.error) {
+        results.diagnosis = {
+          ai: aiDiagnosis,
+          summary: formatDiagnosisSummary(aiDiagnosis),
+        };
+        console.log(`  → Top cause: ${aiDiagnosis.diagnoses?.[0]?.cause || "Unknown"} (${Math.round((aiDiagnosis.diagnoses?.[0]?.confidence || 0) * 100)}%)`);
+        if (aiDiagnosis.low_confidence_warning) {
+          console.log("  → ⚠️ Low confidence — recommend further diagnosis");
+        }
+
+        // Track diagnosis event
+        trackEvent(shopId, "diagnosis_run", {
+          vehicle: { year: vehicle.year, make: vehicle.make, model: vehicle.model },
+          topCause: aiDiagnosis.diagnoses?.[0]?.cause,
+          confidence: aiDiagnosis.diagnoses?.[0]?.confidence,
+          path: aiDiagnosis.diagnostic_path,
+          query: params.query,
+        }).catch(() => {});
+      } else {
+        console.error(`  → AI diagnosis error: ${aiDiagnosis.error}`);
+      }
+    } catch (err) {
+      console.error(`  → AI diagnosis failed: ${err.message}`);
+    }
+  }
+
+  // ─── Step 2.7: Vehicle History & Shop Experience ───
+  console.log("\n[Step 2.7] Checking repair history...");
+  try {
+    // Check this specific vehicle's history
+    const historyResult = await findRelatedPriorRepairs(
+      { vin: vehicle.vin, year: vehicle.year, make: vehicle.make, model: vehicle.model },
+      { dtcCodes: requestInfo.dtcCodes, diagnoses: results.diagnosis?.ai?.diagnoses || [] }
+    );
+
+    results.vehicleHistory = historyResult;
+
+    if (historyResult.insight) {
+      console.log(`  → ${historyResult.insight}`);
+    }
+    if (historyResult.vehicleVisits > 0) {
+      console.log(`  → ${historyResult.vehicleVisits} prior visits, $${historyResult.totalSpent || 0} total spent`);
+    }
+
+    // Apply confidence adjustment from history
+    if (historyResult.confidenceAdjustment !== 0 && results.diagnosis?.ai?.diagnoses?.length > 0) {
+      const adj = historyResult.confidenceAdjustment;
+      results.diagnosis.ai.diagnoses[0].confidence = Math.min(
+        0.95,
+        Math.max(0.05, results.diagnosis.ai.diagnoses[0].confidence + adj)
+      );
+      results.diagnosis.ai.diagnoses[0].history_adjusted = true;
+      console.log(`  → Confidence adjusted by ${adj > 0 ? "+" : ""}${(adj * 100).toFixed(0)}%`);
+    }
+
+    // Get shop-wide stats for this repair type
+    if (results.diagnosis?.ai?.diagnoses?.[0]?.cause) {
+      const shopStats = await getShopRepairStats({
+        make: vehicle.make,
+        model: vehicle.model,
+        cause: results.diagnosis.ai.diagnoses[0].cause,
+      });
+
+      if (shopStats.totalRepairs > 0) {
+        results.shopStats = shopStats;
+        console.log(`  → Shop experience: ${shopStats.totalRepairs} similar repairs, ${shopStats.successRate || "?"}% success rate`);
+      }
+    }
+
+    // For maintenance requests, check for applicable canned jobs
+    if (requestInfo.type === "maintenance") {
+      const cannedJobs = await getCannedJobs({
+        make: vehicle.make,
+        model: vehicle.model,
+        year: vehicle.year,
+      });
+
+      if (cannedJobs.length > 0) {
+        results.cannedJobs = cannedJobs;
+        console.log(`  → ${cannedJobs.length} canned jobs available`);
+      }
+    }
+  } catch (err) {
+    console.error(`  → History check failed (non-fatal): ${err.message}`);
+  }
+
+  // ─── Step 3: Parallel Research ───
+  console.log("\n[Step 3] Researching across databases...");
+
+  const researchPromises = [];
+  if (requestInfo.type === "diagnostic") {
+    researchPromises.push(
+      searchAllData({
+        vin: vehicle.vin,
+        year: vehicle.year,
+        make: vehicle.make,
+        model: vehicle.model,
+        engine: vehicle.engine?.displacement,
+        query: params.query,
+      }).catch((e) => ({ error: e.message })),
+
+      searchDirectHit({
+        year: vehicle.year,
+        make: vehicle.make,
+        model: vehicle.model,
+        engine: vehicle.engine?.displacement,
+        query: params.query,
+      }).catch((e) => ({ error: e.message })),
+
+      searchProDemand({
+        vin: vehicle.vin,
+        year: vehicle.year,
+        make: vehicle.make,
+        model: vehicle.model,
+        engine: vehicle.engine?.displacement,
+        query: params.query,
+      }).catch((e) => ({ error: e.message }))
+    );
+  } else {
+    // Maintenance — just labor times
+    researchPromises.push(
+      searchProDemand({
+        vin: vehicle.vin,
+        year: vehicle.year,
+        make: vehicle.make,
+        model: vehicle.model,
+        engine: vehicle.engine?.displacement,
+        query: params.query,
+      }).catch((e) => ({ error: e.message }))
+    );
+  }
+
+  const researchResults = await Promise.all(researchPromises);
+
+  // Map results to platform keys based on request type
+  let alldata, identifix, prodemand;
+  if (requestInfo.type === "diagnostic") {
+    alldata = researchResults[0];
+    identifix = researchResults[1];
+    prodemand = researchResults[2];
+  } else {
+    // Maintenance — only ProDemand was queried
+    alldata = null;
+    identifix = null;
+    prodemand = researchResults[0];
+  }
+
+  results.diagnosis = {
+    ...results.diagnosis,
+    alldata,
+    identifix,
+    prodemand,
+  };
+
+  // Collect AllData screenshots for later use
+  if (alldata?.screenshots?.length > 0) {
+    results.screenshots = [...(results.screenshots || []), ...alldata.screenshots];
+  }
+
+  // Use Identifix top fix to boost AI diagnosis confidence when they agree
+  if (identifix?.topFix && results.diagnosis?.ai?.diagnoses?.length > 0) {
+    const topFixDesc = identifix.topFix.description?.toLowerCase() || "";
+    for (const diag of results.diagnosis.ai.diagnoses) {
+      const causeWords = diag.cause?.toLowerCase().split(/\s+/) || [];
+      const overlap = causeWords.filter((w) => w.length > 3 && topFixDesc.includes(w)).length;
+      if (overlap >= 2 && identifix.topFix.successRate >= 50) {
+        diag.identifix_corroborated = true;
+        diag.identifix_success_rate = identifix.topFix.successRate;
+        // Small confidence bump when Identifix agrees
+        diag.confidence = Math.min(0.95, diag.confidence + 0.05);
+      }
+    }
+  }
+
+  // Use ProDemand labor times as fallback labor source
+  if (prodemand?.laborTimes?.length > 0 && !prodemand.error) {
+    results.prodemandLabor = prodemand.laborTimes;
+  }
+
+  console.log(`  → Research complete`);
+  if (alldata && !alldata.error) console.log(`    AllData: ${alldata.procedures?.length || 0} procedures, ${Object.keys(alldata.torqueSpecs || {}).length} torque specs`);
+  if (identifix && !identifix.error) console.log(`    Identifix: ${identifix.fixCount || 0} fixes, top fix ${identifix.topFix?.successRate || "?"}% success`);
+  if (prodemand && !prodemand.error) console.log(`    ProDemand: ${prodemand.realFixes?.length || 0} Real Fixes, ${prodemand.laborTimes?.length || 0} labor times`);
+
+  // ─── Step 4: Get Vehicle Specs (Mechanic Reference) ───
+  console.log("\n[Step 4] Getting mechanic reference specs...");
+
+  const repairType = params.query.toLowerCase().includes("o2") ? "o2-sensor" :
+                     params.query.toLowerCase().includes("oil") ? "oil-change" :
+                     params.query.toLowerCase().includes("brake") ? "brakes" :
+                     params.query.toLowerCase().includes("spark") ? "spark-plugs" : null;
+
+  results.mechanicSpecs = await getVehicleSpecs({
+    vehicle,
+    repairType,
+  });
+
+  // Merge AllData torque specs and special tools into mechanic specs
+  if (alldata && !alldata.error && results.mechanicSpecs) {
+    if (alldata.torqueSpecs && Object.keys(alldata.torqueSpecs).length > 0) {
+      results.mechanicSpecs.torqueSpecs = {
+        ...results.mechanicSpecs.torqueSpecs,
+        ...Object.fromEntries(
+          Object.entries(alldata.torqueSpecs).map(([k, v]) => [k, { value: v, source: "alldata" }])
+        ),
+      };
+    }
+    if (alldata.specialTools?.length > 0) {
+      const existing = new Set((results.mechanicSpecs.specialTools || []).map((t) => t.toLowerCase()));
+      const newTools = alldata.specialTools.filter((t) => !existing.has(t.toLowerCase()));
+      results.mechanicSpecs.specialTools = [
+        ...(results.mechanicSpecs.specialTools || []),
+        ...newTools,
+      ];
+    }
+  }
+
+  console.log(`  → Sensor locations: ${results.mechanicSpecs.sensorLocations?.totalO2Sensors || 0} O2 sensors`);
+  console.log(`  → Fluids: Oil ${results.mechanicSpecs.fluids?.engineOil?.weight || "?"}`);
+
+  // ─── Step 5: Parts Search — Best Value ───
+  console.log("\n[Step 5] Searching parts with vendor comparison...");
+
+  const partsNeeded = extractPartsNeeded(params.query, results.diagnosis);
+  console.log(`  → Parts needed: ${partsNeeded.map((p) => p.partType).join(", ") || "None identified"}`);
+
+  if (partsNeeded.length > 0 && vehicle.vin) {
+    results.parts = await searchMultipleParts(vehicle.vin, partsNeeded);
+    console.log(`  → Best value bundle: $${results.parts.bestValueBundle?.totalCost?.toFixed(2) || "N/A"}`);
+    console.log(`  → Suppliers: ${results.parts.bestValueBundle?.suppliers?.join(", ") || "N/A"}`);
+
+    // Track parts search event
+    trackEvent(shopId, "parts_searched", {
+      vehicle: { year: vehicle.year, make: vehicle.make, model: vehicle.model },
+      partsCount: partsNeeded.length,
+      totalCost: results.parts.bestValueBundle?.totalCost,
+      platformsUsed: ["partstech"],
+    }).catch(() => {});
+
+    // Collect OEM alternatives
+    results.oemAlternatives = [];
+    for (const res of results.parts.individualResults || []) {
+      if (res.bestValue?.oem) {
+        results.oemAlternatives.push(res.bestValue.oem);
+      }
+    }
+    results.parts.oemAlternatives = results.oemAlternatives;
+  } else {
+    console.log(`  → Skipped (no VIN or no parts identified)`);
+  }
+
+  // ─── Step 5.5: Pre-stage Cart (Optional) ───
+  if (partstechOrder && results.parts?.bestValueBundle?.parts?.length > 0) {
+    console.log("\n[Step 5.5] Pre-staging parts in PartsTech cart...");
+    try {
+      const nonConditionalParts = results.parts.bestValueBundle.parts
+        .filter((item) => item.selected && !item.requested?.conditional)
+        .map((item) => ({
+          partType: item.requested.partType,
+          position: item.requested.position || null,
+          partNumber: item.selected.partNumber,
+          brand: item.selected.brand,
+          supplier: item.selected.supplier,
+          qty: item.requested.qty || 1,
+        }));
+
+      if (nonConditionalParts.length > 0) {
+        const cartResult = await partstechOrder.addMultipleToCart({
+          vin: vehicle.vin,
+          year: vehicle.year,
+          make: vehicle.make,
+          model: vehicle.model,
+          parts: nonConditionalParts,
+        });
+
+        results.cartStatus = cartResult.cart_summary || { error: cartResult.error };
+        console.log(`  → Cart: ${cartResult.added?.length || 0} added, ${cartResult.failed?.length || 0} failed`);
+      }
+    } catch (err) {
+      console.error(`  → Cart pre-staging failed (non-fatal): ${err.message}`);
+      results.cartStatus = { error: err.message };
+    }
+  }
+
+  // ─── Step 6: Build Estimate in AutoLeap ───
+  if (params.customer) {
+    console.log("\n[Step 6] Creating estimate in AutoLeap...");
+
+    try {
+      const customer = await findOrCreateCustomer(params.customer);
+      const autoLeapVehicle = await findOrCreateVehicle({
+        customerId: customer.id,
+        vin: vehicle.vin,
+        year: vehicle.year,
+        make: vehicle.make,
+        model: vehicle.model,
+        mileage: vehicle.mileage || 0,
+      });
+
+      // Build line items from parts
+      const lineItems = [];
+
+      // Get labor hours: repair plan → ProDemand → params → default
+      const repairPlan = results.diagnosis?.ai?.repair_plan;
+      let laborHours = repairPlan?.labor?.hours || null;
+      let laborSource = repairPlan?.labor?.source || null;
+
+      // Fallback to ProDemand labor times
+      if (!laborHours && results.prodemandLabor?.length > 0) {
+        laborHours = results.prodemandLabor[0].hours;
+        laborSource = "prodemand";
+      }
+
+      laborHours = laborHours || params.laborHours || 1.0;
+      laborSource = laborSource || "estimated";
+
+      // Add labor line
+      lineItems.push({
+        description: params.query,
+        laborHours,
+        partsCost: 0,
+      });
+      console.log(`  → Labor: ${laborHours}h (source: ${laborSource})`);
+
+      // Add parts from best value bundle
+      if (results.parts?.bestValueBundle?.parts) {
+        for (const item of results.parts.bestValueBundle.parts) {
+          if (item.selected) {
+            lineItems.push({
+              description: `${item.selected.brand} ${item.selected.description}`,
+              laborHours: 0,
+              partsCost: item.selected.totalCost,
+              partNumber: item.selected.partNumber,
+            });
+          }
+        }
+      }
+
+      results.estimate = await createEstimate({
+        customerId: customer.id,
+        vehicleId: autoLeapVehicle.id,
+        lineItems,
+        shopConfig,
+      });
+
+      console.log(`  → Estimate created: ${results.estimate.estimateId}`);
+      console.log(`  → Total: $${results.estimate.total}`);
+
+      // Track estimate creation event
+      trackEvent(shopId, "estimate_created", {
+        vehicle: { year: vehicle.year, make: vehicle.make, model: vehicle.model },
+        total: results.estimate.total,
+        estimateId: results.estimate.estimateId,
+        partsCount: results.parts?.bestValueBundle?.parts?.length || 0,
+        platformsUsed: [
+          alldata && !alldata.error ? "alldata" : null,
+          identifix && !identifix.error ? "identifix" : null,
+          prodemand && !prodemand.error ? "prodemand" : null,
+        ].filter(Boolean),
+      }).catch(() => {});
+    } catch (err) {
+      console.error(`  → AutoLeap error: ${err.message}`);
+      results.estimate = { error: err.message };
+    }
+  } else {
+    console.log("\n[Step 6] Skipped AutoLeap (provide customer info to create)");
+  }
+
+  // ─── Step 7: Generate PDF Estimate ───
+  console.log("\n[Step 7] Generating PDF estimate...");
+
+  try {
+    // Build labor lines for PDF — use repair plan hours, then ProDemand, then params
+    const pdfRepairPlan = results.diagnosis?.ai?.repair_plan;
+    const pdfLaborHours = pdfRepairPlan?.labor?.hours ||
+      (results.prodemandLabor?.length > 0 ? results.prodemandLabor[0].hours : null) ||
+      params.laborHours || 1.0;
+    const laborLines = [{
+      description: params.query,
+      hours: pdfLaborHours,
+      rate: shopConfig.shop.laborRatePerHour,
+      total: pdfLaborHours * shopConfig.shop.laborRatePerHour,
+    }];
+
+    // Build parts lines for PDF
+    const partLines = [];
+    if (results.parts?.bestValueBundle?.parts) {
+      for (const item of results.parts.bestValueBundle.parts) {
+        if (item.selected) {
+          const p = item.selected;
+          partLines.push({
+            description: p.description,
+            partNumber: p.partNumber,
+            qty: 1,
+            unitPrice: p.totalCost,
+            total: p.totalCost,
+            supplier: p.supplier,
+          });
+        }
+      }
+    }
+
+    // Calculate totals
+    const laborTotal = laborLines.reduce((sum, l) => sum + l.total, 0);
+    const partsTotal = partLines.reduce((sum, p) => sum + p.total, 0) * (1 + shopConfig.markup.partsMarkupPercent / 100);
+    const suppliesTotal = Math.min(
+      (laborTotal + partsTotal) * (shopConfig.shop.shopSuppliesPercent / 100),
+      shopConfig.shop.shopSuppliesCap
+    );
+    const subtotal = laborTotal + partsTotal + suppliesTotal;
+    const taxTotal = subtotal * shopConfig.shop.taxRate;
+    const grandTotal = subtotal + taxTotal;
+
+    results.pdfPath = await generateEstimatePDF({
+      shop: shopConfig.shop,
+      customer: params.customer,
+      vehicle: {
+        year: vehicle.year,
+        make: vehicle.make,
+        model: vehicle.model,
+        trim: vehicle.trim,
+        engine: vehicle.engine?.displacement,
+        vin: vehicle.vin,
+        mileage: vehicle.mileage,
+      },
+      diagnosis: results.diagnosis?.summary,
+      laborLines,
+      partLines,
+      partsOptions: results.parts?.bestValueBundle?.parts?.[0] ? {
+        aftermarket: results.parts.bestValueBundle.parts[0].selected,
+        oem: results.oemAlternatives?.[0],
+      } : null,
+      totals: {
+        labor: laborTotal,
+        parts: partsTotal,
+        supplies: suppliesTotal,
+        tax: taxTotal,
+        total: grandTotal,
+      },
+      mechanicSpecs: results.mechanicSpecs,
+      outputPath: require("path").join(require("os").tmpdir(), `estimate-${vehicle.year}-${vehicle.make}-${vehicle.model}-${Date.now()}.pdf`),
+    });
+
+    console.log(`  → PDF: ${results.pdfPath}`);
+  } catch (err) {
+    console.error(`  → PDF generation error: ${err.message}`);
+  }
+
+  // ─── Step 8: Capture Procedure Screenshots ───
+  if (requestInfo.type === "diagnostic") {
+    console.log("\n[Step 8] Capturing procedure screenshots...");
+    try {
+      const newScreenshots = await captureScreenshots();
+      results.screenshots = [...(results.screenshots || []), ...newScreenshots];
+      console.log(`  → ${newScreenshots.length} new screenshots (${results.screenshots.length} total)`);
+    } catch {
+      // Keep any screenshots already collected from research
+    }
+  }
+
+  // ─── Done ───
+  const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
+  console.log(`\n═══════════════════════════════════════════════════════════════`);
+  console.log(`  Pipeline complete in ${elapsed}s`);
+  console.log(`═══════════════════════════════════════════════════════════════\n`);
+
+  // Format response for service advisor
+  results.formattedResponse = formatServiceAdvisorResponse(results);
+
+  return results;
+}
+
+module.exports = {
+  buildEstimate,
+  handleOrderRequest,
+  classifyRequest,
+  extractPartsNeeded,
+  formatDiagnosisSummary,
+  formatServiceAdvisorResponse,
+};

@@ -1,0 +1,36 @@
+{
+  "shop": {
+    "name": "Your Shop Name",
+    "laborRatePerHour": 135.00,
+    "diagnosticFee": 89.99,
+    "shopSuppliesPercent": 5,
+    "shopSuppliesCap": 35.00,
+    "taxRate": 0.0775
+  },
+  "markup": {
+    "partsMarkupPercent": 40,
+    "fluidsMarkupPercent": 30,
+    "subletMarkupPercent": 20
+  },
+  "preferences": {
+    "defaultPartsType": "aftermarket",
+    "preferredSuppliers": [
+      "AutoZone Commercial",
+      "O'Reilly Auto Parts",
+      "NAPA"
+    ],
+    "showOEMandAftermarket": true,
+    "includeFluidCapacities": true,
+    "includeTorqueSpecs": true,
+    "captureProductScreenshots": true
+  },
+  "estimateDefaults": {
+    "warrantyLabor": "12 months / 12,000 miles",
+    "warrantyParts": "Per manufacturer warranty",
+    "paymentTerms": "Due upon completion",
+    "disclaimers": [
+      "Estimate based on initial diagnosis. Additional repairs may be needed upon teardown.",
+      "Prices subject to change based on parts availability."
+    ]
+  }
+}
