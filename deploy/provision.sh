@@ -42,9 +42,9 @@ if [ ! -f "$ENV_FILE" ]; then
 fi
 echo "  .env: exists"
 
-# Check proxy URL in .env
-if ! grep -q "RESIDENTIAL_PROXY_URL=" "$ENV_FILE"; then
-  echo "  WARNING: RESIDENTIAL_PROXY_URL not in .env — platforms may be blocked"
+# Check proxy config in .env
+if ! grep -q "PROXY_HOST=" "$ENV_FILE"; then
+  echo "  WARNING: PROXY_HOST not in .env — platforms may be blocked"
 else
   echo "  proxy: configured"
 fi
@@ -53,15 +53,20 @@ fi
 echo "[1/8] Checking SSH key..."
 SSH_KEY_FINGERPRINT=""
 if [ -f "$SSH_KEY_PATH" ]; then
-  KEY_NAME="sam-deploy-$(hostname)"
-  EXISTING=$(doctl compute ssh-key list --format FingerPrint,Name --no-header | grep "$KEY_NAME" | awk '{print $1}' || true)
-  if [ -n "$EXISTING" ]; then
-    SSH_KEY_FINGERPRINT="$EXISTING"
-    echo "  SSH key exists: $SSH_KEY_FINGERPRINT"
+  # Get first available SSH key from account (simpler approach)
+  SSH_KEY_FINGERPRINT=$(doctl compute ssh-key list --format FingerPrint --no-header | head -1)
+  if [ -n "$SSH_KEY_FINGERPRINT" ]; then
+    echo "  Using SSH key: $SSH_KEY_FINGERPRINT"
   else
-    RESULT=$(doctl compute ssh-key create "$KEY_NAME" --public-key "$(cat $SSH_KEY_PATH)" --format FingerPrint --no-header 2>&1)
-    SSH_KEY_FINGERPRINT="$RESULT"
-    echo "  SSH key uploaded: $SSH_KEY_FINGERPRINT"
+    # Try to upload if no keys exist
+    KEY_NAME="sam-deploy-$(hostname)"
+    RESULT=$(doctl compute ssh-key create "$KEY_NAME" --public-key "$(cat $SSH_KEY_PATH)" --format FingerPrint --no-header 2>&1 || true)
+    if [ -n "$RESULT" ] && [[ ! "$RESULT" =~ "Error" ]]; then
+      SSH_KEY_FINGERPRINT="$RESULT"
+      echo "  SSH key uploaded: $SSH_KEY_FINGERPRINT"
+    else
+      echo "  WARNING: Could not upload SSH key"
+    fi
   fi
 else
   echo "  WARNING: No SSH key at $SSH_KEY_PATH"

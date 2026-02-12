@@ -13,8 +13,9 @@ echo "════════════════════════�
 
 # --- 1. System Updates ---
 echo "[1/8] Updating system packages..."
+export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq
-apt-get upgrade -y -qq
+apt-get -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confold" upgrade -y -qq
 apt-get install -y -qq curl git build-essential unzip jq gnupg ca-certificates
 
 # --- 2. Node.js 22 LTS ---
