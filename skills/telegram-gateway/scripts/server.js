@@ -65,12 +65,16 @@ async function sendMessage(chatId, text, options = {}) {
   // Telegram has 4096 char limit per message
   const chunks = splitMessage(text, 4000);
   for (const chunk of chunks) {
-    await telegramAPI("sendMessage", {
+    console.log(`${LOG} Sending message to ${chatId}: "${chunk.substring(0, 50)}..."`);
+    const result = await telegramAPI("sendMessage", {
       chat_id: chatId,
       text: chunk,
       parse_mode: "Markdown",
       ...options,
     });
+    if (!result.ok) {
+      console.error(`${LOG} Send failed:`, result.description);
+    }
   }
 }
 
