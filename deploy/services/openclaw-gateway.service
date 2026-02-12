@@ -1,0 +1,14 @@
+[Unit]
+Description=OpenClaw Gateway
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/openclaw gateway
+Restart=always
+RestartSec=5
+Environment=HOME=/root
+WorkingDirectory=/root/ai-auto-advisor
+
+[Install]
+WantedBy=multi-user.target

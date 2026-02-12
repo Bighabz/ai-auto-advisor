@@ -1,0 +1,16 @@
+[Unit]
+Description=OpenClaw Browser (Chrome + Residential Proxy)
+After=openclaw-gateway.service
+Requires=openclaw-gateway.service
+
+[Service]
+Type=simple
+EnvironmentFile=/root/ai-auto-advisor/config/.env
+# Chrome with proxy - if RESIDENTIAL_PROXY_URL is empty, runs without proxy
+ExecStart=/usr/bin/google-chrome-stable --headless --no-sandbox --disable-gpu --disable-dev-shm-usage --remote-debugging-port=18800 --user-data-dir=/root/.openclaw/browser/openclaw/user-data --no-first-run --proxy-server=${RESIDENTIAL_PROXY_URL}
+Restart=always
+RestartSec=5
+Environment=HOME=/root
+
+[Install]
+WantedBy=multi-user.target

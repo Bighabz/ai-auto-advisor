@@ -1,0 +1,16 @@
+[Unit]
+Description=SAM Telegram Bot
+After=openclaw-browser.service
+Requires=openclaw-browser.service
+
+[Service]
+Type=simple
+WorkingDirectory=/root/ai-auto-advisor
+ExecStart=/usr/bin/node skills/telegram-gateway/scripts/server.js
+Restart=always
+RestartSec=10
+Environment=HOME=/root
+EnvironmentFile=/root/ai-auto-advisor/config/.env
+
+[Install]
+WantedBy=multi-user.target
