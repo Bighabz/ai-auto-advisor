@@ -156,9 +156,11 @@ echo "  .env deployed"
 # --- Start services and test ---
 echo "[8/8] Starting services and testing..."
 ssh -o StrictHostKeyChecking=no root@"$DROPLET_IP" bash << 'EOF'
-# Start services
+# Start services in order
 systemctl start openclaw-gateway
-sleep 3
+sleep 2
+systemctl start sam-proxy
+sleep 2
 systemctl start openclaw-browser
 sleep 3
 systemctl start sam-telegram
@@ -167,15 +169,17 @@ echo "  Services started"
 
 # Check status
 systemctl is-active --quiet openclaw-gateway && echo "  ✓ openclaw-gateway running" || echo "  ✗ openclaw-gateway failed"
+systemctl is-active --quiet sam-proxy && echo "  ✓ sam-proxy running" || echo "  ✗ sam-proxy failed"
 systemctl is-active --quiet openclaw-browser && echo "  ✓ openclaw-browser running" || echo "  ✗ openclaw-browser failed"
 systemctl is-active --quiet sam-telegram && echo "  ✓ sam-telegram running" || echo "  ✗ sam-telegram failed"
 
-# Test proxy if configured
+# Test proxy through local wrapper
 source /root/ai-auto-advisor/config/.env
-if [ -n "${RESIDENTIAL_PROXY_URL:-}" ]; then
+if [ -n "${PROXY_HOST:-}" ]; then
   echo ""
   echo "  Testing proxy access to AllData..."
-  HTTP_CODE=$(curl -s -o /dev/null -w '%{http_code}' -x "$RESIDENTIAL_PROXY_URL" --max-time 15 https://my.alldata.com 2>/dev/null || echo "000")
+  sleep 2  # Let proxy stabilize
+  HTTP_CODE=$(curl -s -o /dev/null -w '%{http_code}' -x "http://127.0.0.1:8888" -L --max-time 20 https://my.alldata.com 2>/dev/null || echo "000")
   if [ "$HTTP_CODE" = "200" ]; then
     echo "  ✓ AllData accessible (200) through proxy"
   else
@@ -200,7 +204,7 @@ echo "  IP:      $DROPLET_IP"
 echo "  SSH:     ssh root@$DROPLET_IP"
 echo ""
 echo "  Services:"
-echo "    systemctl status openclaw-gateway openclaw-browser sam-telegram"
+echo "    systemctl status openclaw-gateway sam-proxy openclaw-browser sam-telegram"
 echo ""
 echo "  Logs:"
 echo "    journalctl -u sam-telegram -f"

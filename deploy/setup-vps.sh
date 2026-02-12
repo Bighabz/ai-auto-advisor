@@ -72,12 +72,13 @@ echo "  OpenClaw configured"
 # --- 7. Install Systemd Services ---
 echo "[7/8] Installing systemd services..."
 cp "$SAM_DIR/deploy/services/openclaw-gateway.service" /etc/systemd/system/
+cp "$SAM_DIR/deploy/services/sam-proxy.service" /etc/systemd/system/
 cp "$SAM_DIR/deploy/services/openclaw-browser.service" /etc/systemd/system/
 cp "$SAM_DIR/deploy/services/sam-telegram.service" /etc/systemd/system/
 
 systemctl daemon-reload
-systemctl enable openclaw-gateway openclaw-browser sam-telegram
-echo "  Services installed: openclaw-gateway, openclaw-browser, sam-telegram"
+systemctl enable openclaw-gateway sam-proxy openclaw-browser sam-telegram
+echo "  Services installed: openclaw-gateway, sam-proxy, openclaw-browser, sam-telegram"
 
 # --- 8. Firewall ---
 echo "[8/8] Configuring firewall..."
@@ -93,22 +94,22 @@ echo "════════════════════════�
 echo ""
 echo "  Services installed (not yet started):"
 echo "    - openclaw-gateway"
-echo "    - openclaw-browser (with proxy support)"
+echo "    - sam-proxy (local proxy auth wrapper)"
+echo "    - openclaw-browser (Chrome via proxy)"
 echo "    - sam-telegram"
 echo ""
 echo "  Next steps:"
-echo "  1. Deploy .env with RESIDENTIAL_PROXY_URL:"
+echo "  1. Deploy .env with PROXY_* credentials:"
 echo "     scp config/.env root@\$(hostname -I | awk '{print \$1}'):$SAM_DIR/config/.env"
 echo ""
 echo "  2. Start services:"
-echo "     systemctl start openclaw-gateway openclaw-browser sam-telegram"
+echo "     systemctl start openclaw-gateway sam-proxy openclaw-browser sam-telegram"
 echo ""
 echo "  3. Check status:"
-echo "     systemctl status openclaw-gateway openclaw-browser sam-telegram"
+echo "     systemctl status openclaw-gateway sam-proxy openclaw-browser sam-telegram"
 echo ""
 echo "  4. Test proxy works:"
-echo "     source $SAM_DIR/config/.env"
-echo "     curl -x \"\$RESIDENTIAL_PROXY_URL\" https://my.alldata.com"
+echo "     curl -x http://127.0.0.1:8888 -L https://my.alldata.com"
 echo ""
 echo "  5. Test E2E:"
 echo "     cd $SAM_DIR && node scripts/test-e2e.js"

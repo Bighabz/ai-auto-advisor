@@ -1,0 +1,15 @@
+[Unit]
+Description=SAM Local Proxy (auth wrapper for residential proxy)
+After=network.target
+Before=openclaw-browser.service
+
+[Service]
+Type=simple
+WorkingDirectory=/root/ai-auto-advisor
+ExecStart=/usr/bin/node scripts/proxy-server.js
+Restart=always
+RestartSec=5
+Environment=HOME=/root
+
+[Install]
+WantedBy=multi-user.target
