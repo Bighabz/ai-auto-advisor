@@ -14,6 +14,7 @@
   "license": "ISC",
   "dependencies": {
     "@supabase/supabase-js": "^2.95.3",
+    "form-data": "^4.0.5",
     "node-fetch": "^3.3.2",
     "pdfkit": "^0.17.2"
   }
