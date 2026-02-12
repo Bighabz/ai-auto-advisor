@@ -187,6 +187,12 @@ function parseMessage(message) {
 function detectCommand(message) {
   const text = message.trim().toLowerCase();
 
+  // Greetings
+  const greetings = ["hi", "hello", "hey", "yo", "sup", "hola", "good morning", "good afternoon", "good evening", "morning", "afternoon"];
+  if (greetings.includes(text) || greetings.some((g) => text === g + "!") || text.match(/^(hi+|hey+|hello+|yo+)!*$/)) {
+    return { type: "greeting" };
+  }
+
   if (text === "order" || text === "order those parts" || text.startsWith("order parts")) {
     return { type: "order" };
   }

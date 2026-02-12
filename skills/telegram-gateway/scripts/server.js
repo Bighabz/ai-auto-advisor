@@ -30,7 +30,7 @@ if (fs.existsSync(envPath)) {
 }
 
 const { parseMessage, detectCommand } = require("../../whatsapp-gateway/scripts/parser");
-const { formatForWhatsApp, formatHelp, formatStatus } = require("../../whatsapp-gateway/scripts/formatter");
+const { formatForWhatsApp, formatHelp, formatStatus, formatGreeting } = require("../../whatsapp-gateway/scripts/formatter");
 const { buildEstimate, handleOrderRequest, handleApprovalAndOrder } = require("../../estimate-builder/scripts/orchestrator");
 
 const LOG = "[telegram]";
@@ -120,6 +120,10 @@ async function handleMessage(chatId, messageText, username) {
 
   if (command?.type === "help") {
     return { messages: [formatHelp()] };
+  }
+
+  if (command?.type === "greeting") {
+    return { messages: [formatGreeting()] };
   }
 
   if (command?.type === "status") {

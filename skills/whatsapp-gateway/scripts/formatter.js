@@ -251,6 +251,22 @@ function formatStatus() {
 }
 
 /**
+ * Format a greeting response.
+ * @returns {string}
+ */
+function formatGreeting() {
+  return [
+    `Hey! \u{1F44B} I'm SAM, your AI Service Advisor.`,
+    ``,
+    `Send me a vehicle + problem and I'll build a complete estimate with diagnosis, parts pricing, and labor times.`,
+    ``,
+    `_Example: "2019 Civic P0420"_`,
+    ``,
+    `Reply *HELP* for more examples.`,
+  ].join("\n");
+}
+
+/**
  * Format research results for immediate delivery to tech.
  * Sent before the estimate is built so tech can start working.
  *
@@ -313,4 +329,4 @@ function formatResearchFirst(results) {
   return messages;
 }
 
-module.exports = { formatForWhatsApp, formatHelp, formatStatus, formatResearchFirst };
+module.exports = { formatForWhatsApp, formatHelp, formatStatus, formatGreeting, formatResearchFirst };
