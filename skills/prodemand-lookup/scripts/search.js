@@ -75,16 +75,72 @@ async function searchViaTape({ vin, query, intent }) {
 /**
  * Ensure we're logged in to ProDemand.
  *
+ * ProDemand has a marketing landing page with cookie consent.
+ * We need to:
+ *   1. Dismiss cookie consent if present
+ *   2. Click Login button to reach login form
+ *   3. Then authenticate
+ *
  * @returns {{ success: boolean, error?: string }}
  */
 async function login() {
-  return browser.ensureLoggedIn(
-    PRODEMAND_URL,
-    PRODEMAND_USERNAME,
-    PRODEMAND_PASSWORD,
-    LOG,
-    ["real fix", "labor", "vehicle", "repair", "parts"]
-  );
+  try {
+    browser.ensureBrowser();
+    browser.navigateTo(PRODEMAND_URL);
+    browser.waitForLoad("networkidle");
+
+    let elements = browser.getPageElements();
+
+    // Step 1: Dismiss cookie consent if present
+    const cookieRef = browser.findRef(elements, "accept all cookies") ||
+                      browser.findRef(elements, "accept cookies") ||
+                      browser.findRef(elements, "cookie") && browser.findRef(elements, "accept");
+    if (cookieRef) {
+      console.log(`${LOG} Dismissing cookie consent...`);
+      browser.clickRef(cookieRef);
+      browser.waitForLoad("networkidle");
+      elements = browser.getPageElements();
+    }
+
+    // Step 2: Check if we're already logged in (auth keywords visible)
+    const authKeywords = ["real fix", "labor", "vehicle", "repair", "parts", "dashboard"];
+    if (browser.isAuthenticated(elements, authKeywords)) {
+      console.log(`${LOG} Session active — skipping login`);
+      return { success: true };
+    }
+
+    // Step 3: Click Login button on landing page to reach login form
+    const loginBtnRef = browser.findRef(elements, "login");
+    if (loginBtnRef && !browser.isLoginPage(elements)) {
+      console.log(`${LOG} Clicking Login button...`);
+      browser.clickRef(loginBtnRef);
+      browser.waitForLoad("networkidle");
+      elements = browser.getPageElements();
+    }
+
+    // Step 4: Now should be on login form — perform login
+    if (browser.isLoginPage(elements)) {
+      console.log(`${LOG} Login form detected — authenticating...`);
+      const result = browser.performLogin(elements, PRODEMAND_USERNAME, PRODEMAND_PASSWORD);
+
+      if (result.success) {
+        browser.waitForLoad("networkidle");
+        const postElements = browser.getPageElements();
+        if (browser.isAuthenticated(postElements, authKeywords) || !browser.isLoginPage(postElements)) {
+          console.log(`${LOG} Login successful`);
+          return { success: true };
+        }
+        return { success: false, error: "Login appeared to fail — still on login page" };
+      }
+      return result;
+    }
+
+    // Can't determine state — proceed anyway
+    console.log(`${LOG} Page state unclear — proceeding`);
+    return { success: true };
+  } catch (err) {
+    return { success: false, error: `Login flow error: ${err.message}` };
+  }
 }
 
 /**
