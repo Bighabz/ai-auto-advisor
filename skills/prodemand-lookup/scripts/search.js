@@ -87,7 +87,7 @@ async function login() {
   try {
     browser.ensureBrowser();
     browser.navigateTo(PRODEMAND_URL);
-    browser.waitForLoad("networkidle");
+    browser.waitForLoad();
 
     let elements = browser.getPageElements();
 
@@ -98,7 +98,7 @@ async function login() {
     if (cookieRef) {
       console.log(`${LOG} Dismissing cookie consent...`);
       browser.clickRef(cookieRef);
-      browser.waitForLoad("networkidle");
+      browser.waitForLoad();
       elements = browser.getPageElements();
     }
 
@@ -114,7 +114,7 @@ async function login() {
     if (loginBtnRef && !browser.isLoginPage(elements)) {
       console.log(`${LOG} Clicking Login button...`);
       browser.clickRef(loginBtnRef);
-      browser.waitForLoad("networkidle");
+      browser.waitForLoad();
       elements = browser.getPageElements();
     }
 
@@ -124,7 +124,7 @@ async function login() {
       const result = browser.performLogin(elements, PRODEMAND_USERNAME, PRODEMAND_PASSWORD);
 
       if (result.success) {
-        browser.waitForLoad("networkidle");
+        browser.waitForLoad();
         const postElements = browser.getPageElements();
         if (browser.isAuthenticated(postElements, authKeywords) || !browser.isLoginPage(postElements)) {
           console.log(`${LOG} Login successful`);
@@ -326,7 +326,7 @@ async function searchViaBrowser({ vin, year, make, model, engine, query }) {
 
   if (realFixRef) {
     browser.clickRef(realFixRef);
-    browser.waitForLoad("networkidle");
+    browser.waitForLoad();
     console.log(`${LOG} Navigated to Real Fixes`);
   }
 

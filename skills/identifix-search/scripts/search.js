@@ -225,7 +225,7 @@ async function searchDirectHit({ year, make, model, engine, query }) {
 
   if (directHitRef) {
     browser.clickRef(directHitRef);
-    browser.waitForLoad("networkidle");
+    browser.waitForLoad();
     console.log(`${LOG} Navigated to Direct-Hit`);
   }
 

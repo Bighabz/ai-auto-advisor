@@ -12,7 +12,17 @@
 const { decodeVin, isValidVin } = require("../../vin-decoder/scripts/decode");
 const { search: searchAllData, captureScreenshots } = require("../../alldata-lookup/scripts/search");
 const { searchDirectHit } = require("../../identifix-search/scripts/search");
-const { search: searchProDemand } = require("../../prodemand-lookup/scripts/search");
+// Use Puppeteer direct search (bypasses 20s OpenClaw gateway timeout for proxy)
+let searchProDemand;
+try {
+  const directSearch = require("../../prodemand-lookup/scripts/search-direct");
+  searchProDemand = directSearch.search;
+  console.log("[orchestrator] Using ProDemand direct (Puppeteer) search");
+} catch {
+  const fallback = require("../../prodemand-lookup/scripts/search");
+  searchProDemand = fallback.search;
+  console.log("[orchestrator] Using ProDemand OpenClaw search (fallback)");
+}
 const {
   searchParts,
   searchMultipleParts,
@@ -831,13 +841,67 @@ async function buildEstimate(params) {
     query: params.query,
   };
 
+  // Timeout wrapper — prevents a hung browser skill from blocking the pipeline
+  const withTimeout = (promise, ms, label) =>
+    Promise.race([
+      promise,
+      new Promise((_, reject) => setTimeout(() => reject(new Error(`${label} timeout after ${ms / 1000}s`)), ms)),
+    ]);
+
+  // Fast URL reachability check — skip browser automation if URL is blocked (403) or down
+  const isReachable = async (url, timeoutMs = 5000) => {
+    try {
+      const fetch = (await import("node-fetch")).default;
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), timeoutMs);
+      const resp = await fetch(url, { method: "HEAD", signal: controller.signal, redirect: "follow" });
+      clearTimeout(timer);
+      return resp.ok; // 200-299 only
+    } catch { return false; }
+  };
+
+  const RESEARCH_TIMEOUT = 25000; // 25s per platform
+
   if (requestInfo.type === "diagnostic") {
-    alldata = await searchAllData(researchQuery).catch((e) => ({ error: e.message }));
-    identifix = await searchDirectHit(researchQuery).catch((e) => ({ error: e.message }));
-    prodemand = await searchProDemand(researchQuery).catch((e) => ({ error: e.message }));
+    // Pre-check each platform's URL before attempting browser automation
+    const alldataUrl = process.env.ALLDATA_URL || "https://my.alldata.com";
+    const identifixUrl = process.env.IDENTIFIX_URL || "https://www.identifix.com";
+    const prodemandUrl = process.env.PRODEMAND_URL || "https://www.prodemand.com";
+
+    // ProDemand goes through Chrome's PAC proxy — skip reachability check for it
+    const prodemandViaProxy = !!(process.env.PRODEMAND_USERNAME && process.env.PRODEMAND_PASSWORD);
+    const [alldataUp, identifixUp] = await Promise.all([
+      isReachable(alldataUrl),
+      isReachable(identifixUrl),
+    ]);
+
+    console.log(`  → Reachability: AllData=${alldataUp ? "ok" : "blocked"}, Identifix=${identifixUp ? "ok" : "blocked"}, ProDemand=${prodemandViaProxy ? "proxy" : "no creds"}`);
+
+    if (alldataUp) {
+      alldata = await withTimeout(searchAllData(researchQuery), RESEARCH_TIMEOUT, "AllData").catch((e) => ({ error: e.message }));
+    } else {
+      alldata = { error: "AllData unreachable from this network (IP blocked)" };
+    }
+
+    if (identifixUp) {
+      identifix = await withTimeout(searchDirectHit(researchQuery), RESEARCH_TIMEOUT, "Identifix").catch((e) => ({ error: e.message }));
+    } else {
+      identifix = { error: "Identifix unreachable from this network" };
+    }
+
+    if (prodemandViaProxy) {
+      prodemand = await withTimeout(searchProDemand(researchQuery), RESEARCH_TIMEOUT, "ProDemand").catch((e) => ({ error: e.message }));
+    } else {
+      prodemand = { error: "ProDemand not configured" };
+    }
   } else {
     // Maintenance — just labor times
-    prodemand = await searchProDemand(researchQuery).catch((e) => ({ error: e.message }));
+    const prodemandViaProxy = !!(process.env.PRODEMAND_USERNAME && process.env.PRODEMAND_PASSWORD);
+    if (prodemandViaProxy) {
+      prodemand = await withTimeout(searchProDemand(researchQuery), RESEARCH_TIMEOUT, "ProDemand").catch((e) => ({ error: e.message }));
+    } else {
+      prodemand = { error: "ProDemand not configured" };
+    }
   }
 
   results.diagnosis = {

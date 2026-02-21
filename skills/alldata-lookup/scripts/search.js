@@ -85,7 +85,7 @@ function navigateToSection(section) {
 
     if (sectionRef) {
       browser.clickRef(sectionRef);
-      browser.waitForLoad("networkidle");
+      browser.waitForLoad();
       console.log(`${LOG} Navigated to section: ${section}`);
       return true;
     }

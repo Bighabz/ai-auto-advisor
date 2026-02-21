@@ -87,13 +87,21 @@ function parseMessage(message) {
     mini: ["cooper", "countryman", "clubman"],
   };
 
+  // Short model names (<=3 chars) only match if their make is also in the text
+  const shortModels = new Set(["is", "es", "rx", "nx", "gx", "lx", "a3", "a4", "a6", "q3", "q5", "q7", "q8", "s4", "k5", "x1", "x3", "x5", "x7", "m3", "m5", "s60", "s90", "v60", "g6", "g8", "300", "rio", "fit", "ion", "brz", "gti"]);
+
   for (const [make, models] of Object.entries(makes)) {
     for (const model of models) {
-      if (textLower.includes(model)) {
+      const modelPattern = new RegExp(`\\b${model.replace(/[-\/]/g, "[-\\/ ]?")}\\b`, "i");
+      if (modelPattern.test(textLower)) {
+        // Short model names require the make name to also appear in the text
+        if (shortModels.has(model.toLowerCase())) {
+          const makePattern = new RegExp(`\\b${make}\\b`, "i");
+          if (!makePattern.test(textLower)) continue;
+        }
         result.make = make === "chevy" ? "Chevrolet" : make === "vw" ? "Volkswagen" : make.charAt(0).toUpperCase() + make.slice(1);
         if (make === "mercedes-benz") result.make = "Mercedes-Benz";
         result.model = model.charAt(0).toUpperCase() + model.slice(1);
-        // Normalize common model names
         if (model === "crv") result.model = "CR-V";
         if (model === "hrv") result.model = "HR-V";
         if (model === "rav4") result.model = "RAV4";
@@ -211,6 +219,18 @@ function detectCommand(message) {
 
   if (text === "status" || text === "ping") {
     return { type: "status" };
+  }
+
+  // Detect conversational questions (not estimate requests)
+  const questionStarters = [
+    "what do", "what is", "what are", "what's", "how do", "how does",
+    "how is", "how can", "can you", "could you", "would you", "will you",
+    "do you", "does it", "is there", "are there", "tell me", "explain",
+    "list all", "show me", "describe", "why does", "why is", "who is",
+    "where is", "where do", "when do", "when does",
+  ];
+  if (questionStarters.some((q) => text.startsWith(q)) || (text.endsWith("?") && text.length > 20)) {
+    return { type: "question", text: message.trim() };
   }
 
   return null;

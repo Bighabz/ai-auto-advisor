@@ -371,7 +371,7 @@ function performLogin(elements, username, password) {
     }
 
     clickRef(submitRef);
-    waitForLoad("networkidle");
+    waitForLoad();
 
     return { success: true };
   } catch (err) {
@@ -393,7 +393,7 @@ function ensureLoggedIn(url, username, password, logPrefix, authKeywords = []) {
   try {
     ensureBrowser();
     navigateTo(url);
-    waitForLoad("networkidle");
+    waitForLoad();
 
     const snapshot = takeSnapshot();
     const elements = parseSnapshot(snapshot);
@@ -458,7 +458,7 @@ function selectVehicleYMME({ year, make, model, engine }, logPrefix) {
     if (yearRef) {
       clickRef(yearRef);
       typeInRef(yearRef, String(year), true);
-      waitForLoad("networkidle");
+      waitForLoad();
     } else {
       return { success: false, error: "Could not find Year selector" };
     }
@@ -472,7 +472,7 @@ function selectVehicleYMME({ year, make, model, engine }, logPrefix) {
     if (makeRef) {
       clickRef(makeRef);
       typeInRef(makeRef, make, true);
-      waitForLoad("networkidle");
+      waitForLoad();
     } else {
       return { success: false, error: "Could not find Make selector" };
     }
@@ -486,7 +486,7 @@ function selectVehicleYMME({ year, make, model, engine }, logPrefix) {
     if (modelRef) {
       clickRef(modelRef);
       typeInRef(modelRef, model, true);
-      waitForLoad("networkidle");
+      waitForLoad();
     } else {
       return { success: false, error: "Could not find Model selector" };
     }
@@ -501,7 +501,7 @@ function selectVehicleYMME({ year, make, model, engine }, logPrefix) {
       if (engineRef) {
         clickRef(engineRef);
         typeInRef(engineRef, engine, true);
-        waitForLoad("networkidle");
+        waitForLoad();
       }
       // Engine not found is non-fatal — some platforms don't have it
     }
@@ -534,7 +534,7 @@ function selectVehicleVIN(vin, logPrefix) {
 
     clickRef(vinRef);
     typeInRef(vinRef, vin, true);
-    waitForLoad("networkidle");
+    waitForLoad();
 
     console.log(`${logPrefix} Vehicle set via VIN: ${vin}`);
     return { success: true };
@@ -601,7 +601,7 @@ function performSearch(query, searchLabels) {
 
     clickRef(searchRef);
     typeInRef(searchRef, query, true);
-    waitForLoad("networkidle");
+    waitForLoad();
 
     return { success: true };
   } catch (err) {
