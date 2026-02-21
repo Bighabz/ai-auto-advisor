@@ -28,3 +28,4 @@ cache/
 # IDE
 .vscode/
 .idea/
+deploy/vps-backup/env-production.txt
