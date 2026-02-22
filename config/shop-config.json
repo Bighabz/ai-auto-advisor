@@ -1,10 +1,10 @@
 {
   "shop": {
-    "name": "Your Shop Name",
-    "laborRatePerHour": 135.00,
+    "name": "Hillside Auto",
+    "laborRatePerHour": 135.0,
     "diagnosticFee": 89.99,
     "shopSuppliesPercent": 5,
-    "shopSuppliesCap": 35.00,
+    "shopSuppliesCap": 35.0,
     "taxRate": 0.0775
   },
   "markup": {
