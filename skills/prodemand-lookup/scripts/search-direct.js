@@ -236,117 +236,155 @@ async function getActiveTab(page) {
 
 /**
  * Select a vehicle by Year/Make/Model/Engine, handling all intermediate steps.
- * ProDemand may ask for Submodel and Options after Engine — we pick the best match
- * or first available option for each step.
+ *
+ * ProDemand vehicle selection flow:
+ *   1. Year → Make → Model → Engine/Trim → Submodel
+ *   2. An "Options" dialog appears with pre-selected items + remaining required options
+ *   3. Pick any remaining unselected options (body style, transmission type, etc.)
+ *   4. Click "Use This Vehicle" to confirm and close the modal
  *
  * @param {object} page
  * @param {object} vehicle - { year, make, model, engine }
- * @returns {boolean} true if vehicle was selected
+ * @returns {boolean} true if vehicle was confirmed
  */
 async function selectVehicle(page, { year, make, model, engine }) {
-  // Known selection steps and what to pick at each
   const wantedValues = {
     year: String(year),
-    make: make,
-    model: model,
-    engine: engine || "", // e.g. "2.0L" or "1.5L" — may not match exactly
+    make,
+    model,
+    engine: engine || "",
   };
 
-  const MAX_STEPS = 8; // Year + Make + Model + Engine + Submodel + Options (multiple)
+  // Phase 1: Select Year → Make → Model → Engine → Submodel
+  const phaseOneSteps = ["year", "make", "model", "engine", "submodel"];
 
-  for (let step = 0; step < MAX_STEPS; step++) {
+  for (let step = 0; step < 8; step++) {
     const qualifiers = await getQualifiers(page);
-    if (qualifiers.length === 0) break;
-
     const activeTab = await getActiveTab(page);
-    console.log(`${LOG} Step ${step + 1}: ${activeTab || "?"} — ${qualifiers.length} options`);
+
+    if (!activeTab || activeTab === "options" || qualifiers.length === 0) break;
+    if (activeTab === "odometer") break;
+
+    console.log(`${LOG} Step ${step + 1}: ${activeTab} — ${qualifiers.length} options`);
 
     let picked = null;
-
-    if (activeTab === "year") {
-      picked = await clickQualifier(page, wantedValues.year);
-    } else if (activeTab === "make") {
-      picked = await clickQualifier(page, wantedValues.make);
-    } else if (activeTab === "model") {
-      picked = await clickQualifier(page, wantedValues.model);
-    } else if (activeTab === "engine") {
-      // Try to match engine displacement if provided; otherwise pick first
-      if (wantedValues.engine) {
-        picked = await clickQualifier(page, wantedValues.engine);
-      }
-      if (!picked) {
-        // Pick first non-empty qualifier
-        picked = await clickQualifier(page, qualifiers[0]);
-      }
+    if (activeTab === "year") picked = await clickQualifier(page, wantedValues.year);
+    else if (activeTab === "make") picked = await clickQualifier(page, wantedValues.make);
+    else if (activeTab === "model") picked = await clickQualifier(page, wantedValues.model);
+    else if (activeTab === "engine") {
+      picked = wantedValues.engine ? await clickQualifier(page, wantedValues.engine) : null;
+      if (!picked) picked = await clickQualifier(page, qualifiers[0]);
     } else if (activeTab === "submodel") {
-      // Pick first submodel
       picked = await clickQualifier(page, qualifiers[0]);
-    } else if (activeTab === "options") {
-      // Options can repeat — pick first each time
-      picked = await clickQualifier(page, qualifiers[0]);
-    } else if (activeTab === "odometer") {
-      // Odometer is optional — skip
-      console.log(`${LOG} Skipping odometer`);
-      break;
     } else {
-      // Unknown tab — pick first available
       picked = await clickQualifier(page, qualifiers[0]);
     }
 
     if (!picked) {
-      console.log(`${LOG} Could not pick qualifier on step ${step + 1} (${activeTab})`);
+      console.log(`${LOG} Could not pick on step ${step + 1} (${activeTab})`);
       break;
     }
-    console.log(`${LOG}   → Selected: ${picked}`);
+    console.log(`${LOG}   → ${picked}`);
   }
 
-  // Verify vehicle was selected (breadcrumb shows something)
+  // Phase 2: Options dialog — pick only UNSELECTED qualifiers
+  // (Already-selected ones have class "qualifier selected" — skip them)
+  const MAX_OPTION_ROUNDS = 6;
+  for (let round = 0; round < MAX_OPTION_ROUNDS; round++) {
+    const activeTab = await getActiveTab(page);
+    if (activeTab !== "options") break;
+
+    // Get unselected qualifiers only
+    const unselected = await page.evaluate(() =>
+      Array.from(document.querySelectorAll("li.qualifier:not(.selected)"))
+        .map((li) => li.textContent.trim())
+    );
+
+    if (unselected.length === 0) break; // All options selected
+
+    console.log(`${LOG} Options round ${round + 1}: picking from unselected: ${unselected.slice(0, 4).join(", ")}`);
+    const picked = await page.evaluate((opts) => {
+      // Prefer 4D Sedan > Gas > Automatic > first option
+      const prefer = ["4d sedan", "automatic", "gas", "fwd"];
+      const items = Array.from(document.querySelectorAll("li.qualifier:not(.selected)"));
+      const preferred = items.find((li) =>
+        prefer.some((p) => li.textContent.trim().toLowerCase().includes(p))
+      ) || items[0];
+      if (preferred) { preferred.click(); return preferred.textContent.trim(); }
+      return null;
+    }, unselected);
+
+    if (!picked) break;
+    console.log(`${LOG}   → ${picked}`);
+    await sleep(1500);
+  }
+
+  // Phase 3: Click "Use This Vehicle" to confirm
+  const confirmed = await page.evaluate(() => {
+    const btns = Array.from(document.querySelectorAll("button, input[type=button], .button, div"));
+    const btn = btns.find((b) => /use this vehicle/i.test(b.innerText || b.value || ""));
+    if (btn) { btn.click(); return true; }
+    return false;
+  });
+  console.log(`${LOG} "Use This Vehicle" clicked: ${confirmed}`);
+  if (confirmed) await sleep(2000);
+
   const breadcrumb = await page.evaluate(
     () => document.querySelector("#vehicleDetails")?.innerText?.trim() || ""
   );
   console.log(`${LOG} Breadcrumb: ${breadcrumb || "(empty)"}`);
-  return breadcrumb.length > 0 || true; // Proceed even if breadcrumb is empty (some vehicles don't show it)
+  return true;
 }
 
 // ── Search & Extraction ───────────────────────────────────────────────────────
 
 /**
- * Enter a DTC code or symptom in the 1SEARCH box and submit.
- * Uses evaluate to type directly (avoids "not clickable" errors from overlay).
+ * Navigate to 1SEARCH and enter the DTC/symptom query.
+ * The modal_mask overlay blocks clicks when vehicle selector is open —
+ * "Use This Vehicle" closes it, making the main content accessible.
  */
 async function performSearch(page, query) {
-  // Close vehicle selector if open (so searchBox is accessible)
-  const selectorOpen = await page.evaluate(() => {
-    const d = document.querySelector("#vehicleSelectorDetails");
-    return d ? getComputedStyle(d).height !== "0px" : false;
+  // Navigate to 1SEARCH via left sidebar icon
+  await page.evaluate(() => {
+    const links = Array.from(document.querySelectorAll("a, li, nav *, [class*='nav']"));
+    const link = links.find(
+      (el) => el.innerText && (el.innerText.includes("1SEARCH") || el.innerText.includes("OneView"))
+    );
+    if (link) link.click();
   });
-  if (selectorOpen) {
-    await page.evaluate(() => document.querySelector("#vehicleSelectorButton")?.click());
-    await sleep(500);
+  await sleep(1500);
+
+  // Wait for searchBox to have non-zero dimensions (means modal is closed)
+  let searchVisible = false;
+  for (let i = 0; i < 6; i++) {
+    const dims = await page.evaluate(() => {
+      const box = document.querySelector(".searchBox");
+      if (!box) return null;
+      const r = box.getBoundingClientRect();
+      return { w: r.width, h: r.height };
+    });
+    if (dims && dims.w > 0) { searchVisible = true; break; }
+    await sleep(1000);
   }
 
-  // Type into searchBox via evaluate (bypasses overlay click issues)
-  const typed = await page.evaluate((q) => {
-    const box = document.querySelector(".searchBox, input[placeholder*='Code'], input[placeholder*='Symptom']");
-    if (!box) return false;
-    box.value = "";
-    box.focus();
-    box.value = q;
-    // Trigger input events so the app picks up the value
-    box.dispatchEvent(new Event("input", { bubbles: true }));
-    box.dispatchEvent(new Event("change", { bubbles: true }));
-    return true;
-  }, query);
-
-  if (!typed) {
-    console.log(`${LOG} Search box not found`);
+  if (!searchVisible) {
+    console.log(`${LOG} Search box not visible — modal may still be blocking`);
     return false;
   }
 
-  // Press Enter to submit
+  // Focus and type into searchBox
+  await page.evaluate(() => document.querySelector(".searchBox")?.focus());
+  await sleep(300);
+  await page.keyboard.type(query, { delay: 30 });
+  await sleep(300);
+
+  const val = await page.evaluate(() => document.querySelector(".searchBox")?.value);
+  console.log(`${LOG} SearchBox value: "${val}"`);
+
+  // Submit
   await page.keyboard.press("Enter");
   console.log(`${LOG} Searched for: ${query}`);
-  await sleep(3000);
+  await sleep(5000); // ProDemand results take time to load
   return true;
 }
 
