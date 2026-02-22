@@ -1082,6 +1082,16 @@ async function buildEstimate(params) {
       console.log(`  → Skipped (set AUTOLEAP_EMAIL to enable parts pricing via AutoLeap)`);
     }
 
+    // If pricing failed or returned empty, still preserve part names so PDF lists them
+    if (partsNeeded.length > 0 && !results.parts?.bestValueBundle?.parts?.length) {
+      if (!results.parts) results.parts = {};
+      results.parts.bestValueBundle = {
+        parts: partsNeeded.map(p => ({ requested: p, selected: null, error: "No pricing available" })),
+        totalCost: 0, allInStock: false, suppliers: [],
+      };
+      results.parts.individualResults = [];
+    }
+
     if (results.parts) {
       console.log(`  → Best value bundle: $${results.parts.bestValueBundle?.totalCost?.toFixed(2) || "N/A"}`);
       console.log(`  → Suppliers: ${results.parts.bestValueBundle?.suppliers?.join(", ") || "N/A"}`);
@@ -1303,10 +1313,22 @@ async function buildEstimate(params) {
           partLines.push({
             description: p.description,
             partNumber: p.partNumber,
-            qty: 1,
+            qty: item.requested?.qty || 1,
             unitPrice: p.totalCost,
             total: p.totalCost,
             supplier: p.supplier,
+          });
+        } else if (item.requested) {
+          // Part identified but no pricing — list it with $0 so the customer sees it
+          const name = item.requested.partType || "Part";
+          const pos = item.requested.position ? ` (${item.requested.position})` : "";
+          partLines.push({
+            description: name.charAt(0).toUpperCase() + name.slice(1) + pos,
+            partNumber: null,
+            qty: item.requested.qty || 1,
+            unitPrice: 0,
+            total: 0,
+            supplier: "pricing TBD",
           });
         }
       }
