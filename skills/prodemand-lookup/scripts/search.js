@@ -265,6 +265,40 @@ function extractPartNumbers() {
 }
 
 /**
+ * Extract DTC test plan / diagnostic procedure steps from the current ProDemand page.
+ * Returns array of { step: number, action: string }.
+ *
+ * @param {Array} elements - Parsed snapshot elements from current page
+ */
+function extractDtcTestPlan(elements) {
+  const steps = [];
+  try {
+    const allText = elements
+      .filter((el) => el.text && el.text.trim().length > 10)
+      .map((el) => el.text.trim());
+
+    let capture = false;
+    for (const text of allText) {
+      if (/test plan|diagnostic procedure|pinpoint test/i.test(text)) {
+        capture = true;
+        continue;
+      }
+      if (capture) {
+        // Stop at next major section header (all caps)
+        if (/^[A-Z\s]{8,}$/.test(text) && steps.length > 0) break;
+        if (text.length > 10) {
+          steps.push({ step: steps.length + 1, action: text.slice(0, 200) });
+        }
+        if (steps.length >= 8) break;
+      }
+    }
+  } catch (err) {
+    // Non-fatal
+  }
+  return steps;
+}
+
+/**
  * Search ProDemand via browser automation.
  *
  * Flow:
@@ -342,8 +376,9 @@ async function searchViaBrowser({ vin, year, make, model, engine, query }) {
   const realFixes = extractRealFixes();
   const laborTimes = extractLaborTimes();
   const partNumbers = extractPartNumbers();
+  const dtcTestPlan = extractDtcTestPlan(browser.getPageElements());
 
-  console.log(`${LOG} Results: ${realFixes.length} Real Fixes, ${laborTimes.length} labor times, ${partNumbers.length} part numbers`);
+  console.log(`${LOG} Results: ${realFixes.length} Real Fixes, ${laborTimes.length} labor times, ${partNumbers.length} part numbers, ${dtcTestPlan.length} test plan steps`);
 
   return {
     source: "ProDemand (browser)",
@@ -352,6 +387,7 @@ async function searchViaBrowser({ vin, year, make, model, engine, query }) {
     realFixes,
     laborTimes,
     partNumbers,
+    dtcTestPlan,
   };
 }
 
@@ -401,4 +437,5 @@ module.exports = {
   extractRealFixes,
   extractLaborTimes,
   extractPartNumbers,
+  extractDtcTestPlan,
 };
