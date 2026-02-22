@@ -243,7 +243,7 @@ async function handleToolCall(chatId, toolCall) {
       });
 
       const messages = formatForWhatsApp(results);
-      return { messages, pdfPath: results.pdfPath };
+      return { messages, pdfPath: results.pdfPath, wiringDiagrams: results.wiringDiagrams || [] };
     } catch (err) {
       console.error(`${LOG} Pipeline error: ${err.message}`);
       return { messages: [`Error building estimate: ${err.message}\n\nTry rephrasing or check the vehicle info.`] };
@@ -336,6 +336,24 @@ async function sendDocument(chatId, filePath, caption) {
   await fetch(`${API_BASE}/sendDocument`, { method: "POST", body: form });
 }
 
+async function sendPhoto(chatId, imagePath, caption) {
+  try {
+    const fetch = (await import("node-fetch")).default;
+    const FormData = (await import("form-data")).default;
+    const form = new FormData();
+    form.append("chat_id", chatId);
+    form.append("photo", fs.createReadStream(imagePath));
+    if (caption) form.append("caption", caption);
+    const resp = await fetch(`${API_BASE}/sendPhoto`, { method: "POST", body: form });
+    const result = await resp.json();
+    if (!result.ok) {
+      console.error(`${LOG} sendPhoto failed: ${result.description}`);
+    }
+  } catch (err) {
+    console.error(`${LOG} sendPhoto error: ${err.message}`);
+  }
+}
+
 async function sendTyping(chatId) {
   await telegramAPI("sendChatAction", { chat_id: chatId, action: "typing" });
 }
@@ -393,7 +411,7 @@ async function handleMessage(chatId, messageText, username) {
       allMessages.push(...toolResult.messages);
     }
 
-    return { messages: allMessages, pdfPath: toolResult.pdfPath };
+    return { messages: allMessages, pdfPath: toolResult.pdfPath, wiringDiagrams: toolResult.wiringDiagrams || [] };
   }
 
   // Pure chat response
@@ -434,6 +452,18 @@ async function pollUpdates() {
 
         for (const m of response.messages) {
           await sendMessage(chatId, m);
+        }
+
+        // Send wiring diagrams as photos
+        if (response.wiringDiagrams?.length > 0) {
+          for (let i = 0; i < response.wiringDiagrams.length; i++) {
+            const diagram = response.wiringDiagrams[i];
+            const imgPath = diagram.screenshotPath || diagram;
+            if (imgPath && fs.existsSync(imgPath)) {
+              const caption = diagram.name ? `Wiring: ${diagram.name}` : `Wiring Diagram ${i + 1}`;
+              await sendPhoto(chatId, imgPath, caption);
+            }
+          }
         }
 
         if (response.pdfPath && fs.existsSync(response.pdfPath)) {

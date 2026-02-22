@@ -342,4 +342,65 @@ function createEstimate({ diagnosis, parts, customerName, vehicleDesc }) {
   }
 }
 
-module.exports = { createEstimate };
+/**
+ * Download the PDF for a completed estimate from AutoLeap.
+ *
+ * Navigates to the estimate, finds the PDF download/print action,
+ * captures the downloaded file path, and returns it.
+ *
+ * @param {string} estimateId - Estimate ID or number to download
+ * @returns {{ success: boolean, pdfPath?: string, error?: string }}
+ */
+function downloadPdf(estimateId) {
+  const loginResult = ensureLoggedIn();
+  if (!loginResult.success) return loginResult;
+
+  try {
+    let snapshot = browser.takeSnapshot();
+    let elements = browser.parseSnapshot(snapshot);
+
+    // Navigate to the specific estimate if we have an ID
+    if (estimateId) {
+      const estRef = browser.findRef(elements, estimateId);
+      if (estRef) {
+        browser.clickRef(estRef);
+        browser.waitForLoad();
+        snapshot = browser.takeSnapshot();
+        elements = browser.parseSnapshot(snapshot);
+      }
+    }
+
+    // Find PDF download / print action
+    const pdfBtn =
+      browser.findRef(elements, "download pdf") ||
+      browser.findRef(elements, "save as pdf") ||
+      browser.findRef(elements, "print estimate") ||
+      browser.findRef(elements, "export pdf") ||
+      browser.findRef(elements, "pdf");
+
+    if (!pdfBtn) {
+      console.log(`${LOG} No PDF button found for estimate: ${estimateId}`);
+      return { success: false, error: "No PDF download button found" };
+    }
+
+    browser.clickRef(pdfBtn);
+    browser.waitForLoad();
+
+    // AutoLeap may open a print dialog — look for a download path in snapshot
+    snapshot = browser.takeSnapshot();
+    const mediaMatch = snapshot.match(/MEDIA:(\S+\.pdf)/i);
+    if (mediaMatch) {
+      const pdfPath = mediaMatch[1];
+      console.log(`${LOG} PDF downloaded: ${pdfPath}`);
+      return { success: true, pdfPath };
+    }
+
+    // If no PDF path captured, return partial success — estimate is visible
+    console.log(`${LOG} PDF action triggered but path not captured`);
+    return { success: true, pdfPath: null };
+  } catch (err) {
+    return { success: false, error: `PDF download failed: ${err.message}` };
+  }
+}
+
+module.exports = { createEstimate, downloadPdf };

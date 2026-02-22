@@ -65,6 +65,7 @@ if (process.env.AUTOLEAP_EMAIL) {
       estimate: require("../../autoleap-browser/scripts/estimate"),
       send: require("../../autoleap-browser/scripts/send"),
       order: require("../../autoleap-browser/scripts/order"),
+      parts: require("../../autoleap-browser/scripts/parts"),
     };
   } catch {
     // autoleap-browser skill not installed — browser automation disabled
@@ -686,6 +687,9 @@ async function buildEstimate(params) {
     mechanicSpecs: null,
     pdfPath: null,
     screenshots: [],
+    wiringDiagrams: [],
+    tsbs: [],
+    dtcTestPlan: [],
   };
 
   console.log("═══════════════════════════════════════════════════════════════");
@@ -866,9 +870,8 @@ async function buildEstimate(params) {
     // Pre-check each platform's URL before attempting browser automation
     const alldataUrl = process.env.ALLDATA_URL || "https://my.alldata.com";
     const identifixUrl = process.env.IDENTIFIX_URL || "https://www.identifix.com";
-    const prodemandUrl = process.env.PRODEMAND_URL || "https://www.prodemand.com";
 
-    // ProDemand goes through Chrome's PAC proxy — skip reachability check for it
+    // ProDemand goes through Chrome's PAC proxy or TAPE API — skip reachability check
     const prodemandViaProxy = !!(process.env.PRODEMAND_USERNAME && process.env.PRODEMAND_PASSWORD);
     const [alldataUp, identifixUp] = await Promise.all([
       isReachable(alldataUrl),
@@ -877,6 +880,13 @@ async function buildEstimate(params) {
 
     console.log(`  → Reachability: AllData=${alldataUp ? "ok" : "blocked"}, Identifix=${identifixUp ? "ok" : "blocked"}, ProDemand=${prodemandViaProxy ? "proxy" : "no creds"}`);
 
+    // Phase 1: Run OpenClaw browser platforms sequentially (share one tab),
+    // ProDemand (Puppeteer/TAPE) runs in parallel since it uses a separate process.
+    const prodemandPromise = prodemandViaProxy
+      ? withTimeout(searchProDemand(researchQuery), RESEARCH_TIMEOUT, "ProDemand").catch((e) => ({ error: e.message }))
+      : Promise.resolve({ error: "ProDemand not configured" });
+
+    // AllData → Identifix sequential (OpenClaw browser)
     if (alldataUp) {
       alldata = await withTimeout(searchAllData(researchQuery), RESEARCH_TIMEOUT, "AllData").catch((e) => ({ error: e.message }));
     } else {
@@ -889,11 +899,8 @@ async function buildEstimate(params) {
       identifix = { error: "Identifix unreachable from this network" };
     }
 
-    if (prodemandViaProxy) {
-      prodemand = await withTimeout(searchProDemand(researchQuery), RESEARCH_TIMEOUT, "ProDemand").catch((e) => ({ error: e.message }));
-    } else {
-      prodemand = { error: "ProDemand not configured" };
-    }
+    // Collect ProDemand result (may already be done if it used TAPE API)
+    prodemand = await prodemandPromise;
   } else {
     // Maintenance — just labor times
     const prodemandViaProxy = !!(process.env.PRODEMAND_USERNAME && process.env.PRODEMAND_PASSWORD);
@@ -911,9 +918,23 @@ async function buildEstimate(params) {
     prodemand,
   };
 
-  // Collect AllData screenshots for later use
+  // Collect AllData screenshots, wiring diagrams, and TSBs
   if (alldata?.screenshots?.length > 0) {
     results.screenshots = [...(results.screenshots || []), ...alldata.screenshots];
+  }
+  if (alldata?.wiringDiagrams?.length > 0) {
+    results.wiringDiagrams = alldata.wiringDiagrams;
+    console.log(`    AllData wiring: ${alldata.wiringDiagrams.length} diagram(s)`);
+  }
+  if (alldata?.tsbs?.length > 0) {
+    results.tsbs = alldata.tsbs;
+    console.log(`    AllData TSBs: ${alldata.tsbs.length}`);
+  }
+
+  // Collect ProDemand DTC test plan
+  if (prodemand?.dtcTestPlan?.length > 0) {
+    results.dtcTestPlan = prodemand.dtcTestPlan;
+    console.log(`    ProDemand test plan: ${prodemand.dtcTestPlan.length} step(s)`);
   }
 
   // Use Identifix top fix to boost AI diagnosis confidence when they agree
@@ -1072,6 +1093,7 @@ async function buildEstimate(params) {
           parts: estParts,
           customerName: params.customer.name,
           vehicleDesc: `${vehicle.year} ${vehicle.make} ${vehicle.model}`,
+          researchResults: results.diagnosis,
         });
 
         if (browserEstimate.success) {
@@ -1079,6 +1101,34 @@ async function buildEstimate(params) {
           results.estimateSource = "browser";
           console.log(`  → Estimate created: ${browserEstimate.estimateId || "pending"}`);
           console.log(`  → Total: $${browserEstimate.total}`);
+
+          // Search and add parts via embedded PartsTech (v3: uses research context)
+          if (autoLeapBrowser.parts && partsNeeded.length > 0) {
+            try {
+              const partsResult = autoLeapBrowser.parts.searchAndAddParts({
+                partsNeeded,
+                vehicleDesc: `${vehicle.year} ${vehicle.make} ${vehicle.model}`,
+              });
+              if (partsResult.addedCount > 0) {
+                console.log(`  → PartsTech: ${partsResult.addedCount} part(s) added`);
+              }
+            } catch (partsErr) {
+              console.error(`  → PartsTech parts error (non-fatal): ${partsErr.message}`);
+            }
+          }
+
+          // Download PDF from AutoLeap
+          if (browserEstimate.estimateId) {
+            try {
+              const pdfResult = autoLeapBrowser.estimate.downloadPdf(browserEstimate.estimateId);
+              if (pdfResult.success && pdfResult.pdfPath) {
+                results.pdfPath = pdfResult.pdfPath;
+                console.log(`  → PDF: ${results.pdfPath}`);
+              }
+            } catch (pdfErr) {
+              console.error(`  → PDF download error (non-fatal): ${pdfErr.message}`);
+            }
+          }
 
           // Send to customer
           if (params.customer.email || params.customer.phone) {

@@ -19,7 +19,7 @@ const LOG = "[wa-format]";
  */
 function formatForWhatsApp(results) {
   const messages = [];
-  const { vehicle, diagnosis, parts, estimate, mechanicSpecs, pdfPath } = results;
+  const { vehicle, diagnosis, parts, estimate, mechanicSpecs, pdfPath, tsbs, dtcTestPlan } = results;
 
   // ── Message 1: Headline + Diagnosis + Total (< 1000 chars) ──
   let msg1 = "";
@@ -88,6 +88,15 @@ function formatForWhatsApp(results) {
     msg2 += `*DIAGNOSTIC STEPS:*\n`;
     for (let i = 0; i < Math.min(diagnosis.ai.diagnostic_steps.length, 4); i++) {
       msg2 += `${i + 1}. ${diagnosis.ai.diagnostic_steps[i]}\n`;
+    }
+    msg2 += `\n`;
+  }
+
+  // ProDemand DTC test plan
+  if (dtcTestPlan?.length > 0) {
+    msg2 += `*DTC TEST PLAN (ProDemand):*\n`;
+    for (const step of dtcTestPlan.slice(0, 5)) {
+      msg2 += `${step.step}. ${step.action}\n`;
     }
     msg2 += `\n`;
   }
@@ -192,6 +201,18 @@ function formatForWhatsApp(results) {
           msg3 += `\u2022 ${sensor.name}: ${sensor.location}\n`;
         }
       }
+    }
+  }
+
+  // AllData TSBs
+  if (tsbs?.length > 0) {
+    msg3 += msg3.trim() ? `\n` : ``;
+    msg3 += `*TECHNICAL SERVICE BULLETINS (AllData):*\n`;
+    for (const tsb of tsbs.slice(0, 4)) {
+      msg3 += `\u2022 *${tsb.number}* — ${tsb.title}`;
+      if (tsb.date) msg3 += ` (${tsb.date})`;
+      msg3 += `\n`;
+      if (tsb.summary) msg3 += `  _${tsb.summary.slice(0, 120)}_\n`;
     }
   }
 

@@ -17,6 +17,8 @@
 const path = require("path");
 const { execFileSync } = require("child_process");
 const browser = require("../../shared/browser");
+const { captureWiringDiagrams } = require("./wiring");
+const { fetchTSBs } = require("./tsb");
 
 // --- Config ---
 const ALLDATA_URL = process.env.ALLDATA_URL || "https://my.alldata.com";
@@ -293,6 +295,13 @@ async function search({ vin, year, make, model, engine, query }) {
 
   console.log(`${LOG} Results: ${extracted.procedures.length} procedure steps, ${Object.keys(extracted.torqueSpecs).length} torque specs, ${screenshots.length} screenshots`);
 
+  // Step 7: Capture wiring diagrams and fetch TSBs
+  const dtcCode = (query || "").match(/[PBCU][0-9]{4}/i)?.[0] || null;
+  const wiringDiagrams = captureWiringDiagrams({ dtcCode, symptom: query, listPageUrl: ALLDATA_URL });
+  const tsbs = fetchTSBs({ dtcCode, symptom: query, listPageUrl: ALLDATA_URL });
+
+  console.log(`${LOG} Wiring: ${wiringDiagrams.length} diagrams, TSBs: ${tsbs.length}`);
+
   return {
     source: "AllData Repair",
     vehicle: { vin, year, make, model, engine },
@@ -306,6 +315,8 @@ async function search({ vin, year, make, model, engine, query }) {
     laborTime,
     screenshots,
     diagrams_available: screenshots.length > 0,
+    wiringDiagrams,
+    tsbs,
   };
 }
 
