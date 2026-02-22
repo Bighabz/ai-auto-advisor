@@ -57,10 +57,11 @@ async function login(page) {
     }
   } catch {}
 
-  // Check if already logged in
+  // Check if already logged in — only match post-login UI terms, not marketing page text
   const pageText = await page.evaluate(() => document.body.innerText.toLowerCase());
-  const authKeywords = ["real fix", "labor", "vehicle", "repair", "dashboard"];
-  if (authKeywords.some((k) => pageText.includes(k))) {
+  const onLandingPage = pageText.includes("buy now") || pageText.includes("intelligent repair information");
+  const authKeywords = ["real fix", "select vehicle", "my vehicles", "shop management"];
+  if (!onLandingPage && authKeywords.some((k) => pageText.includes(k))) {
     console.log(`${LOG} Already logged in`);
     return true;
   }
