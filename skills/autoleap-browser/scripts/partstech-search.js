@@ -81,26 +81,46 @@ async function openPartsTechViaAutoLeap(browser) {
   const { getToken } = require("./autoleap-api");
   const token = await getToken();
 
-  // Find a recent estimate that has a vehicle
-  const ge = await autoLeapCall("GET", "/estimates?limit=10&skip=0&sort=createdAt&order=-1", null, token);
-  const records = ge.data?.response?.records || [];
-
+  // Try cached anchor first (avoids searching estimates every time)
+  const ANCHOR_CACHE = "/tmp/partstech-anchor.json";
   let estId = null, vehId = null;
-  for (const rec of records.slice(0, 6)) {
-    const full = await autoLeapCall("GET", `/estimates/${rec._id}`, null, token, 6000);
-    const e = full.data?.response;
-    const vehObj = e?.vehicle;
-    const vid = vehObj && typeof vehObj === "object" ? vehObj._id : null;
-    if (vid && typeof vid === "string") {
-      estId = rec._id;
-      vehId = vid;
-      break;
+  try {
+    const cached = JSON.parse(require("fs").readFileSync(ANCHOR_CACHE, "utf8"));
+    if (cached.estId && cached.vehId) {
+      estId = cached.estId;
+      vehId = cached.vehId;
+      console.log(`${LOG} Using cached anchor: est=${estId.substring(0,8)}… veh=${vehId.substring(0,8)}…`);
+    }
+  } catch { /* no cache yet */ }
+
+  // If no cache, search estimates for one with a vehicle
+  // AutoLeap returns vehicle as { vehicleId: { _id: "...", name: "..." } } — NOT vehicle._id
+  if (!estId) {
+    const ge = await autoLeapCall("GET", "/estimates?limit=50&skip=0&sort=createdAt&order=-1", null, token);
+    const records = ge.data?.response?.records || [];
+
+    for (const rec of records) {
+      const full = await autoLeapCall("GET", `/estimates/${rec._id}`, null, token, 6000);
+      const e = full.data?.response;
+      const vehObj = e?.vehicle;
+      // vehicle._id is undefined — the ID lives at vehicle.vehicleId._id
+      const vid = vehObj?.vehicleId?._id || vehObj?._id || null;
+      if (vid && typeof vid === "string") {
+        estId = rec._id;
+        vehId = vid;
+        break;
+      }
     }
   }
 
   if (!estId) {
     throw new Error("No AutoLeap estimate with vehicle found — cannot open PartsTech");
   }
+
+  // Cache this working anchor for future runs
+  try {
+    require("fs").writeFileSync(ANCHOR_CACHE, JSON.stringify({ estId, vehId }));
+  } catch { /* non-fatal */ }
 
   const qPath = `/partstech/create/qoute?orderId=${encodeURIComponent(estId)}&vehicleId=${encodeURIComponent(vehId)}&isTrigge=true`;
   const qoute = await autoLeapCall("GET", qPath, null, token);
