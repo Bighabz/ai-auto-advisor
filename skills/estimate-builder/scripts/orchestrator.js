@@ -64,6 +64,8 @@ if (process.env.AUTOLEAP_EMAIL) {
     // autoleap-api not available — estimate creation disabled
   }
 }
+// Legacy reference kept null so handleApprovalAndOrder gracefully returns "not configured"
+const autoLeapBrowser = null;
 
 /**
  * Classify request type for routing
