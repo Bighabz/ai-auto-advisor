@@ -154,11 +154,15 @@ function extractPartsNeeded(query, researchResults) {
   // Fallback: Extract from query keywords
   const queryLower = query.toLowerCase();
 
-  // O2 sensor / catalyst codes
-  if (queryLower.includes("p0420") || queryLower.includes("catalyst") || queryLower.includes("o2 sensor")) {
+  // Catalytic converter
+  if (queryLower.includes("catalytic") || queryLower.includes("catalyst")) {
+    partsNeeded.push({ partType: "catalytic converter" });
+  }
+
+  // O2 sensor (P0420 or explicit mention)
+  if (queryLower.includes("p0420") || queryLower.includes("o2 sensor") || queryLower.includes("oxygen sensor")) {
     partsNeeded.push({ partType: "oxygen sensor", position: "downstream" });
     partsNeeded.push({ partType: "oxygen sensor", position: "upstream" });
-    // Might also need cat, but don't auto-add — let diagnosis guide
   }
 
   // Common DTC to parts mapping
@@ -166,6 +170,9 @@ function extractPartsNeeded(query, researchResults) {
     "P0171": [{ partType: "mass air flow sensor" }, { partType: "fuel injector" }],
     "P0300": [{ partType: "spark plug" }, { partType: "ignition coil" }],
     "P0442": [{ partType: "gas cap" }, { partType: "evap canister purge valve" }],
+    "P0128": [{ partType: "thermostat" }],
+    "P0340": [{ partType: "camshaft position sensor" }],
+    "P0335": [{ partType: "crankshaft position sensor" }],
   };
 
   const dtcMatch = query.match(/[PBCU][0-9]{4}/gi);
@@ -192,6 +199,44 @@ function extractPartsNeeded(query, researchResults) {
   if (queryLower.includes("oil change")) {
     partsNeeded.push({ partType: "oil filter" });
     partsNeeded.push({ partType: "drain plug gasket" });
+  }
+
+  // Common single-part replacements
+  const singlePartMap = [
+    { keywords: ["water pump"],          part: "water pump" },
+    { keywords: ["alternator"],          part: "alternator" },
+    { keywords: ["starter"],             part: "starter" },
+    { keywords: ["thermostat"],          part: "thermostat" },
+    { keywords: ["radiator"],            part: "radiator" },
+    { keywords: ["battery"],             part: "battery" },
+    { keywords: ["fuel pump"],           part: "fuel pump" },
+    { keywords: ["fuel filter"],         part: "fuel filter" },
+    { keywords: ["air filter"],          part: "air filter" },
+    { keywords: ["cabin filter", "cabin air filter"], part: "cabin air filter" },
+    { keywords: ["spark plug"],          part: "spark plug" },
+    { keywords: ["ignition coil"],       part: "ignition coil" },
+    { keywords: ["mass air flow", "maf sensor"], part: "mass air flow sensor" },
+    { keywords: ["throttle body"],       part: "throttle body" },
+    { keywords: ["egr valve"],           part: "egr valve" },
+    { keywords: ["pcv valve"],           part: "pcv valve" },
+    { keywords: ["timing belt"],         part: { partType: "timing belt", searchTerms: ["timing belt kit"] } },
+    { keywords: ["timing chain"],        part: "timing chain kit" },
+    { keywords: ["serpentine belt", "drive belt"], part: "serpentine belt" },
+    { keywords: ["wheel bearing"],       part: "wheel bearing hub assembly" },
+    { keywords: ["cv axle", "cv shaft"], part: "cv axle shaft" },
+    { keywords: ["strut", "shock absorber", "shocks"], part: "strut assembly" },
+    { keywords: ["control arm"],         part: "control arm" },
+    { keywords: ["tie rod"],             part: "tie rod end" },
+    { keywords: ["power steering pump"], part: "power steering pump" },
+    { keywords: ["ac compressor", "a/c compressor"], part: "ac compressor" },
+  ];
+
+  for (const { keywords, part } of singlePartMap) {
+    if (keywords.some(k => queryLower.includes(k))) {
+      if (!partsNeeded.some(p => p.partType === (typeof part === "string" ? part : part.partType))) {
+        partsNeeded.push(typeof part === "string" ? { partType: part } : part);
+      }
+    }
   }
 
   return partsNeeded;
