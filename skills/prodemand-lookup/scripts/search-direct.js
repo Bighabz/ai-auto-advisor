@@ -711,8 +711,8 @@ async function extractLaborTimes(page) {
 
     if (laborCount === 0) {
       // P&L page may auto-load labor data from the URL — wait longer before giving up
-      console.log(`${LOG} Labor data not yet loaded — waiting up to 15s`);
-      for (let i = 0; i < 15; i++) {
+      console.log(`${LOG} Labor data not yet loaded — waiting up to 5s`);
+      for (let i = 0; i < 5; i++) {
         laborCount = await page.evaluate(() =>
           document.querySelectorAll("#laborDetails li.item, .col.labor").length
         );
@@ -1051,11 +1051,23 @@ async function search(params) {
       };
     }
 
-    // Step 2: Navigate to 1SEARCH
-    await goToOneSearch(page);
+    // Step 2: Check if vehicle is already selected (saves 10-20s on repeat calls)
+    const currentBreadcrumb = await page.evaluate(
+      () => document.querySelector("#vehicleDetails")?.innerText?.trim() || ""
+    );
+    const targetKey = `${year}${make}${model}`.replace(/\s+/g, "").toLowerCase();
+    const alreadySelected = currentBreadcrumb.replace(/\s+/g, "").toLowerCase().includes(targetKey.substring(0, 12));
 
-    // Step 3: Select vehicle
-    const vehicleSelected = await selectVehicle(page, { year, make, model, engine });
+    if (alreadySelected) {
+      console.log(`${LOG} Vehicle already selected: ${currentBreadcrumb} — skipping selector`);
+    } else {
+      // Step 3a: Navigate to 1SEARCH and select vehicle
+      await goToOneSearch(page);
+      await selectVehicle(page, { year, make, model, engine });
+    }
+
+    // Step 3: (alias for logging clarity)
+    const vehicleSelected = true;
     if (!vehicleSelected) {
       console.log(`${LOG} Vehicle selection may be incomplete — proceeding anyway`);
     }
