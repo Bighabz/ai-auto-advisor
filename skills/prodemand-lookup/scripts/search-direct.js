@@ -149,22 +149,45 @@ async function ensureLoggedIn(page, reusingSession) {
 // ── Vehicle Selection ─────────────────────────────────────────────────────────
 
 /**
- * Navigate to 1SEARCH view where vehicle selector is always in the sidebar.
+ * Navigate to 1SEARCH view and ensure the vehicle selector sidebar is open
+ * with the Vehicle Selection accordion expanded so qualifiers are visible.
  */
 async function goToOneSearch(page) {
   const currentUrl = page.url();
-  if (currentUrl.includes("OneView") || currentUrl.includes("oneview")) {
-    return; // Already there
+  if (!currentUrl.includes("OneView") && !currentUrl.includes("oneview")) {
+    // Click 1SEARCH in the navigation
+    await page.evaluate(() => {
+      const links = Array.from(document.querySelectorAll("a, li, nav *"));
+      const link = links.find(
+        (el) => el.innerText && (el.innerText.includes("1SEARCH") || el.innerText.includes("OneView"))
+      );
+      if (link) link.click();
+    });
+    await sleep(1500);
   }
-  // Click 1SEARCH in the navigation
-  await page.evaluate(() => {
-    const links = Array.from(document.querySelectorAll("a, li, nav *"));
-    const link = links.find(
-      (el) => el.innerText && (el.innerText.includes("1SEARCH") || el.innerText.includes("OneView"))
-    );
-    if (link) link.click();
+
+  // Ensure vehicle selector panel is OPEN
+  const panelOpen = await page.evaluate(() => {
+    const d = document.querySelector("#vehicleSelectorDetails");
+    return d ? getComputedStyle(d).height !== "0px" : false;
   });
-  await sleep(1500);
+  if (!panelOpen) {
+    await page.evaluate(() => document.querySelector("#vehicleSelectorButton")?.click());
+    await sleep(1000);
+  }
+
+  // Ensure "Vehicle Selection" accordion item is expanded (qualifiers visible)
+  const hasQualifiers = await page.evaluate(() => document.querySelectorAll("li.qualifier").length > 0);
+  if (!hasQualifiers) {
+    await page.evaluate(() => {
+      const items = Array.from(document.querySelectorAll(".accordion .item"));
+      const vh = items.find((el) => el.querySelector("h1")?.textContent.includes("Vehicle Selection"));
+      if (vh && !vh.classList.contains("active")) {
+        vh.querySelector(".header")?.click();
+      }
+    });
+    await page.waitForFunction(() => document.querySelectorAll("li.qualifier").length > 0, { timeout: 5000 }).catch(() => {});
+  }
 }
 
 /**
