@@ -205,7 +205,7 @@ async function generateEstimatePDF(params) {
 
     if (partsOptions.oem) {
       doc.text(
-        `☐ OEM (${partsOptions.oem.brand}): $${parseFloat(partsOptions.oem.price || 0).toFixed(2)}`,
+        `[ ] OEM (${partsOptions.oem.brand}): $${parseFloat(partsOptions.oem.price || 0).toFixed(2)}`,
         col1 + 10,
         rowY
       );
@@ -213,7 +213,7 @@ async function generateEstimatePDF(params) {
     }
     if (partsOptions.aftermarket) {
       doc.text(
-        `☐ Aftermarket (${partsOptions.aftermarket.brand}): $${parseFloat(
+        `[ ] Aftermarket (${partsOptions.aftermarket.brand}): $${parseFloat(
           partsOptions.aftermarket.price || 0
         ).toFixed(2)}`,
         col1 + 10,
@@ -226,6 +226,11 @@ async function generateEstimatePDF(params) {
   // ═══════════════════════════════════════════════════════════════════
   // TOTALS
   // ═══════════════════════════════════════════════════════════════════
+  // Ensure totals section fits on the same page (footer starts at y=680)
+  if (rowY + 110 > 660) {
+    doc.addPage();
+    rowY = 50;
+  }
   rowY += 10;
   doc.moveTo(col3, rowY).lineTo(colEnd, rowY).stroke();
   rowY += 5;
