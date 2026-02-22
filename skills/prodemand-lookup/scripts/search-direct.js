@@ -66,18 +66,22 @@ async function login(page) {
     return true;
   }
 
-  // Find and click Login button on landing page
+  // Find and click Login button on landing page (no :has-text — use evaluate)
   try {
-    const loginLink = await page.$('a[href*="login"], a[href*="signin"], button:has-text("Login"), button:has-text("Sign In")');
-    if (loginLink) {
-      console.log(`${LOG} Clicking Login link...`);
-      await loginLink.click();
-      await page.waitForNavigation({ waitUntil: "domcontentloaded", timeout: 15000 }).catch(() => {});
+    const clicked = await page.evaluate(() => {
+      const btns = Array.from(document.querySelectorAll('a, button'));
+      const btn = btns.find(el => /^login$|^sign in$/i.test(el.innerText.trim()));
+      if (btn) { btn.click(); return true; }
+      return false;
+    });
+    if (clicked) {
+      console.log(`${LOG} Clicked Login button`);
+      await page.waitForFunction(() => document.querySelector('input[type="password"]') !== null, { timeout: 10000 }).catch(() => {});
     }
   } catch {}
 
   // Look for login form
-  const usernameField = await page.$('input[type="text"], input[name*="user"], input[name*="login"], input[id*="user"], input[id*="login"]');
+  const usernameField = await page.$('input[type="text"], input[type="email"], input[name*="user"], input[name*="login"], input[id*="user"], input[id*="login"]');
   const passwordField = await page.$('input[type="password"]');
 
   if (usernameField && passwordField) {
@@ -87,15 +91,14 @@ async function login(page) {
     await passwordField.click({ clickCount: 3 });
     await passwordField.type(PRODEMAND_PASSWORD, { delay: 30 });
 
-    // Submit
-    const submitBtn = await page.$('button[type="submit"], input[type="submit"], button:has-text("Login"), button:has-text("Sign In")');
+    // Submit — press Enter or click submit button
+    const submitBtn = await page.$('button[type="submit"], input[type="submit"]');
     if (submitBtn) {
       await submitBtn.click();
-      await page.waitForNavigation({ waitUntil: "domcontentloaded", timeout: 15000 }).catch(() => {});
     } else {
       await passwordField.press("Enter");
-      await page.waitForNavigation({ waitUntil: "domcontentloaded", timeout: 15000 }).catch(() => {});
     }
+    await page.waitForNavigation({ waitUntil: "domcontentloaded", timeout: 15000 }).catch(() => {});
 
     // Check login result
     const postText = await page.evaluate(() => document.body.innerText.toLowerCase());
