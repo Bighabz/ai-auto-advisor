@@ -45,9 +45,19 @@ const { getCannedJobs } = require("../../autoleap-estimate/scripts/canned-jobs")
 const { getShopConfig } = require("../../shop-management/scripts/config");
 const { trackEvent } = require("../../shop-management/scripts/usage");
 
-// PartsTech browser ordering — optional, only used when PARTSTECH_URL is set
+// PartsTech via AutoLeap's embedded session — loads when AUTOLEAP_EMAIL is set (no separate PT credentials needed)
+let autoLeapPartstech = null;
+if (process.env.AUTOLEAP_EMAIL) {
+  try {
+    autoLeapPartstech = require("../../autoleap-browser/scripts/partstech-search");
+  } catch {
+    // partstech-search not available
+  }
+}
+
+// PartsTech browser (shop.partstech.com) — optional, loads when PARTSTECH_USERNAME is set (cart + ordering)
 let partstechOrder = null;
-if (process.env.PARTSTECH_URL) {
+if (process.env.PARTSTECH_USERNAME) {
   try {
     partstechOrder = require("../../partstech-order/scripts/order");
   } catch {
@@ -1001,29 +1011,55 @@ async function buildEstimate(params) {
   const partsNeeded = extractPartsNeeded(params.query, results.diagnosis);
   console.log(`  → Parts needed: ${partsNeeded.map((p) => p.partType).join(", ") || "None identified"}`);
 
-  if (partsNeeded.length > 0 && vehicle.vin) {
-    results.parts = await searchMultipleParts(vehicle.vin, partsNeeded);
-    console.log(`  → Best value bundle: $${results.parts.bestValueBundle?.totalCost?.toFixed(2) || "N/A"}`);
-    console.log(`  → Suppliers: ${results.parts.bestValueBundle?.suppliers?.join(", ") || "N/A"}`);
-
-    // Track parts search event
-    trackEvent(shopId, "parts_searched", {
-      vehicle: { year: vehicle.year, make: vehicle.make, model: vehicle.model },
-      partsCount: partsNeeded.length,
-      totalCost: results.parts.bestValueBundle?.totalCost,
-      platformsUsed: ["partstech"],
-    }).catch(() => {});
-
-    // Collect OEM alternatives
-    results.oemAlternatives = [];
-    for (const res of results.parts.individualResults || []) {
-      if (res.bestValue?.oem) {
-        results.oemAlternatives.push(res.bestValue.oem);
-      }
+  if (partsNeeded.length > 0) {
+    if (autoLeapPartstech) {
+      // AutoLeap embedded PartsTech — uses Chrome session, no separate PT credentials needed
+      results.parts = await autoLeapPartstech.searchPartsPricing({
+        year: vehicle.year,
+        make: vehicle.make,
+        model: vehicle.model,
+        vin: vehicle.vin || null,
+        partsList: partsNeeded,
+      });
+    } else if (partstechOrder) {
+      // Fallback: shop.partstech.com browser (requires PARTSTECH_USERNAME)
+      results.parts = await partstechOrder.searchPartsPricing({
+        year: vehicle.year,
+        make: vehicle.make,
+        model: vehicle.model,
+        vin: vehicle.vin || null,
+        partsList: partsNeeded,
+      });
+    } else if (vehicle.vin) {
+      // Fallback: REST API (requires VIN + PARTSTECH_API_KEY)
+      results.parts = await searchMultipleParts(vehicle.vin, partsNeeded);
+    } else {
+      console.log(`  → Skipped (set AUTOLEAP_EMAIL to enable parts pricing via AutoLeap)`);
     }
-    results.parts.oemAlternatives = results.oemAlternatives;
+
+    if (results.parts) {
+      console.log(`  → Best value bundle: $${results.parts.bestValueBundle?.totalCost?.toFixed(2) || "N/A"}`);
+      console.log(`  → Suppliers: ${results.parts.bestValueBundle?.suppliers?.join(", ") || "N/A"}`);
+
+      // Track parts search event
+      trackEvent(shopId, "parts_searched", {
+        vehicle: { year: vehicle.year, make: vehicle.make, model: vehicle.model },
+        partsCount: partsNeeded.length,
+        totalCost: results.parts.bestValueBundle?.totalCost,
+        platformsUsed: ["partstech"],
+      }).catch(() => {});
+
+      // Collect OEM alternatives
+      results.oemAlternatives = [];
+      for (const res of results.parts.individualResults || []) {
+        if (res.bestValue?.oem) {
+          results.oemAlternatives.push(res.bestValue.oem);
+        }
+      }
+      results.parts.oemAlternatives = results.oemAlternatives;
+    }
   } else {
-    console.log(`  → Skipped (no VIN or no parts identified)`);
+    console.log(`  → Skipped (no parts identified)`);
   }
 
   // ─── Step 5.5: Pre-stage Cart (Optional) ───

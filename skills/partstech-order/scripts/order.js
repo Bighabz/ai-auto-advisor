@@ -976,6 +976,104 @@ async function placeOrder() {
   }
 }
 
+/**
+ * Search for parts pricing without adding to cart.
+ * Uses Year/Make/Model — no VIN required.
+ * Returns data in the same bestValueBundle format as partstech-search REST API.
+ *
+ * @param {object} params
+ * @param {string|number} params.year
+ * @param {string} params.make
+ * @param {string} params.model
+ * @param {string} [params.vin]
+ * @param {Array} params.partsList - [{partType, position, qty}]
+ * @returns {object} { bestValueBundle, individualResults }
+ */
+async function searchPartsPricing({ year, make, model, vin, partsList }) {
+  const empty = { bestValueBundle: { parts: [], totalCost: 0, allInStock: true, suppliers: [] }, individualResults: [] };
+
+  if (!partsList || partsList.length === 0) return empty;
+
+  console.log(`[partstech-order] Searching pricing for ${year} ${make} ${model}, ${partsList.length} parts...`);
+
+  const login = ensureLoggedIn();
+  if (!login.success) {
+    console.error(`[partstech-order] Login failed: ${login.error}`);
+    return { error: login.error, ...empty };
+  }
+
+  const vehicleResult = selectVehicle({ vin, year, make, model });
+  if (!vehicleResult.success) {
+    console.log(`[partstech-order] Vehicle warning: ${vehicleResult.error} — continuing`);
+  }
+
+  const bundle = {
+    parts: [],
+    totalCost: 0,
+    allInStock: true,
+    suppliers: new Set(),
+  };
+  const individualResults = [];
+
+  for (const partReq of partsList) {
+    const searchTerm = partReq.position
+      ? `${partReq.partType} ${partReq.position}`
+      : partReq.partType;
+
+    const rawResults = searchPartInBrowser(searchTerm);
+
+    if (rawResults.length === 0) {
+      bundle.parts.push({ requested: partReq, selected: null, error: "No results found" });
+      bundle.allInStock = false;
+      individualResults.push({ partType: partReq.partType, error: "No results", bestValue: null });
+      continue;
+    }
+
+    // Pick cheapest result
+    const best = findBestMatch(rawResults, {});
+    if (!best) {
+      bundle.parts.push({ requested: partReq, selected: null, error: "No match" });
+      individualResults.push({ partType: partReq.partType, error: "No match", bestValue: null });
+      continue;
+    }
+
+    const price = parseFloat(best.price) || 0;
+
+    // Parse brand + description from result text
+    const descMatch = best.text.match(/^(.+?)\s+\$[\d,.]+/);
+    const fullDesc = descMatch ? descMatch[1].trim() : best.text.trim();
+    const words = fullDesc.split(/\s+/);
+    const brand = words[0] || "Unknown";
+    const description = words.length > 1 ? words.slice(1).join(" ") : fullDesc;
+
+    const selected = {
+      description,
+      brand,
+      partNumber: null,
+      price,
+      coreCharge: 0,
+      totalCost: price,
+      availability: "In Stock",
+      supplier: "PartsTech",
+      type: "Aftermarket",
+    };
+
+    bundle.parts.push({ requested: partReq, selected });
+    bundle.totalCost += price * (partReq.qty || 1);
+    bundle.suppliers.add("PartsTech");
+    individualResults.push({
+      partType: partReq.partType,
+      bestValue: { overall: selected, aftermarket: selected, oem: null },
+    });
+  }
+
+  bundle.suppliers = [...bundle.suppliers];
+  bundle.supplierCount = bundle.suppliers.length;
+
+  console.log(`[partstech-order] Pricing search done: $${bundle.totalCost.toFixed(2)} total, ${bundle.parts.filter(p => p.selected).length}/${bundle.parts.length} found`);
+  return { bestValueBundle: bundle, individualResults };
+}
+
 module.exports = {
   // Main operations
   addMultipleToCart,
@@ -983,6 +1081,7 @@ module.exports = {
   getCartSummary,
   placeOrder,
   clearCart,
+  searchPartsPricing,
   // Vehicle
   selectVehicle,
   ensureLoggedIn,
