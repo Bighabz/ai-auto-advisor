@@ -87,7 +87,7 @@ const { checkHealth, cleanupArtifacts, validateEnv } = require("../../shared/hea
 
 // Feature flags
 const FEAT_STRUCTURED_LOGGING = process.env.SAM_STRUCTURED_LOGGING === "true";
-const FEAT_SESSION_PREFLIGHT = process.env.SAM_SESSION_PREFLIGHT !== "false"; // enabled by default
+const FEAT_SESSION_PREFLIGHT = process.env.SAM_SESSION_PREFLIGHT === "true";
 const FEAT_RETRY_ENABLED = process.env.SAM_RETRY_ENABLED === "true";
 
 // Shared instances
@@ -1602,8 +1602,6 @@ async function buildEstimate(params) {
   console.log(`  Pipeline complete in ${elapsed}s [${runId}]`);
   if (reasonCodes.length > 0) console.log(`  Reason codes: ${reasonCodes.join(", ")}`);
   console.log(`═══════════════════════════════════════════════════════════════\n`);
-
-  results.runId = runId;
 
   // --- Pipeline metrics ---
   const totalRuntime = Date.now() - runCtx.startTime;
