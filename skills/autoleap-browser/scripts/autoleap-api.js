@@ -378,19 +378,24 @@ async function buildEstimate({ customerName, phone, vehicleYear, vehicleMake, ve
     if (!customer) {
       console.log(`${LOG} Customer not found for "${searchQuery}", creating...`);
       const nameParts = (customerName || "Unknown Customer").trim().split(/\s+/);
-      const firstName = nameParts[0];
-      const lastName = nameParts.slice(1).join(" ") || "";
-      customer = await createCustomer(token, { firstName, lastName, phone });
-      console.log(`${LOG} Created customer: ${customer.fullName} (${customer._id})`);
+      const firstName = nameParts.length > 1 ? nameParts[0] : "";
+      const lastName  = nameParts.length > 1 ? nameParts.slice(1).join(" ") : nameParts[0];
+      try {
+        customer = await createCustomer(token, { firstName, lastName, phone });
+        console.log(`${LOG} Created customer: ${customer.fullName} (${customer._id})`);
+      } catch (custErr) {
+        console.log(`${LOG} Customer creation failed (${custErr.message}) — proceeding without customer`);
+        customer = null;
+      }
     } else {
       console.log(`${LOG} Found customer: ${customer.fullName} (${customer._id})`);
     }
 
-    const customerId = customer._id;
+    const customerId = customer?._id || null;
 
     // 3. Match vehicle (optional)
     let vehicleId = null;
-    const vehicles = customer.vehicles || [];
+    const vehicles = customer?.vehicles || [];
     if (vehicles.length > 0 && (vehicleYear || vehicleMake || vehicleModel || vin)) {
       // Try to match by VIN first
       if (vin) {
@@ -443,13 +448,13 @@ async function buildEstimate({ customerName, phone, vehicleYear, vehicleMake, ve
 
     const vehicleDesc = vehicleYear && vehicleMake && vehicleModel
       ? `${vehicleYear} ${vehicleMake} ${vehicleModel}`
-      : (customer.vehicles?.[0]?.name || null);
+      : (customer?.vehicles?.[0]?.name || null);
 
     return {
       success: true,
       estimateCode: estimate.code,
       estimateId: estimate._id,
-      customerName: customer.fullName,
+      customerName: customer?.fullName || customerName || null,
       vehicleDesc,
       total:      Math.round(total * 100) / 100,
       totalLabor: Math.round(totalLabor * 100) / 100,
