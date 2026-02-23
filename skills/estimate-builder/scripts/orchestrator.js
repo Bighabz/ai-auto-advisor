@@ -497,15 +497,13 @@ ${diagnosis?.summary || "See research results"}
 
   // Estimate totals
   if (estimate?.total) {
-    response += `
-💰 ESTIMATE TOTAL
-   Labor:        $${estimate.totalLabor}
-   Parts:        $${estimate.totalParts}
-   Shop Supplies: $${estimate.shopSupplies}
-   Tax:          $${estimate.tax}
-   ─────────────────
-   TOTAL:        $${estimate.total}
-`;
+    response += `\n💰 ESTIMATE TOTAL\n`;
+    response += `   Labor:         $${estimate.totalLabor != null ? estimate.totalLabor.toFixed(2) : "N/A"}\n`;
+    response += `   Parts:         $${estimate.totalParts != null ? estimate.totalParts.toFixed(2) : "N/A"}\n`;
+    if (estimate.shopSupplies != null) response += `   Shop Supplies: $${estimate.shopSupplies.toFixed(2)}\n`;
+    if (estimate.tax != null)          response += `   Tax:           $${estimate.tax.toFixed(2)}\n`;
+    response += `   ─────────────────────────\n`;
+    response += `   TOTAL:         $${estimate.total.toFixed(2)}\n`;
     if (estimate.estimateId) {
       const estRef = estimate.estimateCode || estimate.estimateId;
       response += `

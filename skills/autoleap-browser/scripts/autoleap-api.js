@@ -424,8 +424,11 @@ async function buildEstimate({ customerName, phone, vehicleYear, vehicleMake, ve
     const services = buildServices(diagnosis, parts, laborHoursOverride);
     console.log(`${LOG} Built ${services.length} service(s) with ${services[0]?.items?.length || 0} item(s)`);
 
+    // Strip internal metadata before sending to AutoLeap API
+    const apiServices = services.map(({ _laborTotal, _partsTotal, _laborHours, _laborRate, ...rest }) => rest);
+
     // 5. Create estimate
-    const estimate = await createEstimate(token, { customerId, vehicleId, services });
+    const estimate = await createEstimate(token, { customerId, vehicleId, services: apiServices });
     console.log(`${LOG} Estimate created: ${estimate.code} (${estimate._id})`);
 
     // 6. Compute total from service items (API serviceTotal may be 0 initially)
