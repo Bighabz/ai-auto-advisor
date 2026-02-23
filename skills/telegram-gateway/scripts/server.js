@@ -30,17 +30,36 @@ if (fs.existsSync(envPath)) {
   }
 }
 
+const { validateEnv, checkHealth, cleanupArtifacts } = require("../../shared/health");
+const { createLogger } = require("../../shared/logger");
+const log = createLogger("telegram-gateway");
+
+// Validate required env vars
+const envCheck = validateEnv(["TELEGRAM_BOT_TOKEN", "SUPABASE_URL", "SUPABASE_ANON_KEY"]);
+if (!envCheck.valid) {
+  log.error("Missing required env vars", { missing: envCheck.missing });
+  process.exit(1);
+}
+
+// Run cleanup on startup
+const cleaned = cleanupArtifacts();
+if (cleaned.artifacts > 0 || cleaned.screenshots > 0) {
+  log.info("startup cleanup", cleaned);
+}
+
+// Schedule periodic cleanup (every 6 hours)
+setInterval(() => {
+  const c = cleanupArtifacts();
+  if (c.artifacts > 0 || c.screenshots > 0) log.info("periodic cleanup", c);
+}, 6 * 60 * 60 * 1000);
+
 const { formatForWhatsApp, formatHelp, formatStatus } = require("../../whatsapp-gateway/scripts/formatter");
 const { buildEstimate, handleOrderRequest, handleApprovalAndOrder } = require("../../estimate-builder/scripts/orchestrator");
 
 const LOG = "[telegram]";
 const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
-
-if (!BOT_TOKEN) {
-  console.error(`${LOG} ERROR: TELEGRAM_BOT_TOKEN not set`);
-  process.exit(1);
-}
+const FEAT_PROGRESS = process.env.TELEGRAM_PROGRESS_UPDATES === "true";
 
 const API_BASE = `https://api.telegram.org/bot${BOT_TOKEN}`;
 
@@ -232,7 +251,28 @@ async function handleToolCall(chatId, toolCall) {
 
     // Immediate acknowledgment — no parse_mode so vehicle name can't break Markdown
     const vehicleLabel = [input.year, input.make, input.model].filter(Boolean).join(" ");
-    await sendMessage(chatId, `On it! Building estimate for ${vehicleLabel}... Takes about 60 seconds.`, { parse_mode: undefined });
+    const ackResult = await telegramAPI("sendMessage", {
+      chat_id: chatId,
+      text: `On it! Building estimate for ${vehicleLabel}... Takes about 60 seconds.`,
+    });
+    const ackMessageId = ackResult.ok ? ackResult.result.message_id : null;
+
+    // Progress updates (behind feature flag)
+    if (FEAT_PROGRESS && ackMessageId) {
+      const PROGRESS_MESSAGES = {
+        diagnosis_done: `On it! ${vehicleLabel}\n\nGot vehicle specs. Checking repair data...`,
+        research_done: `On it! ${vehicleLabel}\n\nFound repair data. Looking up parts pricing...`,
+        building_estimate: `On it! ${vehicleLabel}\n\nBuilding your estimate...`,
+      };
+      params.progressCallback = async (stage) => {
+        const text = PROGRESS_MESSAGES[stage];
+        if (text) {
+          try {
+            await editMessage(chatId, ackMessageId, text);
+          } catch (_) {}
+        }
+      };
+    }
 
     const startTime = Date.now();
     try {
@@ -337,6 +377,30 @@ async function sendMessage(chatId, text, options = {}) {
   }
 }
 
+async function editMessage(chatId, messageId, text) {
+  try {
+    const formatted = toTelegramMarkdown(text);
+    const result = await telegramAPI("editMessageText", {
+      chat_id: chatId,
+      message_id: messageId,
+      text: formatted,
+      parse_mode: "Markdown",
+    });
+    if (!result.ok) {
+      // Retry without Markdown if parse fails
+      if (result.description?.includes("parse") || result.description?.includes("can't")) {
+        await telegramAPI("editMessageText", {
+          chat_id: chatId,
+          message_id: messageId,
+          text: text,
+        });
+      }
+    }
+  } catch (err) {
+    console.error(`${LOG} editMessage error: ${err.message}`);
+  }
+}
+
 async function sendDocument(chatId, filePath, caption) {
   const fetch = (await import("node-fetch")).default;
   const FormData = (await import("form-data")).default;
@@ -398,6 +462,18 @@ async function handleMessage(chatId, messageText, username) {
   const textLower = messageText.trim().toLowerCase();
   if (textLower === "help" || textLower === "?") return { messages: [formatHelp()] };
   if (textLower === "status" || textLower === "ping") return { messages: [formatStatus()] };
+  if (textLower === "/health") {
+    const health = await checkHealth();
+    const statusEmoji = health.cdp ? "\u2705" : "\u274C";
+    const msg = [
+      `*SAM Health Check*`,
+      `Chrome: ${health.chrome ? "running" : "stopped"}`,
+      `CDP (port 18800): ${statusEmoji}`,
+      `Disk: ${health.disk_free_mb}MB free${health.disk_warning ? " \u26A0 LOW" : ""}`,
+      `Uptime: ${Math.round(health.uptime_s / 60)}min`,
+    ].join("\n");
+    return { messages: [msg] };
+  }
 
   // Everything else → Claude decides
   const { text, toolCall, stopReason } = await processMessage(chatId, messageText.trim());
