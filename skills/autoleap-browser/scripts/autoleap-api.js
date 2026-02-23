@@ -164,13 +164,13 @@ async function getToken() {
     await page.keyboard.type(password, { delay: 60 });
     await page.keyboard.press('Enter');
 
-    // Wait for redirect away from login page
+    // Wait for redirect away from login page (Angular app can be slow — 40s timeout)
     await page.waitForFunction(
       () => !window.location.href.includes("/login"),
-      { timeout: 20000 }
+      { timeout: 40000 }
     );
     // Let the app boot and fire its initial API calls
-    await new Promise(r => setTimeout(r, 4000));
+    await new Promise(r => setTimeout(r, 5000));
   } else {
     // Already authenticated — reload to trigger API calls and capture token
     await page.reload({ waitUntil: "networkidle0", timeout: 30000 });
