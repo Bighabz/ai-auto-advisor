@@ -78,6 +78,10 @@ function formatForWhatsApp(results) {
     msg1 += `\n\u{1F4C4} PDF estimate attached`;
   }
 
+  if (results.warnings?.length > 0) {
+    msg1 += `\n⚠ _${results.warnings.map(w => w.msg).join("; ")}_`;
+  }
+
   messages.push(msg1.trim());
 
   // ── Message 2: Details (diagnosis steps, parts, repair plan) ──

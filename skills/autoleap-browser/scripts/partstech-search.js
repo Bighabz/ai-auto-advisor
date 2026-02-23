@@ -264,6 +264,12 @@ async function searchOnePart(ptPage, client, searchTerm) {
     } catch { /* malformed JSON */ }
   }
 
+  // Assertion: log GetProducts event count for debugging cache issues
+  const getProductsCount = Object.entries(graphqlBodies).filter(([id]) => {
+    try { return JSON.parse(graphqlRequests[id] || "{}").operationName === "GetProducts"; } catch { return false; }
+  }).length;
+  console.log(`${LOG} GraphQL GetProducts events captured: ${getProductsCount} (pricing source: ${getProductsCount > 0 ? "live" : "cache/none"})`);
+
   return products;
 }
 
@@ -324,13 +330,21 @@ async function searchPartsPricing({ year, make, model, vin, partsList }) {
   let browser = null;
   try {
     browser = await puppeteer.connect({ browserURL: CHROME_CDP, defaultViewport: null });
-    const ptPage = await getPartsTechPage(browser);
+    // Close any stale PartsTech tab so we get a clean Angular session
+    const stalePage = await findPartsTechPage(browser);
+    if (stalePage) {
+      console.log(`${LOG} Closing stale PartsTech tab (session may have cached responses)`);
+      try { await stalePage.close(); } catch { /* already closed */ }
+    }
+
+    // Always open a fresh tab via AutoLeap SSO
+    console.log(`${LOG} Opening fresh PartsTech tab...`);
+    const ptPage = await openPartsTechViaAutoLeap(browser);
+    if (!ptPage) throw new Error("Failed to open fresh PartsTech tab");
+    await new Promise(r => setTimeout(r, 3000)); // let Angular initialize
 
     const client = await ptPage.createCDPSession();
     await client.send("Network.enable");
-
-    // Wait for any in-flight navigation to settle
-    await new Promise(r => setTimeout(r, 2000));
 
     const bundle = {
       parts: [],

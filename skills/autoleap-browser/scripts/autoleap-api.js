@@ -252,7 +252,7 @@ async function getEstimate(token, estimateId) {
  * @param {object[]} [parts] - Parts from partstech search
  * @returns {object[]} AutoLeap services array
  */
-function buildServices(diagnosis, parts) {
+function buildServices(diagnosis, parts, laborHoursOverride) {
   const services = [];
   const repairPlan = diagnosis?.ai?.repair_plan || diagnosis?.repair_plan;
   const diagnoses = diagnosis?.ai?.diagnoses || diagnosis?.diagnoses || [];
@@ -266,11 +266,16 @@ function buildServices(diagnosis, parts) {
   // Gather labor items
   const laborItems = [];
 
-  // Labor from repair plan
-  const laborHours = repairPlan?.labor?.hours || 1.5;
-  const laborRate = Number(process.env.AUTOLEAP_LABOR_RATE) || 120;
+  // Labor source precedence: MOTOR override > AI repair_plan > default 1.5
+  const motorHours = laborHoursOverride?.hours;
+  const aiHours    = repairPlan?.labor?.hours;
+  const laborHours = motorHours || aiHours || 1.5;
+  const laborSource = motorHours ? `MOTOR(${motorHours}h)` : (aiHours ? `AI(${aiHours}h)` : "default(1.5h)");
+  console.log(`${LOG} Labor source: ${laborSource}`);
+
+  const laborRate  = Number(process.env.AUTOLEAP_LABOR_RATE) || 120;
   const laborTotal = Math.round(laborHours * laborRate * 100) / 100;
-  const laborDesc = repairPlan?.labor?.description || serviceTitle;
+  const laborDesc  = laborHoursOverride?.description || repairPlan?.labor?.description || serviceTitle;
 
   laborItems.push({
     type: "labor",
@@ -354,7 +359,7 @@ function buildServices(diagnosis, parts) {
  * @param {object[]} [params.parts]     - Parts from partstech search
  * @returns {Promise<{ success, estimateCode, estimateId, customerName, vehicleDesc, total, error }>}
  */
-async function buildEstimate({ customerName, phone, vehicleYear, vehicleMake, vehicleModel, vin, diagnosis, parts }) {
+async function buildEstimate({ customerName, phone, vehicleYear, vehicleMake, vehicleModel, vin, diagnosis, parts, laborHoursOverride }) {
   try {
     // 1. Get auth token
     const token = await getToken();
@@ -409,7 +414,7 @@ async function buildEstimate({ customerName, phone, vehicleYear, vehicleMake, ve
     }
 
     // 4. Build services from diagnosis + parts
-    const services = buildServices(diagnosis, parts);
+    const services = buildServices(diagnosis, parts, laborHoursOverride);
     console.log(`${LOG} Built ${services.length} service(s) with ${services[0]?.items?.length || 0} item(s)`);
 
     // 5. Create estimate

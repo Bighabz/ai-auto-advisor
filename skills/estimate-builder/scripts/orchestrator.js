@@ -1014,6 +1014,12 @@ async function buildEstimate(params) {
   if (identifix && !identifix.error) console.log(`    Identifix: ${identifix.fixCount || 0} fixes, top fix ${identifix.topFix?.successRate || "?"}% success`);
   if (prodemand && !prodemand.error) console.log(`    ProDemand: ${prodemand.realFixes?.length || 0} Real Fixes, ${prodemand.laborTimes?.length || 0} labor times`);
 
+  // Yellow-fail warnings: track data quality issues for surface in output
+  results.warnings = results.warnings || [];
+  if (!prodemand?.laborTimes?.length) {
+    results.warnings.push({ code: "NO_MOTOR_LABOR", msg: "ProDemand returned 0 labor times — using AI estimate" });
+  }
+
   // ─── Step 4: Get Vehicle Specs (Mechanic Reference) ───
   console.log("\n[Step 4] Getting mechanic reference specs...");
 
@@ -1112,6 +1118,13 @@ async function buildEstimate(params) {
         }
       }
       results.parts.oemAlternatives = results.oemAlternatives;
+
+      // Yellow-fail: warn if PartsTech returned no live pricing
+      const gotPricing = results.parts?.bestValueBundle?.parts?.some(p => p.selected?.price > 0);
+      if (!gotPricing && results.parts?.bestValueBundle?.parts?.length > 0) {
+        results.warnings = results.warnings || [];
+        results.warnings.push({ code: "NO_PARTS_PRICING", msg: "PartsTech returned no pricing — parts listed without price" });
+      }
     }
   } else {
     console.log(`  → Skipped (no parts identified)`);
@@ -1157,6 +1170,16 @@ async function buildEstimate(params) {
 
     try {
       const estParts = results.parts?.bestValueBundle?.parts || [];
+
+      // Build explicit labor override from ProDemand MOTOR data (no diagnosis mutation)
+      const pdLaborTimes = results.diagnosis?.prodemand?.laborTimes || [];
+      const pdBestLabor = pdLaborTimes.length > 0 ? pdLaborTimes[0] : null;
+      const laborHoursOverride = (pdBestLabor?.hours > 0)
+        ? { hours: pdBestLabor.hours, source: "MOTOR", description: pdBestLabor.procedure || null }
+        : null;
+
+      console.log(`  → Labor source: ${laborHoursOverride ? `MOTOR ${pdBestLabor.hours}h` : "AI/default"}`);
+
       const apiEstimate = await autoLeapApi.buildEstimate({
         customerName: params.customer.name,
         phone: params.customer.phone || null,
@@ -1164,8 +1187,9 @@ async function buildEstimate(params) {
         vehicleMake: vehicle.make,
         vehicleModel: vehicle.model,
         vin: vehicle.vin || null,
-        diagnosis: results.diagnosis,
+        diagnosis: results.diagnosis,         // untouched
         parts: estParts,
+        laborHoursOverride,                   // explicit override
       });
 
       if (apiEstimate.success) {

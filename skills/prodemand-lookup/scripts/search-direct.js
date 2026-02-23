@@ -292,9 +292,8 @@ async function selectVehicle(page, { year, make, model, engine }) {
   // Phase 2: Options dialog — pick only UNSELECTED qualifiers we WANT
   // (Already-selected ones have class "qualifier selected" — skip them)
   // Stop when all remaining unselected options are ones we want to AVOID.
-  const PREFER = ["4d sedan", "automatic", "cvt", "gas", "fwd", "awd"];
-  const AVOID  = ["2d coupe", "coupe", "standard trans", "manual trans", "manual"];
   const MAX_OPTION_ROUNDS = 8;
+  let finalVariantLabel = null;
 
   for (let round = 0; round < MAX_OPTION_ROUNDS; round++) {
     const activeTab = await getActiveTab(page);
@@ -309,32 +308,54 @@ async function selectVehicle(page, { year, make, model, engine }) {
 
     console.log(`${LOG} Options round ${round + 1}: unselected: ${unselected.slice(0, 5).join(", ")}`);
 
-    const picked = await page.evaluate((prefer, avoid) => {
+    const picked = await page.evaluate(() => {
       const items = Array.from(document.querySelectorAll("li.qualifier:not(.selected)"));
+      if (items.length === 0) return "__done__";
 
-      // Try preferred options first
-      const preferred = items.find((li) =>
-        prefer.some((p) => li.textContent.trim().toLowerCase().includes(p))
-      );
-      if (preferred) { preferred.click(); return preferred.textContent.trim(); }
+      const score = (text) => {
+        const t = text.toLowerCase();
+        let s = 0;
+        // Prefer gasoline/gas engine strongly
+        if (t.includes("gas"))               s += 6;
+        if (t.includes("gasoline"))          s += 6;
+        // Prefer common transmission/layout
+        if (t.includes("automatic"))         s += 2;
+        if (t.includes("cvt"))               s += 2;
+        if (t.includes("fwd") || t.includes("awd")) s += 1;
+        if (t.includes("4d") || t.includes("sedan") || t.includes("utility")) s += 1;
+        // Penalize non-gas drivetrains (not hard-blocked — scored so EV queries still work)
+        if (t.includes("electric"))          s -= 8;
+        if (/\bev\b/.test(t))               s -= 8;
+        if (t.includes("plugin") || t.includes("plug-in")) s -= 5;
+        if (t.includes("hybrid"))            s -= 3;
+        if (t.includes("diesel"))            s -= 2;
+        // Penalize uncommon body/trans
+        if (t.includes("2d") || t.includes("coupe")) s -= 3;
+        if (t.includes("manual") || t.includes("standard trans")) s -= 4;
+        return s;
+      };
 
-      // Skip avoided options — if all remaining are avoided, stop
-      const safe = items.filter((li) =>
-        !avoid.some((a) => li.textContent.trim().toLowerCase().includes(a))
-      );
-      if (safe.length === 0) return "__skip__";
+      const scored = items.map(li => ({ li, text: li.textContent.trim(), s: score(li.textContent.trim()) }));
+      scored.sort((a, b) => b.s - a.s);
 
-      safe[0].click();
-      return safe[0].textContent.trim();
-    }, PREFER, AVOID);
+      // If best option is still strongly negative, all choices are bad — let caller decide
+      if (scored[0].s < -4 && scored.every(x => x.s < -4)) return "__skip__";
 
-    if (!picked || picked === "__skip__") {
-      console.log(`${LOG} Options: only avoided options remain — stopping`);
+      scored[0].li.click();
+      return scored[0].text;
+    });
+
+    if (!picked || picked === "__done__" || picked === "__skip__") {
+      console.log(`${LOG} Options: scored chooser stopped (${picked})`);
       break;
     }
+    finalVariantLabel = picked;
     console.log(`${LOG}   → ${picked}`);
     await sleep(1500);
   }
+
+  // Logging assertion — engine selection
+  console.log(`${LOG} Engine selected: "${finalVariantLabel || "(none)"}" (scored chooser)`);
 
   // Phase 3: Click "Use This Vehicle" to confirm
   const confirmed = await page.evaluate(() => {

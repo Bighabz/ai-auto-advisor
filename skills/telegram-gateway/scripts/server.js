@@ -230,6 +230,10 @@ async function handleToolCall(chatId, toolCall) {
       } : null,
     };
 
+    // Immediate acknowledgment — no parse_mode so vehicle name can't break Markdown
+    const vehicleLabel = [input.year, input.make, input.model].filter(Boolean).join(" ");
+    await sendMessage(chatId, `On it! Building estimate for ${vehicleLabel}... Takes about 60 seconds.`, { parse_mode: undefined });
+
     const startTime = Date.now();
     try {
       const results = await buildEstimate(params);
