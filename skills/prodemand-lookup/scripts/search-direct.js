@@ -297,6 +297,7 @@ async function selectVehicle(page, { year, make, model, engine }) {
           scored[0].li.click();
           return scored[0].text;
         });
+        if (picked) await sleep(1800); // Let ProDemand process engine switch
       }
     } else if (activeTab === "submodel") {
       picked = await clickQualifier(page, qualifiers[0]);

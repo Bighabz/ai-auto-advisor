@@ -349,7 +349,28 @@ async function searchPartsPricing({ year, make, model, vin, partsList }) {
     browser.ensureBrowser();
     browser.browserCmd("open", redirectUrl);
     browser.waitForLoad();
-    await new Promise(r => setTimeout(r, 5000)); // Let Angular app initialize
+
+    // Wait for PartsTech Angular app to render (can be slow on Pi)
+    let ptReady = false;
+    for (let attempt = 1; attempt <= 5; attempt++) {
+      await new Promise(r => setTimeout(r, 5000));
+      const snap = browser.takeSnapshot();
+      const els = browser.parseSnapshot(snap);
+      const searchRef = browser.findRefByType(els, "input", "search")
+        || browser.findRef(els, "search")
+        || browser.findRefByType(els, "input", "part");
+      if (searchRef) {
+        ptReady = true;
+        console.log(`${LOG} PartsTech ready (attempt ${attempt})`);
+        break;
+      }
+      console.log(`${LOG} Waiting for PartsTech to render (attempt ${attempt}/5, ${els.length} elements)...`);
+    }
+    if (!ptReady) {
+      console.log(`${LOG} PartsTech page did not render — dumping snapshot for debug`);
+      const debugSnap = browser.takeSnapshot();
+      console.log(`${LOG} Snapshot (first 500 chars): ${debugSnap.substring(0, 500)}`);
+    }
 
     // 5. Change vehicle if needed
     if (vehicleMatch.needsVehicleChange) {
