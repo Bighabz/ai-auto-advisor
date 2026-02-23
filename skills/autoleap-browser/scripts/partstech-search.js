@@ -19,8 +19,31 @@
 
 const https = require("https");
 const browser = require("../../shared/browser");
+const { createLogger } = require("../../shared/logger");
+const { normalizePrice } = require("../../shared/contracts");
 
 const LOG = "[partstech-search]";
+const log = createLogger("partstech-search");
+
+// --- Reason codes ---
+const REASON_CODES = {
+  PT_NO_TAB: "PT_NO_TAB",
+  PT_LOGIN_REDIRECT: "PT_LOGIN_REDIRECT",
+  PT_NO_SEARCH_INPUT: "PT_NO_SEARCH_INPUT",
+  PT_NO_PRODUCTS: "PT_NO_PRODUCTS",
+  PT_NO_PRICEABLE_ITEMS: "PT_NO_PRICEABLE_ITEMS",
+};
+
+// --- Result quality filtering ---
+function filterResults(products) {
+  return products.filter((p) => {
+    if (p.availability?.toLowerCase().includes("call for")) return false;
+    const price = normalizePrice(p.price || p.unit_price);
+    if (price === null) return false;
+    if (p.outOfNetwork) return false;
+    return true;
+  });
+}
 
 // ─── AutoLeap API helper ────────────────────────────────────────────────────
 
@@ -226,7 +249,7 @@ async function searchOnePart(searchTerm) {
   if (!searchRef) searchRef = browser.findRef(elements, "search");
 
   if (!searchRef) {
-    console.log(`${LOG} Search input not found in ${elements.length} elements`);
+    log.warn("search input not found", { elements: elements.length, reason_code: REASON_CODES.PT_NO_SEARCH_INPUT });
     for (const el of elements.slice(0, 15)) {
       console.log(`${LOG}   [${el.ref}] ${el.type}: "${el.text.substring(0, 60)}"`);
     }
@@ -332,7 +355,7 @@ async function searchPartsPricing({ year, make, model, vin, partsList }) {
 
   if (!partsList || partsList.length === 0) return empty;
 
-  console.log(`${LOG} Pricing ${partsList.length} part(s) for ${year} ${make} ${model}...`);
+  log.info("search started", { parts: partsList.length, year, make, model });
 
   try {
     // 1. Get AutoLeap token
@@ -342,14 +365,15 @@ async function searchPartsPricing({ year, make, model, vin, partsList }) {
     // 2. Find matching vehicle in AutoLeap estimates
     const vehicleMatch = await findMatchingVehicle(token, year, make, model);
     if (!vehicleMatch) {
-      console.log(`${LOG} No vehicle found in AutoLeap — cannot open PartsTech`);
-      return { error: "No AutoLeap vehicle found for PartsTech SSO", ...empty };
+      log.warn("no vehicle found in AutoLeap", { reason_code: REASON_CODES.PT_NO_TAB });
+      return { error: "No AutoLeap vehicle found for PartsTech SSO", reason_code: REASON_CODES.PT_NO_TAB, ...empty };
     }
 
     // 3. Get SSO redirect URL with correct vehicleId
     const redirectUrl = await getPartsTechUrl(token, vehicleMatch.estId, vehicleMatch.vehId);
     if (!redirectUrl) {
-      return { error: "PartsTech SSO redirect failed", ...empty };
+      log.warn("SSO redirect failed", { reason_code: REASON_CODES.PT_LOGIN_REDIRECT });
+      return { error: "PartsTech SSO redirect failed", reason_code: REASON_CODES.PT_LOGIN_REDIRECT, ...empty };
     }
 
     console.log(`${LOG} SSO URL: ${redirectUrl.substring(0, 80)}…`);
@@ -427,7 +451,13 @@ async function searchPartsPricing({ year, make, model, vin, partsList }) {
         } catch { /* ignore */ }
       }
 
-      console.log(`${LOG}   → ${products.length} product(s) found`);
+      // Quality filter: remove unpriceable / call-for-price / out-of-network items
+      const rawCount = products.length;
+      products = filterResults(products);
+      if (rawCount > 0 && products.length === 0) {
+        log.warn("all products filtered out", { searchTerm, rawCount, reason_code: REASON_CODES.PT_NO_PRICEABLE_ITEMS });
+      }
+      console.log(`${LOG}   → ${products.length} product(s) after quality filter (${rawCount} raw)`);
 
       const best = pickBestProduct(products);
 
@@ -471,12 +501,12 @@ async function searchPartsPricing({ year, make, model, vin, partsList }) {
     bundle.supplierCount = bundle.suppliers.length;
 
     const found = bundle.parts.filter(p => p.selected).length;
-    console.log(`${LOG} Done: ${found}/${bundle.parts.length} found, $${bundle.totalCost.toFixed(2)} total`);
+    log.info("search complete", { found, total: bundle.parts.length, cost: bundle.totalCost.toFixed(2) });
 
     return { bestValueBundle: bundle, individualResults };
 
   } catch (err) {
-    console.error(`${LOG} Error:`, err.message);
+    log.error("search failed", { error: err.message });
     return { error: err.message, ...empty };
   }
 }
