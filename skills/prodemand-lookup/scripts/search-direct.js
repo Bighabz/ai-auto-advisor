@@ -276,11 +276,9 @@ async function selectVehicle(page, { year, make, model, engine }) {
     else if (activeTab === "engine") {
       picked = wantedValues.engine ? await clickQualifier(page, wantedValues.engine) : null;
       if (!picked) {
-        // No engine specified — score options to prefer gas over electric
-        picked = await page.evaluate(() => {
-          const items = Array.from(document.querySelectorAll("li.qualifier:not(.selected)"));
-          if (items.length === 0) return null;
-          const score = (text) => {
+        // No engine specified — score ALL options (selected and unselected) for audit log
+        const engineAudit = await page.evaluate(() => {
+          const scoreEngine = (text) => {
             const t = text.toLowerCase();
             let s = 0;
             if (t.includes("gas") || t.includes("gasoline")) s += 6;
@@ -292,12 +290,40 @@ async function selectVehicle(page, { year, make, model, engine }) {
             if (t.includes("diesel")) s -= 2;
             return s;
           };
-          const scored = items.map(li => ({ li, text: li.textContent.trim(), s: score(li.textContent.trim()) }));
+
+          const allItems = Array.from(document.querySelectorAll("li.qualifier"));
+          const audit = allItems.map(li => ({
+            text: li.textContent.trim(),
+            score: scoreEngine(li.textContent.trim()),
+            selected: li.classList.contains("selected"),
+          }));
+
+          // Click the highest-scoring UNSELECTED option
+          const unselected = allItems.filter(li => !li.classList.contains("selected"));
+          if (unselected.length === 0) return { audit, clicked: null };
+
+          const scored = unselected.map(li => ({
+            li, text: li.textContent.trim(), s: scoreEngine(li.textContent.trim()),
+          }));
           scored.sort((a, b) => b.s - a.s);
           scored[0].li.click();
-          return scored[0].text;
+          return { audit, clicked: scored[0].text };
         });
-        if (picked) await sleep(1800); // Let ProDemand process engine switch
+
+        // Log full audit trail
+        if (engineAudit?.audit) {
+          console.log(`${LOG} Engine candidates:`);
+          for (const c of engineAudit.audit) {
+            console.log(`${LOG}   ${c.selected ? "→" : " "} score=${c.score.toString().padStart(3)} "${c.text}" ${c.selected ? "(pre-selected)" : ""}`);
+          }
+        }
+        picked = engineAudit?.clicked || null;
+        if (picked) {
+          console.log(`${LOG} Engine scorer clicked: "${picked}"`);
+          await sleep(1800); // Let ProDemand process engine switch
+        } else {
+          console.log(`${LOG} Engine scorer: no unselected options to click`);
+        }
       }
     } else if (activeTab === "submodel") {
       picked = await clickQualifier(page, qualifiers[0]);

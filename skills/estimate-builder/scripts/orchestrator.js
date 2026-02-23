@@ -77,6 +77,32 @@ if (process.env.AUTOLEAP_EMAIL) {
 // Legacy reference kept null so handleApprovalAndOrder gracefully returns "not configured"
 const autoLeapBrowser = null;
 
+// --- Shared infrastructure (feature-flagged) ---
+const { createLogger, generateRunId } = require("../../shared/logger");
+const { withRetry, circuitBreaker, FailureClass } = require("../../shared/retry");
+const { validateLaborResult, validatePartQuote, normalizePrice, mergeResults } = require("../../shared/contracts");
+const { SessionManager } = require("../../shared/session-manager");
+const { TabManager } = require("../../shared/tab-manager");
+const { checkHealth, cleanupArtifacts, validateEnv } = require("../../shared/health");
+
+// Feature flags
+const FEAT_STRUCTURED_LOGGING = process.env.SAM_STRUCTURED_LOGGING === "true";
+const FEAT_SESSION_PREFLIGHT = process.env.SAM_SESSION_PREFLIGHT !== "false"; // enabled by default
+const FEAT_RETRY_ENABLED = process.env.SAM_RETRY_ENABLED === "true";
+
+// Shared instances
+const sessionManager = new SessionManager({ logger: createLogger("session-manager") });
+const tabManager = new TabManager();
+
+// Circuit breakers per platform
+const breakers = {
+  partstech: circuitBreaker("partstech", { failThreshold: 3, cooldownMs: 120000 }),
+  prodemand: circuitBreaker("prodemand", { failThreshold: 3, cooldownMs: 120000 }),
+  autoleap: circuitBreaker("autoleap", { failThreshold: 3, cooldownMs: 120000 }),
+  alldata: circuitBreaker("alldata", { failThreshold: 3, cooldownMs: 120000 }),
+  identifix: circuitBreaker("identifix", { failThreshold: 3, cooldownMs: 120000 }),
+};
+
 /**
  * Classify request type for routing
  */
@@ -741,12 +767,33 @@ async function buildEstimate(params) {
     dtcTestPlan: [],
   };
 
+  // --- RunContext ---
+  const runId = generateRunId();
+  const log = createLogger("orchestrator", runId);
+  const runCtx = {
+    runId,
+    vehicle: params,
+    symptom: params.query,
+    shopId: params.shopId || "default",
+    startTime: Date.now(),
+    steps: [],
+  };
+  log.info("pipeline start", { query: params.query, year: params.year, make: params.make, model: params.model });
+
+  // --- Preflight (feature-flagged) ---
+  if (FEAT_SESSION_PREFLIGHT) {
+    const endPreflight = log.step("preflight");
+    const preflightStatus = await sessionManager.preflight();
+    endPreflight({ status: preflightStatus });
+    runCtx.steps.push({ step: "preflight", status: preflightStatus });
+  }
+
   console.log("═══════════════════════════════════════════════════════════════");
-  console.log("  ESTIMATE BUILDER — Starting Full Pipeline");
+  console.log(`  ESTIMATE BUILDER — Starting Full Pipeline [${runId}]`);
   console.log("═══════════════════════════════════════════════════════════════");
 
   // ─── Step 1: Vehicle Identification (Exact) ───
-  console.log("\n[Step 1] Decoding vehicle (exact specs for parts accuracy)...");
+  log.info("Step 1: Decoding vehicle (exact specs for parts accuracy)");
   let vehicle;
   if (params.vin && isValidVin(params.vin)) {
     vehicle = await decodeVin(params.vin);
@@ -775,14 +822,14 @@ async function buildEstimate(params) {
 
   // ─── Step 2: Classify & Route ───
   const requestInfo = classifyRequest(params.query);
-  console.log(`\n[Step 2] Request type: ${requestInfo.type}`);
+  log.info(`Step 2: Request type: ${requestInfo.type}`);
   if (requestInfo.dtcCodes.length > 0) {
     console.log(`  → DTC codes: ${requestInfo.dtcCodes.join(", ")}`);
   }
 
   // ─── Step 2.5: AI Diagnosis ───
   if (requestInfo.type === "diagnostic") {
-    console.log("\n[Step 2.5] Running AI diagnostic engine...");
+    log.info("Step 2.5: Running AI diagnostic engine...");
     try {
       const aiDiagnosis = await diagnose({
         vin: vehicle.vin,
@@ -821,8 +868,10 @@ async function buildEstimate(params) {
     }
   }
 
+  if (params.progressCallback) await params.progressCallback("diagnosis_done").catch(() => {});
+
   // ─── Step 2.7: Vehicle History & Shop Experience ───
-  console.log("\n[Step 2.7] Checking repair history...");
+  log.info("Step 2.7: Checking repair history...");
   try {
     // Check this specific vehicle's history
     const historyResult = await findRelatedPriorRepairs(
@@ -882,7 +931,7 @@ async function buildEstimate(params) {
   }
 
   // ─── Step 3: Sequential Research (browser skills share one tab) ───
-  console.log("\n[Step 3] Researching across databases...");
+  log.info("Step 3: Researching across databases...");
 
   let alldata = null, identifix = null, prodemand = null;
   const researchQuery = {
@@ -932,19 +981,54 @@ async function buildEstimate(params) {
 
     // Phase 1: Run OpenClaw browser platforms sequentially (share one tab),
     // ProDemand (Puppeteer/TAPE) runs in parallel since it uses a separate process.
+    const doProDemandSearch = async () => {
+      return await Promise.race([
+        searchProDemand(researchQuery),
+        new Promise((_, rej) => setTimeout(() => rej(Object.assign(new Error("ProDemand timeout"), { retryable: true })), PRODEMAND_TIMEOUT)),
+      ]);
+    };
     const prodemandPromise = prodemandViaProxy
-      ? withTimeout(searchProDemand(researchQuery), PRODEMAND_TIMEOUT, "ProDemand").catch((e) => ({ error: e.message }))
+      ? (FEAT_RETRY_ENABLED
+          ? breakers.prodemand.call(() => withRetry(doProDemandSearch, { maxRetries: 1, baseDelay: 2000 })).catch((e) => { log.warn("ProDemand failed", { error: e.message }); return { error: e.message }; })
+          : withTimeout(searchProDemand(researchQuery), PRODEMAND_TIMEOUT, "ProDemand").catch((e) => ({ error: e.message }))
+        )
       : Promise.resolve({ error: "ProDemand not configured" });
 
     // AllData → Identifix sequential (OpenClaw browser)
     if (alldataUp) {
-      alldata = await withTimeout(searchAllData(researchQuery), RESEARCH_TIMEOUT, "AllData").catch((e) => ({ error: e.message }));
+      try {
+        const doAllDataSearch = async () => {
+          return await Promise.race([
+            searchAllData(researchQuery),
+            new Promise((_, rej) => setTimeout(() => rej(Object.assign(new Error("AllData timeout"), { retryable: true })), RESEARCH_TIMEOUT)),
+          ]);
+        };
+        alldata = FEAT_RETRY_ENABLED
+          ? await breakers.alldata.call(() => withRetry(doAllDataSearch, { maxRetries: 1, baseDelay: 2000 }))
+          : await withTimeout(searchAllData(researchQuery), RESEARCH_TIMEOUT, "AllData");
+      } catch (e) {
+        log.warn("AllData failed", { error: e.message });
+        alldata = { error: e.message };
+      }
     } else {
       alldata = { error: "AllData unreachable from this network (IP blocked)" };
     }
 
     if (identifixUp) {
-      identifix = await withTimeout(searchDirectHit(researchQuery), RESEARCH_TIMEOUT, "Identifix").catch((e) => ({ error: e.message }));
+      try {
+        const doIdentifixSearch = async () => {
+          return await Promise.race([
+            searchDirectHit(researchQuery),
+            new Promise((_, rej) => setTimeout(() => rej(Object.assign(new Error("Identifix timeout"), { retryable: true })), RESEARCH_TIMEOUT)),
+          ]);
+        };
+        identifix = FEAT_RETRY_ENABLED
+          ? await breakers.identifix.call(() => withRetry(doIdentifixSearch, { maxRetries: 1, baseDelay: 2000 }))
+          : await withTimeout(searchDirectHit(researchQuery), RESEARCH_TIMEOUT, "Identifix");
+      } catch (e) {
+        log.warn("Identifix failed", { error: e.message });
+        identifix = { error: e.message };
+      }
     } else {
       identifix = { error: "Identifix unreachable from this network" };
     }
@@ -955,7 +1039,20 @@ async function buildEstimate(params) {
     // Maintenance — just labor times
     const prodemandViaProxy = !!(process.env.PRODEMAND_USERNAME && process.env.PRODEMAND_PASSWORD);
     if (prodemandViaProxy) {
-      prodemand = await withTimeout(searchProDemand(researchQuery), PRODEMAND_TIMEOUT, "ProDemand").catch((e) => ({ error: e.message }));
+      try {
+        const doProDemandMaint = async () => {
+          return await Promise.race([
+            searchProDemand(researchQuery),
+            new Promise((_, rej) => setTimeout(() => rej(Object.assign(new Error("ProDemand timeout"), { retryable: true })), PRODEMAND_TIMEOUT)),
+          ]);
+        };
+        prodemand = FEAT_RETRY_ENABLED
+          ? await breakers.prodemand.call(() => withRetry(doProDemandMaint, { maxRetries: 1, baseDelay: 2000 }))
+          : await withTimeout(searchProDemand(researchQuery), PRODEMAND_TIMEOUT, "ProDemand");
+      } catch (e) {
+        log.warn("ProDemand failed (maintenance)", { error: e.message });
+        prodemand = { error: e.message };
+      }
     } else {
       prodemand = { error: "ProDemand not configured" };
     }
@@ -1007,10 +1104,19 @@ async function buildEstimate(params) {
     results.prodemandLabor = prodemand.laborTimes;
   }
 
-  console.log(`  → Research complete`);
+  // Validate ProDemand labor results through contracts
+  if (results.diagnosis?.prodemand?.laborTimes) {
+    results.diagnosis.prodemand.laborTimes = results.diagnosis.prodemand.laborTimes.map(
+      (l) => validateLaborResult(l)
+    );
+  }
+
+  log.info("Step 3: Research complete");
   if (alldata && !alldata.error) console.log(`    AllData: ${alldata.procedures?.length || 0} procedures, ${Object.keys(alldata.torqueSpecs || {}).length} torque specs`);
   if (identifix && !identifix.error) console.log(`    Identifix: ${identifix.fixCount || 0} fixes, top fix ${identifix.topFix?.successRate || "?"}% success`);
   if (prodemand && !prodemand.error) console.log(`    ProDemand: ${prodemand.realFixes?.length || 0} Real Fixes, ${prodemand.laborTimes?.length || 0} labor times`);
+
+  if (params.progressCallback) await params.progressCallback("research_done").catch(() => {});
 
   // Yellow-fail warnings: track data quality issues for surface in output
   results.warnings = results.warnings || [];
@@ -1019,7 +1125,7 @@ async function buildEstimate(params) {
   }
 
   // ─── Step 4: Get Vehicle Specs (Mechanic Reference) ───
-  console.log("\n[Step 4] Getting mechanic reference specs...");
+  log.info("Step 4: Getting mechanic reference specs...");
 
   const repairType = params.query.toLowerCase().includes("o2") ? "o2-sensor" :
                      params.query.toLowerCase().includes("oil") ? "oil-change" :
@@ -1055,33 +1161,53 @@ async function buildEstimate(params) {
   console.log(`  → Fluids: Oil ${results.mechanicSpecs.fluids?.engineOil?.weight || "?"}`);
 
   // ─── Step 5: Parts Search — Best Value ───
-  console.log("\n[Step 5] Searching parts with vendor comparison...");
+  log.info("Step 5: Searching parts with vendor comparison...");
 
   const partsNeeded = extractPartsNeeded(params.query, results.diagnosis);
   console.log(`  → Parts needed: ${partsNeeded.map((p) => p.partType).join(", ") || "None identified"}`);
 
   if (partsNeeded.length > 0) {
+    const partsSearchArgs = {
+      year: vehicle.year,
+      make: vehicle.make,
+      model: vehicle.model,
+      vin: vehicle.vin || null,
+      partsList: partsNeeded,
+    };
+
     if (autoLeapPartstech) {
       // AutoLeap embedded PartsTech — uses Chrome session, no separate PT credentials needed
-      results.parts = await autoLeapPartstech.searchPartsPricing({
-        year: vehicle.year,
-        make: vehicle.make,
-        model: vehicle.model,
-        vin: vehicle.vin || null,
-        partsList: partsNeeded,
-      });
+      const doPartsTechSearch = async () => autoLeapPartstech.searchPartsPricing(partsSearchArgs);
+      try {
+        results.parts = FEAT_RETRY_ENABLED
+          ? await breakers.partstech.call(() => withRetry(doPartsTechSearch, { maxRetries: 1, baseDelay: 2000 }))
+          : await doPartsTechSearch();
+      } catch (e) {
+        log.warn("PartsTech (AutoLeap) failed", { error: e.message });
+        results.parts = null;
+      }
     } else if (partstechOrder) {
       // Fallback: shop.partstech.com browser (requires PARTSTECH_USERNAME)
-      results.parts = await partstechOrder.searchPartsPricing({
-        year: vehicle.year,
-        make: vehicle.make,
-        model: vehicle.model,
-        vin: vehicle.vin || null,
-        partsList: partsNeeded,
-      });
+      const doPartsTechOrderSearch = async () => partstechOrder.searchPartsPricing(partsSearchArgs);
+      try {
+        results.parts = FEAT_RETRY_ENABLED
+          ? await breakers.partstech.call(() => withRetry(doPartsTechOrderSearch, { maxRetries: 1, baseDelay: 2000 }))
+          : await doPartsTechOrderSearch();
+      } catch (e) {
+        log.warn("PartsTech (browser) failed", { error: e.message });
+        results.parts = null;
+      }
     } else if (vehicle.vin) {
       // Fallback: REST API (requires VIN + PARTSTECH_API_KEY)
-      results.parts = await searchMultipleParts(vehicle.vin, partsNeeded);
+      const doPartsTechApi = async () => searchMultipleParts(vehicle.vin, partsNeeded);
+      try {
+        results.parts = FEAT_RETRY_ENABLED
+          ? await breakers.partstech.call(() => withRetry(doPartsTechApi, { maxRetries: 1, baseDelay: 2000 }))
+          : await doPartsTechApi();
+      } catch (e) {
+        log.warn("PartsTech (API) failed", { error: e.message });
+        results.parts = null;
+      }
     } else {
       console.log(`  → Skipped (set AUTOLEAP_EMAIL to enable parts pricing via AutoLeap)`);
     }
@@ -1094,6 +1220,16 @@ async function buildEstimate(params) {
         totalCost: 0, allInStock: false, suppliers: [],
       };
       results.parts.individualResults = [];
+    }
+
+    // Validate part quotes through contracts
+    if (results.parts && Array.isArray(results.parts.bestValueBundle?.parts)) {
+      results.parts.bestValueBundle.parts = results.parts.bestValueBundle.parts.map((p) => {
+        if (p.results && Array.isArray(p.results)) {
+          p.results = p.results.map((r) => validatePartQuote(r));
+        }
+        return p;
+      });
     }
 
     if (results.parts) {
@@ -1130,7 +1266,7 @@ async function buildEstimate(params) {
 
   // ─── Step 5.5: Pre-stage Cart (Optional) ───
   if (partstechOrder && results.parts?.bestValueBundle?.parts?.length > 0) {
-    console.log("\n[Step 5.5] Pre-staging parts in PartsTech cart...");
+    log.info("Step 5.5: Pre-staging parts in PartsTech cart...");
     try {
       const nonConditionalParts = results.parts.bestValueBundle.parts
         .filter((item) => item.selected && !item.requested?.conditional)
@@ -1162,9 +1298,11 @@ async function buildEstimate(params) {
   }
 
   // ─── Step 6: Build Estimate in AutoLeap ───
+  if (params.progressCallback) await params.progressCallback("building_estimate").catch(() => {});
+
   if (autoLeapApi && params.customer) {
     // Direct REST API path — token from Chrome CDP session, then REST calls
-    console.log("\n[Step 6] Creating estimate in AutoLeap (API)...");
+    log.info("Step 6: Creating estimate in AutoLeap (API)...");
 
     try {
       const estParts = results.parts?.bestValueBundle?.parts || [];
@@ -1178,7 +1316,7 @@ async function buildEstimate(params) {
 
       console.log(`  → Labor source: ${laborHoursOverride ? `MOTOR ${pdBestLabor.hours}h` : "AI/default"}`);
 
-      const apiEstimate = await autoLeapApi.buildEstimate({
+      const autoLeapEstArgs = {
         customerName: params.customer.name,
         phone: params.customer.phone || null,
         vehicleYear: vehicle.year,
@@ -1188,7 +1326,11 @@ async function buildEstimate(params) {
         diagnosis: results.diagnosis,         // untouched
         parts: estParts,
         laborHoursOverride,                   // explicit override
-      });
+      };
+      const doAutoLeapEstimate = async () => autoLeapApi.buildEstimate(autoLeapEstArgs);
+      const apiEstimate = FEAT_RETRY_ENABLED
+        ? await breakers.autoleap.call(() => withRetry(doAutoLeapEstimate, { maxRetries: 1, baseDelay: 2000 }))
+        : await doAutoLeapEstimate();
 
       if (apiEstimate.success) {
         results.estimate = {
@@ -1235,7 +1377,7 @@ async function buildEstimate(params) {
     }
   } else if (params.customer) {
     // Fallback: API-based estimate (existing code)
-    console.log("\n[Step 6] Creating estimate in AutoLeap (API)...");
+    log.info("Step 6: Creating estimate in AutoLeap (fallback API)...");
 
     try {
       const customer = await findOrCreateCustomer(params.customer);
@@ -1316,11 +1458,11 @@ async function buildEstimate(params) {
       results.estimate = { error: err.message };
     }
   } else {
-    console.log("\n[Step 6] Skipped AutoLeap (provide customer info to create)");
+    log.info("Step 6: Skipped AutoLeap (provide customer info to create)");
   }
 
   // ─── Step 7: Generate PDF Estimate ───
-  console.log("\n[Step 7] Generating PDF estimate...");
+  log.info("Step 7: Generating PDF estimate...");
 
   try {
     const pdfOutputPath = require("path").join(
@@ -1441,7 +1583,7 @@ async function buildEstimate(params) {
 
   // ─── Step 8: Capture Procedure Screenshots ───
   if (requestInfo.type === "diagnostic") {
-    console.log("\n[Step 8] Capturing procedure screenshots...");
+    log.info("Step 8: Capturing procedure screenshots...");
     try {
       const newScreenshots = await captureScreenshots();
       results.screenshots = [...(results.screenshots || []), ...newScreenshots];
@@ -1453,9 +1595,34 @@ async function buildEstimate(params) {
 
   // ─── Done ───
   const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
+  // Surface reason codes
+  const reasonCodes = (results.warnings || []).map(w => w.code).filter(Boolean);
+
   console.log(`\n═══════════════════════════════════════════════════════════════`);
-  console.log(`  Pipeline complete in ${elapsed}s`);
+  console.log(`  Pipeline complete in ${elapsed}s [${runId}]`);
+  if (reasonCodes.length > 0) console.log(`  Reason codes: ${reasonCodes.join(", ")}`);
   console.log(`═══════════════════════════════════════════════════════════════\n`);
+
+  results.runId = runId;
+
+  // --- Pipeline metrics ---
+  const totalRuntime = Date.now() - runCtx.startTime;
+  const partsPriced = (results.parts?.bestValueBundle?.parts || []).filter((p) =>
+    p.results?.some((r) => r.unit_price != null && r.unit_price > 0)
+  ).length;
+  const totalParts = (results.parts?.bestValueBundle?.parts || []).length;
+  const laborSource = results.diagnosis?.prodemand?.laborTimes?.[0]?.source || "unknown";
+
+  log.metric({
+    total_runtime_ms: totalRuntime,
+    parts_priced_rate: totalParts > 0 ? Math.round((partsPriced / totalParts) * 100) / 100 : 0,
+    labor_source: laborSource,
+    warnings_count: (results.warnings || []).length,
+    steps_completed: runCtx.steps.length,
+  });
+
+  results.runId = runId;
+  results._runCtx = runCtx;
 
   // Format response for service advisor
   results.formattedResponse = formatServiceAdvisorResponse(results);
