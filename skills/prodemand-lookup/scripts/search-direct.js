@@ -19,11 +19,49 @@
  * Exports: search()
  */
 
+const { createLogger, generateRunId } = require("../../shared/logger");
+
 const LOG = "[prodemand-direct]";
 const PRODEMAND_URL = process.env.PRODEMAND_URL || "https://www.prodemand.com";
 const PRODEMAND_USERNAME = process.env.PRODEMAND_USERNAME;
 const PRODEMAND_PASSWORD = process.env.PRODEMAND_PASSWORD;
 const CHROME_DEBUG_PORT = 18800;
+
+// --- Selector contract ---
+const SELECTORS = {
+  searchBox: ".searchBox",
+  oneViewSearch: 'a[data-type="OneViewSearch"]',
+  cardRealFixes: "cardRealFixes",
+  cardPartsLabor: "cardPartsLabor",
+  cardOEMTesting: "cardOEMTesting",
+  itemViewer: ".itemViewerContainer li",
+  articleHeader: ".articleHeader h2",
+  laborDetails: "#laborDetails",
+  vehicleDetails: "#vehicleDetails",
+  qualifierItem: "li.qualifier",
+  qualifierItemUnselected: "li.qualifier:not(.selected)",
+  vehicleSelectorDetails: "#vehicleSelectorDetails",
+  vehicleSelectorButton: "#vehicleSelectorButton",
+  qualifierTypeSelector: "#qualifierTypeSelector li",
+};
+
+// --- Labor operation synonym map ---
+const LABOR_SYNONYMS = {
+  "catalytic converter": ["Catalytic Converter R&R", "Exhaust Manifold/Catalytic Converter", "Converter Replace", "Cat Converter"],
+  "brake pads": ["Brake Pads Replace", "Disc Brake Pad", "Front Brake Pad", "Rear Brake Pad"],
+  "water pump": ["Water Pump R&R", "Water Pump Replace", "Coolant Pump"],
+  "spark plug": ["Spark Plug Replace", "Spark Plug R&R", "Ignition Tune-Up"],
+};
+
+function getSynonyms(operation) {
+  const key = operation.toLowerCase();
+  for (const [base, syns] of Object.entries(LABOR_SYNONYMS)) {
+    if (key.includes(base)) return syns;
+  }
+  return [operation];
+}
+
+const log = createLogger("prodemand-direct");
 
 let puppeteer;
 try {
@@ -171,17 +209,17 @@ async function goToOneSearch(page) {
   }
 
   // Ensure vehicle selector panel is OPEN
-  const panelOpen = await page.evaluate(() => {
-    const d = document.querySelector("#vehicleSelectorDetails");
+  const panelOpen = await page.evaluate((sel) => {
+    const d = document.querySelector(sel);
     return d ? getComputedStyle(d).height !== "0px" : false;
-  });
+  }, SELECTORS.vehicleSelectorDetails);
   if (!panelOpen) {
-    await page.evaluate(() => document.querySelector("#vehicleSelectorButton")?.click());
+    await page.evaluate((sel) => document.querySelector(sel)?.click(), SELECTORS.vehicleSelectorButton);
     await sleep(1000);
   }
 
   // Ensure "Vehicle Selection" accordion item is expanded (qualifiers visible)
-  const hasQualifiers = await page.evaluate(() => document.querySelectorAll("li.qualifier").length > 0);
+  const hasQualifiers = await page.evaluate((sel) => document.querySelectorAll(sel).length > 0, SELECTORS.qualifierItem);
   if (!hasQualifiers) {
     await page.evaluate(() => {
       const items = Array.from(document.querySelectorAll(".accordion .item"));
@@ -190,7 +228,7 @@ async function goToOneSearch(page) {
         vh.querySelector(".header")?.click();
       }
     });
-    await page.waitForFunction(() => document.querySelectorAll("li.qualifier").length > 0, { timeout: 5000 }).catch(() => {});
+    await page.waitForFunction((sel) => document.querySelectorAll(sel).length > 0, { timeout: 5000 }, SELECTORS.qualifierItem).catch(() => {});
   }
 }
 
@@ -201,8 +239,8 @@ async function goToOneSearch(page) {
  */
 async function clickQualifier(page, text) {
   if (!text) return null;
-  const result = await page.evaluate((t) => {
-    const items = Array.from(document.querySelectorAll("li.qualifier"));
+  const result = await page.evaluate((t, sel) => {
+    const items = Array.from(document.querySelectorAll(sel));
     const exact = items.find((li) => li.textContent.trim().toLowerCase() === t.toLowerCase());
     const partial = items.find((li) =>
       li.textContent.trim().toLowerCase().includes(t.toLowerCase())
@@ -213,7 +251,7 @@ async function clickQualifier(page, text) {
       return match.textContent.trim();
     }
     return null;
-  }, text);
+  }, text, SELECTORS.qualifierItem);
   if (result) await sleep(1800);
   return result;
 }
@@ -222,8 +260,9 @@ async function clickQualifier(page, text) {
  * Get currently visible qualifiers (right pane options).
  */
 async function getQualifiers(page) {
-  return page.evaluate(() =>
-    Array.from(document.querySelectorAll("li.qualifier")).map((li) => li.textContent.trim())
+  return page.evaluate((sel) =>
+    Array.from(document.querySelectorAll(sel)).map((li) => li.textContent.trim()),
+    SELECTORS.qualifierItem
   );
 }
 
@@ -231,11 +270,11 @@ async function getQualifiers(page) {
  * Get the active left-pane tab name (Year/Make/Model/Engine/Submodel/Options).
  */
 async function getActiveTab(page) {
-  return page.evaluate(() => {
-    const tabs = Array.from(document.querySelectorAll("#qualifierTypeSelector li"));
+  return page.evaluate((sel) => {
+    const tabs = Array.from(document.querySelectorAll(sel));
     const active = tabs.find((li) => li.classList.contains("selected") || li.classList.contains("active"));
     return active ? active.textContent.trim().toLowerCase() : null;
-  });
+  }, SELECTORS.qualifierTypeSelector);
 }
 
 /**
@@ -277,7 +316,7 @@ async function selectVehicle(page, { year, make, model, engine }) {
       picked = wantedValues.engine ? await clickQualifier(page, wantedValues.engine) : null;
       if (!picked) {
         // No engine specified — score ALL options (selected and unselected) for audit log
-        const engineAudit = await page.evaluate(() => {
+        const engineAudit = await page.evaluate((sel) => {
           const scoreEngine = (text) => {
             const t = text.toLowerCase();
             let s = 0;
@@ -291,7 +330,7 @@ async function selectVehicle(page, { year, make, model, engine }) {
             return s;
           };
 
-          const allItems = Array.from(document.querySelectorAll("li.qualifier"));
+          const allItems = Array.from(document.querySelectorAll(sel));
           const audit = allItems.map(li => ({
             text: li.textContent.trim(),
             score: scoreEngine(li.textContent.trim()),
@@ -308,11 +347,14 @@ async function selectVehicle(page, { year, make, model, engine }) {
           scored.sort((a, b) => b.s - a.s);
           scored[0].li.click();
           return { audit, clicked: scored[0].text };
-        });
+        }, SELECTORS.qualifierItem);
 
-        // Log full audit trail
+        // Log full audit trail + confidence
         if (engineAudit?.audit) {
-          console.log(`${LOG} Engine candidates:`);
+          const sortedByScore = [...engineAudit.audit].sort((a, b) => b.score - a.score);
+          const scoreDiff = sortedByScore[0].score - (sortedByScore[1]?.score || 0);
+          const engineConfidence = scoreDiff > 5 ? 1.0 : scoreDiff >= 2 ? 0.7 : 0.4;
+          console.log(`${LOG} Engine candidates (confidence: ${engineConfidence}):`);
           for (const c of engineAudit.audit) {
             console.log(`${LOG}   ${c.selected ? "→" : " "} score=${c.score.toString().padStart(3)} "${c.text}" ${c.selected ? "(pre-selected)" : ""}`);
           }
@@ -348,17 +390,18 @@ async function selectVehicle(page, { year, make, model, engine }) {
     const activeTab = await getActiveTab(page);
     if (activeTab !== "options") break;
 
-    const unselected = await page.evaluate(() =>
-      Array.from(document.querySelectorAll("li.qualifier:not(.selected)"))
-        .map((li) => li.textContent.trim())
+    const unselected = await page.evaluate((sel) =>
+      Array.from(document.querySelectorAll(sel))
+        .map((li) => li.textContent.trim()),
+      SELECTORS.qualifierItemUnselected
     );
 
     if (unselected.length === 0) break;
 
     console.log(`${LOG} Options round ${round + 1}: unselected: ${unselected.slice(0, 5).join(", ")}`);
 
-    const picked = await page.evaluate(() => {
-      const items = Array.from(document.querySelectorAll("li.qualifier:not(.selected)"));
+    const picked = await page.evaluate((sel) => {
+      const items = Array.from(document.querySelectorAll(sel));
       if (items.length === 0) return "__done__";
 
       const score = (text) => {
@@ -392,7 +435,7 @@ async function selectVehicle(page, { year, make, model, engine }) {
 
       scored[0].li.click();
       return scored[0].text;
-    });
+    }, SELECTORS.qualifierItemUnselected);
 
     if (!picked || picked === "__done__" || picked === "__skip__") {
       console.log(`${LOG} Options: scored chooser stopped (${picked})`);
@@ -404,7 +447,7 @@ async function selectVehicle(page, { year, make, model, engine }) {
   }
 
   // Logging assertion — engine selection
-  console.log(`${LOG} Engine selected: "${finalVariantLabel || "(none)"}" (scored chooser)`);
+  log.info("engine selected", { engine: finalVariantLabel || "(none)", method: "scored chooser" });
 
   // Phase 3: Click "Use This Vehicle" to confirm
   const confirmed = await page.evaluate(() => {
@@ -417,7 +460,7 @@ async function selectVehicle(page, { year, make, model, engine }) {
   if (confirmed) await sleep(3000); // Wait for modal to fully close
 
   const breadcrumb = await page.evaluate(
-    () => document.querySelector("#vehicleDetails")?.innerText?.trim() || ""
+    (sel) => document.querySelector(sel)?.innerText?.trim() || "", SELECTORS.vehicleDetails
   );
   console.log(`${LOG} Breadcrumb: ${breadcrumb || "(empty)"}`);
   return true;
@@ -470,16 +513,16 @@ async function performSearch(page, query) {
   }
 
   // Close the vehicle selector panel if it opened (dismisses modal_mask overlay)
-  const panelWasClosed = await page.evaluate(() => {
-    const d = document.querySelector("#vehicleSelectorDetails");
+  const panelWasClosed = await page.evaluate((selDetails, selButton) => {
+    const d = document.querySelector(selDetails);
     if (!d) return true;
     const h = getComputedStyle(d).height;
     if (h && h !== "0px") {
-      document.querySelector("#vehicleSelectorButton")?.click();
+      document.querySelector(selButton)?.click();
       return false;
     }
     return true;
-  });
+  }, SELECTORS.vehicleSelectorDetails, SELECTORS.vehicleSelectorButton);
   if (!panelWasClosed) {
     console.log(`${LOG} Closed vehicle selector panel`);
     await sleep(1000);
@@ -488,12 +531,12 @@ async function performSearch(page, query) {
   // Wait up to 12s for searchBox to have non-zero dimensions
   let searchVisible = false;
   for (let i = 0; i < 12; i++) {
-    const dims = await page.evaluate(() => {
-      const box = document.querySelector(".searchBox");
+    const dims = await page.evaluate((sel) => {
+      const box = document.querySelector(sel);
       if (!box) return null;
       const r = box.getBoundingClientRect();
       return { w: r.width, h: r.height };
-    });
+    }, SELECTORS.searchBox);
     if (dims && dims.w > 0) { searchVisible = true; break; }
     await sleep(1000);
   }
@@ -502,12 +545,12 @@ async function performSearch(page, query) {
     console.log(`${LOG} Search box not visible — trying Escape to dismiss any overlay`);
     await page.keyboard.press("Escape");
     await sleep(1000);
-    const dims = await page.evaluate(() => {
-      const box = document.querySelector(".searchBox");
+    const dims = await page.evaluate((sel) => {
+      const box = document.querySelector(sel);
       if (!box) return null;
       const r = box.getBoundingClientRect();
       return { w: r.width, h: r.height };
-    });
+    }, SELECTORS.searchBox);
     if (!dims || dims.w === 0) {
       console.log(`${LOG} Search box still not visible — search cannot proceed`);
       return { success: false, cardsUrl: null };
@@ -516,10 +559,10 @@ async function performSearch(page, query) {
   }
 
   // Clear existing content and type query
-  await page.evaluate(() => {
-    const box = document.querySelector(".searchBox");
+  await page.evaluate((sel) => {
+    const box = document.querySelector(sel);
     if (box) { box.focus(); box.select(); }
-  });
+  }, SELECTORS.searchBox);
   await sleep(200);
   // Select all + delete to clear, then type
   await page.keyboard.down("Control");
@@ -530,7 +573,7 @@ async function performSearch(page, query) {
   await page.keyboard.type(query, { delay: 30 });
   await sleep(300);
 
-  const val = await page.evaluate(() => document.querySelector(".searchBox")?.value);
+  const val = await page.evaluate((sel) => document.querySelector(sel)?.value, SELECTORS.searchBox);
   console.log(`${LOG} SearchBox value: "${val}"`);
 
   // Submit search
@@ -539,14 +582,14 @@ async function performSearch(page, query) {
   await sleep(4000); // ProDemand results take time to load
 
   // Click the first OneViewSearch result to reach the cards grid
-  const clickedResult = await page.evaluate(() => {
-    const link = document.querySelector('a[data-type="OneViewSearch"]');
+  const clickedResult = await page.evaluate((sel) => {
+    const link = document.querySelector(sel);
     if (link) {
       link.click();
       return link.innerText?.trim() || "clicked";
     }
     return null;
-  });
+  }, SELECTORS.oneViewSearch);
 
   if (clickedResult) {
     console.log(`${LOG} Clicked search result: "${clickedResult}"`);
@@ -628,7 +671,7 @@ async function clickCard(page, cardClass) {
 async function extractRealFixes(page) {
   try {
     // Click the Real Fixes card to open the panel
-    const clicked = await clickCard(page, "cardRealFixes");
+    const clicked = await clickCard(page, SELECTORS.cardRealFixes);
     if (!clicked) {
       console.log(`${LOG} Real Fixes card not found`);
       // Fallback: scan page body for fix patterns
@@ -637,16 +680,17 @@ async function extractRealFixes(page) {
 
     // Wait for fix list to appear
     await page.waitForFunction(
-      () => document.querySelectorAll(".itemViewerContainer li").length > 0,
-      { timeout: 8000 }
+      (sel) => document.querySelectorAll(sel).length > 0,
+      { timeout: 8000 },
+      SELECTORS.itemViewer
     ).catch(() => {});
 
-    const fixes = await page.evaluate(() => {
+    const fixes = await page.evaluate((selItem, selTitle) => {
       const results = [];
-      const items = document.querySelectorAll(".itemViewerContainer li");
+      const items = document.querySelectorAll(selItem);
 
       items.forEach((li) => {
-        const titleEl = li.querySelector(".articleHeader h2");
+        const titleEl = li.querySelector(selTitle);
         const countEl = li.querySelector(".fixedItDiv span:first-child");
         const previewEl = li.querySelector("p");
 
@@ -690,9 +734,9 @@ async function extractRealFixes(page) {
       }
 
       return results;
-    });
+    }, SELECTORS.itemViewer, SELECTORS.articleHeader);
 
-    console.log(`${LOG} Real Fixes: ${fixes.length} found`);
+    log.info("real fixes extracted", { count: fixes.length });
     return fixes;
   } catch (err) {
     console.error(`${LOG} extractRealFixes error: ${err.message}`);
@@ -737,7 +781,7 @@ async function extractRealFixesFallback(page) {
 async function extractLaborTimes(page) {
   try {
     // Click the Parts & Labor card
-    const clicked = await clickCard(page, "cardPartsLabor");
+    const clicked = await clickCard(page, SELECTORS.cardPartsLabor);
     if (!clicked) {
       console.log(`${LOG} Parts & Labor card not found — trying body text scan`);
       return extractLaborFallback(page);
@@ -754,16 +798,18 @@ async function extractLaborTimes(page) {
 
     // #laborDetails only populates after clicking a procedure item in the left nav.
     // Check if it's already loaded, otherwise click the first available item.
-    let laborCount = await page.evaluate(() =>
-      document.querySelectorAll("#laborDetails li.item, .col.labor").length
+    let laborCount = await page.evaluate((sel) =>
+      document.querySelectorAll(sel + " li.item, .col.labor").length,
+      SELECTORS.laborDetails
     );
 
     if (laborCount === 0) {
       // P&L page may auto-load labor data from the URL — wait longer before giving up
       console.log(`${LOG} Labor data not yet loaded — waiting up to 5s`);
       for (let i = 0; i < 5; i++) {
-        laborCount = await page.evaluate(() =>
-          document.querySelectorAll("#laborDetails li.item, .col.labor").length
+        laborCount = await page.evaluate((sel) =>
+          document.querySelectorAll(sel + " li.item, .col.labor").length,
+          SELECTORS.laborDetails
         );
         if (laborCount > 0) break;
         await sleep(1000);
@@ -788,11 +834,11 @@ async function extractLaborTimes(page) {
       }
     }
 
-    const times = await page.evaluate(() => {
+    const times = await page.evaluate((selLabor) => {
       const results = [];
 
       // Strategy 1: #laborDetails li.item structure (fully loaded)
-      document.querySelectorAll("#laborDetails li.item").forEach((item) => {
+      document.querySelectorAll(selLabor + " li.item").forEach((item) => {
         const procedure = item.querySelector(".itemCollapsableHeader h2")?.textContent?.trim() || "";
         item.querySelectorAll(".row").forEach((row) => {
           const hours = parseFloat(row.querySelector(".col.labor")?.textContent?.trim() || "");
@@ -836,9 +882,9 @@ async function extractLaborTimes(page) {
       }
 
       return results;
-    });
+    }, SELECTORS.laborDetails);
 
-    console.log(`${LOG} Labor times: ${times.length} found`);
+    log.info("labor times extracted", { count: times.length });
     return times;
   } catch (err) {
     console.error(`${LOG} extractLaborTimes error: ${err.message}`);
@@ -920,7 +966,7 @@ function buildDtcPlanFromFixes(realFixes, query) {
 async function extractDtcTestPlan(page) {
   try {
     // Click the OEM Testing card
-    const clicked = await clickCard(page, "cardOEMTesting");
+    const clicked = await clickCard(page, SELECTORS.cardOEMTesting);
     if (!clicked) {
       console.log(`${LOG} OEM Testing card not found — building steps from Real Fixes`);
       return buildStepsFromRealFixes(page);
@@ -1080,7 +1126,7 @@ async function search(params) {
   }
 
   const { vin, year, make, model, engine, query } = params;
-  console.log(`${LOG} Search: ${year} ${make} ${model} ${engine || ""} — ${query}`);
+  log.info("search started", { year, make, model, engine, query });
 
   let browser;
   try {
@@ -1102,7 +1148,7 @@ async function search(params) {
 
     // Step 2: Check if vehicle is already selected (saves 10-20s on repeat calls)
     const currentBreadcrumb = await page.evaluate(
-      () => document.querySelector("#vehicleDetails")?.innerText?.trim() || ""
+      (sel) => document.querySelector(sel)?.innerText?.trim() || "", SELECTORS.vehicleDetails
     );
     const targetKey = `${year}${make}${model}`.replace(/\s+/g, "").toLowerCase();
     const hasBadEngine = /electric|plugin|plug.?in/i.test(currentBreadcrumb);
@@ -1142,7 +1188,45 @@ async function search(params) {
 
     // Step 6: Extract Labor (navigate back to cards, click cardPartsLabor)
     await ensureCardsView(page, cardsUrl);
-    const laborTimes = await extractLaborTimes(page);
+    let laborTimes = await extractLaborTimes(page);
+
+    // Step 6b: Synonym fallback — if no labor found, try clicking procedure items matching synonyms
+    if (laborTimes.length === 0 && query) {
+      const synonyms = getSynonyms(query);
+      if (synonyms.length > 0 && synonyms[0] !== query) {
+        console.log(`${LOG} No labor found — trying ${synonyms.length} synonym(s): ${synonyms.slice(0, 3).join(", ")}`);
+        for (const syn of synonyms) {
+          const synClicked = await page.evaluate((synText) => {
+            const allH2s = Array.from(document.querySelectorAll("h2, li h2, .itemCollapsableHeader h2"));
+            const match = allH2s.find((el) => el.textContent.trim().toLowerCase().includes(synText.toLowerCase()));
+            if (match) { match.click(); return match.textContent.trim().substring(0, 80); }
+            return null;
+          }, syn);
+          if (synClicked) {
+            console.log(`${LOG} Synonym match clicked: "${synClicked}"`);
+            await sleep(2500);
+            laborTimes = await page.evaluate((selLabor) => {
+              const results = [];
+              document.querySelectorAll(selLabor + " li.item").forEach((item) => {
+                const procedure = item.querySelector(".itemCollapsableHeader h2")?.textContent?.trim() || "";
+                item.querySelectorAll(".row").forEach((row) => {
+                  const hours = parseFloat(row.querySelector(".col.labor")?.textContent?.trim() || "");
+                  const skill = row.querySelector(".col.skill")?.textContent?.trim() || "";
+                  if (!isNaN(hours) && hours >= 0.1 && hours <= 50) {
+                    results.push({ procedure, hours, skill, source: "prodemand" });
+                  }
+                });
+              });
+              return results;
+            }, SELECTORS.laborDetails);
+            if (laborTimes.length > 0) {
+              console.log(`${LOG} Synonym fallback: ${laborTimes.length} labor time(s) found`);
+              break;
+            }
+          }
+        }
+      }
+    }
 
     // Step 7: Build DTC test plan from Real Fixes data (no extra navigation)
     // This is more reliable than OEM Testing card which bleeds with Real Fixes content
@@ -1150,9 +1234,11 @@ async function search(params) {
 
     const pageTitle = await page.title();
 
-    console.log(
-      `${LOG} Results: ${realFixes.length} fixes, ${laborTimes.length} labor, ${dtcTestPlan.length} test steps`
-    );
+    log.info("search complete", {
+      realFixes: realFixes.length,
+      laborTimes: laborTimes.length,
+      dtcSteps: dtcTestPlan.length,
+    });
 
     return {
       source: "ProDemand (direct)",
@@ -1166,7 +1252,7 @@ async function search(params) {
       cardsUrl,
     };
   } catch (err) {
-    console.error(`${LOG} Error: ${err.message}`);
+    log.error("search failed", { error: err.message });
     return {
       source: "ProDemand (direct)",
       error: err.message,
