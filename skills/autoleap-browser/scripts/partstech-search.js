@@ -221,13 +221,18 @@ async function searchOnePart(searchTerm) {
 
   // Find search input
   let searchRef = browser.findRefByType(elements, "input", "search");
+  if (!searchRef) searchRef = browser.findRefByType(elements, "input", "job");
   if (!searchRef) searchRef = browser.findRefByType(elements, "input", "part");
   if (!searchRef) searchRef = browser.findRef(elements, "search");
 
   if (!searchRef) {
-    console.log(`${LOG} Search input not found — page elements: ${elements.slice(0, 15).map(e => `[${e.ref}]${e.type}:"${e.text.substring(0, 30)}"`).join(" | ")}`);
+    console.log(`${LOG} Search input not found in ${elements.length} elements`);
+    for (const el of elements.slice(0, 15)) {
+      console.log(`${LOG}   [${el.ref}] ${el.type}: "${el.text.substring(0, 60)}"`);
+    }
     return [];
   }
+  console.log(`${LOG} Using search input ref=${searchRef}`);
 
   // Click input, type search term, submit with Enter
   browser.clickRef(searchRef);
@@ -239,11 +244,16 @@ async function searchOnePart(searchTerm) {
 
   // Take snapshot and parse products
   snap = browser.takeSnapshot();
+  const resultsEls = browser.parseSnapshot(snap);
+  console.log(`${LOG} Results page: ${resultsEls.length} elements parsed`);
   let products = parseProducts(snap);
 
   // If no products found, wait longer and retry
   if (products.length === 0) {
     console.log(`${LOG} No products on first snapshot — retrying after delay...`);
+    if (resultsEls.length > 0) {
+      console.log(`${LOG}   Sample elements: ${resultsEls.slice(0, 10).map(e => `${e.type}:"${e.text.substring(0, 40)}"`).join(" | ")}`);
+    }
     await new Promise(r => setTimeout(r, 5000));
     snap = browser.takeSnapshot();
     products = parseProducts(snap);
@@ -357,19 +367,28 @@ async function searchPartsPricing({ year, make, model, vin, partsList }) {
       const snap = browser.takeSnapshot();
       const els = browser.parseSnapshot(snap);
       const searchRef = browser.findRefByType(els, "input", "search")
+        || browser.findRefByType(els, "input", "job")
         || browser.findRef(els, "search")
         || browser.findRefByType(els, "input", "part");
       if (searchRef) {
         ptReady = true;
-        console.log(`${LOG} PartsTech ready (attempt ${attempt})`);
+        console.log(`${LOG} PartsTech ready (attempt ${attempt}, ${els.length} elements, searchRef=${searchRef})`);
         break;
       }
       console.log(`${LOG} Waiting for PartsTech to render (attempt ${attempt}/5, ${els.length} elements)...`);
+      if (els.length > 0) {
+        console.log(`${LOG}   First 5 elements: ${els.slice(0, 5).map(e => `${e.type}:"${e.text.substring(0, 40)}"[${e.ref}]`).join(" | ")}`);
+      }
     }
     if (!ptReady) {
-      console.log(`${LOG} PartsTech page did not render — dumping snapshot for debug`);
+      console.log(`${LOG} PartsTech page did not render search input — dumping snapshot for debug`);
       const debugSnap = browser.takeSnapshot();
-      console.log(`${LOG} Snapshot (first 500 chars): ${debugSnap.substring(0, 500)}`);
+      const debugEls = browser.parseSnapshot(debugSnap);
+      console.log(`${LOG} Parsed ${debugEls.length} elements from snapshot`);
+      console.log(`${LOG} Element types: ${[...new Set(debugEls.map(e => e.type))].join(", ")}`);
+      for (const el of debugEls.slice(0, 15)) {
+        console.log(`${LOG}   [${el.ref}] ${el.type}: "${el.text.substring(0, 60)}"`);
+      }
     }
 
     // 5. Change vehicle if needed

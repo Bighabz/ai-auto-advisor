@@ -74,7 +74,8 @@ function takeSnapshot() {
 }
 
 /**
- * Click an element by its snapshot ref number.
+ * Click an element by its snapshot ref.
+ * Ref can be numeric ("12") or prefixed ("e12") depending on OpenClaw version.
  * @param {number|string} ref
  */
 function clickRef(ref) {
@@ -180,26 +181,61 @@ function pressKey(key) {
 /**
  * Parse OpenClaw snapshot text into element objects.
  *
- * Snapshot lines look like:
+ * OpenClaw snapshot format (actual output):
+ *   - link "PartsTech" [ref=e7] [cursor=pointer]:
+ *   - button "parts expand_more" [ref=e19] [cursor=pointer]:
+ *   - 'textbox "Search by job..." [active] [ref=e24]'
+ *   - generic [ref=e2]:
+ *
+ * Legacy format (also supported):
  *   [12] button "Search"
  *   [23] input "Year"
- *   [45] link "Honda"
- *   [67] "Some text without type"
  *
  * @param {string} snapshotText - Raw snapshot output from OpenClaw
  * @returns {Array<{ref: string, type: string, text: string}>} Parsed elements
  */
 function parseSnapshot(snapshotText) {
+  // Normalize OpenClaw types to the types used by helper functions
+  const TYPE_MAP = { textbox: "input", searchbox: "input", combobox: "select", listbox: "select" };
+
   const elements = [];
   const lines = snapshotText.split("\n");
 
   for (const line of lines) {
+    // --- Format 1: OpenClaw [ref=eNN] format (refs at end) ---
+    const refMatch = line.match(/\[ref=(e?\d+)\]/);
+    if (refMatch) {
+      const ref = refMatch[1];
+
+      // Strip leading whitespace/dashes/quotes and trailing quotes/colons/attrs
+      let cleaned = line
+        .replace(/^\s*-\s*'?/, "")       // leading indent, dash, optional quote
+        .replace(/'?\s*:?\s*$/, "")       // trailing quote, colon
+        .replace(/\[ref=e?\d+\]/g, "")    // remove ref tags
+        .replace(/\[(active|focused|disabled|required|checked|cursor=[^\]]*)\]/g, "") // remove attrs
+        .trim();
+
+      // Extract type (first word)
+      const typeMatch = cleaned.match(/^(\w+)/);
+      const rawType = typeMatch ? typeMatch[1] : "unknown";
+      const type = TYPE_MAP[rawType] || rawType;
+
+      // Extract quoted text (double quotes)
+      const textMatch = cleaned.match(/"([^"]*)"/);
+      const text = textMatch ? textMatch[1] : "";
+
+      elements.push({ ref, type, text });
+      continue;
+    }
+
+    // --- Format 2: Legacy [ref] format (refs at start) ---
     // Match: [ref] type "text" or [ref] type 'text'
     const match = line.match(/\[(\d+)\]\s+(?:(\w+)\s+)?["']([^"']*?)["']/);
     if (match) {
+      const rawType = match[2] || "unknown";
       elements.push({
         ref: match[1],
-        type: match[2] || "unknown",
+        type: TYPE_MAP[rawType] || rawType,
         text: match[3],
       });
       continue;
@@ -208,9 +244,10 @@ function parseSnapshot(snapshotText) {
     // Match: [ref] type unquotedText
     const matchUnquoted = line.match(/\[(\d+)\]\s+(\w+)\s+(.+)/);
     if (matchUnquoted) {
+      const rawType = matchUnquoted[2];
       elements.push({
         ref: matchUnquoted[1],
-        type: matchUnquoted[2],
+        type: TYPE_MAP[rawType] || rawType,
         text: matchUnquoted[3].trim(),
       });
     }
