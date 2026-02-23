@@ -491,19 +491,21 @@ async function downloadEstimatePDF(token, estimateId, outputPath) {
         },
         timeout: 15000,
       };
+      let settled = false;
+      const settle = (v) => { if (!settled) { settled = true; resolve(v); } };
       const req = https.request(opts, (res) => {
         const contentType = res.headers["content-type"] || "";
         if (res.statusCode !== 200 || !contentType.includes("pdf")) {
           res.resume();
-          resolve(null);
+          settle(null);
           return;
         }
         const chunks = [];
         res.on("data", (c) => chunks.push(c));
-        res.on("end", () => resolve(Buffer.concat(chunks)));
+        res.on("end", () => settle(Buffer.concat(chunks)));
       });
-      req.on("timeout", () => { req.destroy(); resolve(null); });
-      req.on("error", () => resolve(null));
+      req.on("timeout", () => { req.destroy(); settle(null); });
+      req.on("error", () => settle(null));
       req.end();
     });
 
@@ -528,7 +530,7 @@ async function downloadEstimatePDF(token, estimateId, outputPath) {
     // Find or open AutoLeap tab
     let page = (await browser.pages()).find(p => p.url().includes("myautoleap.com"));
     if (!page) {
-      page = (await browser.pages())[0];
+      page = await browser.newPage();
     }
 
     const estimateUrl = `${AUTOLEAP_APP_URL}/estimates/${estimateId}`;
