@@ -1056,7 +1056,8 @@ async function search(params) {
       () => document.querySelector("#vehicleDetails")?.innerText?.trim() || ""
     );
     const targetKey = `${year}${make}${model}`.replace(/\s+/g, "").toLowerCase();
-    const alreadySelected = currentBreadcrumb.replace(/\s+/g, "").toLowerCase().includes(targetKey.substring(0, 12));
+    const hasBadEngine = /electric|plugin|plug.?in/i.test(currentBreadcrumb);
+    const alreadySelected = currentBreadcrumb.replace(/\s+/g, "").toLowerCase().includes(targetKey.substring(0, 12)) && !hasBadEngine;
 
     if (alreadySelected) {
       console.log(`${LOG} Vehicle already selected: ${currentBreadcrumb} — skipping selector`);
