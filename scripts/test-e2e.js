@@ -330,7 +330,8 @@ async function main() {
 
       // Check parts found
       if (gc.expect.hasParts) {
-        const partsFound = (r.parts || []).some((p) => p.results?.length > 0);
+        const bundleParts = r.parts?.bestValueBundle?.parts || [];
+        const partsFound = bundleParts.some((p) => p.selected || p.results?.length > 0);
         partsFound ? pass(`${gc.name}: parts found`) : warn(`${gc.name}: no parts results`);
       }
 

@@ -146,6 +146,33 @@ Use these normalized codes:
 - `PT_NO_PRICEABLE_ITEMS`
 - `PDF_AUTLEAP_UNAVAILABLE`
 - `PDF_FALLBACK_ONLY`
+- `PRICING_GATE_BLOCKED`
+
+## Pricing Gate
+
+A hard gate at the end of `buildEstimate()` prevents wholesale price leakage.
+
+### How It Works
+
+1. **pricing_source tracking**: every run records how prices were resolved:
+   - `autoleap-native` — AutoLeap created the estimate with retail prices
+   - `matrix-fallback` — shop markup % applied to wholesale cost
+   - `FAILED_PRICING_SOURCE` — parts exist but no retail pricing resolved
+   - `no-parts` — no parts needed for this job
+
+2. **Hard gate**: if parts exist AND `parts_retail_total <= 0`:
+   - `results.customer_ready = false`
+   - `results.pricing_gate = "BLOCKED"`
+   - Warning `PRICING_GATE_BLOCKED` added to results
+
+3. **Formatter guard**: when `customer_ready === false`:
+   - Dollar totals suppressed in customer-facing messages
+   - PDF not attached
+   - Internal-only message shown: "Parts pricing couldn't be resolved — review before sending"
+
+### Non-Negotiable Rule
+
+Never send wholesale/cost prices to a customer. If retail pricing cannot be resolved, the estimate stays internal-only until a human reviews it.
 
 ## Reliability Rules
 

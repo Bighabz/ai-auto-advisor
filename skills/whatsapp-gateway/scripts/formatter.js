@@ -10,6 +10,56 @@
 
 const LOG = "[wa-format]";
 
+// ── Utilities ──
+
+/**
+ * Escape user-provided text so it doesn't break Markdown formatting.
+ * Only escapes characters that could interfere — our own markup is added separately.
+ */
+function escapeMarkdown(text) {
+  if (!text) return "";
+  return String(text)
+    .replace(/\\/g, "\\\\")
+    .replace(/`/g, "\\`")
+    .replace(/\[/g, "\\[");
+}
+
+/**
+ * Split a long message at newline boundaries to stay under maxLen.
+ */
+function splitMessage(text, maxLen = 4000) {
+  if (text.length <= maxLen) return [text];
+  const chunks = [];
+  let remaining = text;
+  while (remaining.length > maxLen) {
+    let splitAt = remaining.lastIndexOf("\n", maxLen);
+    if (splitAt < maxLen * 0.5) splitAt = maxLen;
+    chunks.push(remaining.slice(0, splitAt));
+    remaining = remaining.slice(splitAt).trimStart();
+  }
+  if (remaining) chunks.push(remaining);
+  return chunks;
+}
+
+/**
+ * User-friendly error messages mapped from reason codes.
+ */
+const ERROR_MESSAGES = {
+  PT_NO_PRODUCTS: "Couldn't get live parts pricing right now \u2014 estimate includes labor and TBD parts.",
+  PT_NO_TAB: "Parts lookup service temporarily unavailable.",
+  PT_LOGIN_REDIRECT: "Parts lookup needs re-authentication \u2014 try again in a moment.",
+  NO_MOTOR_LABOR: "Using estimated labor hours \u2014 real book time wasn't available.",
+  NO_PARTS_PRICING: "Some parts couldn't be priced \u2014 marked as TBD.",
+  PRICING_GATE_BLOCKED: "Parts pricing needs review \u2014 check AutoLeap before sending to customer.",
+  CIRCUIT_OPEN: "Some research sources are temporarily unavailable \u2014 estimate may be less detailed.",
+  TIMEOUT: "Research took longer than expected \u2014 some details may be missing.",
+  PDF_AUTOLEAP_UNAVAILABLE: "AutoLeap PDF couldn't be downloaded \u2014 view estimate in AutoLeap directly.",
+};
+
+function getErrorMessage(reason_code) {
+  return ERROR_MESSAGES[reason_code] || null;
+}
+
 /**
  * Format estimate results for WhatsApp delivery.
  * Returns an array of message strings to send sequentially.
@@ -21,26 +71,29 @@ function formatForWhatsApp(results) {
   const messages = [];
   const { vehicle, diagnosis, parts, estimate, mechanicSpecs, pdfPath, tsbs, dtcTestPlan } = results;
 
+  // Pricing gate: suppress dollar totals and PDF when customer_ready is false
+  const blocked = results.customer_ready === false;
+
   // ── Message 1: Headline + Diagnosis + Total (< 1000 chars) ──
   let msg1 = "";
 
-  const vName = `${vehicle.year} ${vehicle.make} ${vehicle.model} ${vehicle.trim || ""}`.trim();
-  msg1 += `*ESTIMATE READY*\n`;
+  const vName = escapeMarkdown(`${vehicle.year} ${vehicle.make} ${vehicle.model} ${vehicle.trim || ""}`.trim());
+  msg1 += blocked ? `*ESTIMATE — INTERNAL REVIEW*\n` : `*ESTIMATE READY*\n`;
   msg1 += `${vName}\n`;
-  if (vehicle.engine?.displacement) msg1 += `Engine: ${vehicle.engine.displacement}\n`;
-  if (vehicle.vin) msg1 += `VIN: ${vehicle.vin}\n`;
+  if (vehicle.engine?.displacement) msg1 += `Engine: ${escapeMarkdown(vehicle.engine.displacement)}\n`;
+  if (vehicle.vin) msg1 += `VIN: ${escapeMarkdown(vehicle.vin)}\n`;
   msg1 += `\n`;
 
   // Diagnosis headline
   if (diagnosis?.ai?.diagnoses?.length > 0) {
     const top = diagnosis.ai.diagnoses[0];
     const conf = Math.round((top.confidence || 0) * 100);
-    msg1 += `*Diagnosis:* ${top.cause} (${conf}% confidence)\n`;
+    msg1 += `*Diagnosis:* ${escapeMarkdown(top.cause)} (${conf}% confidence)\n`;
 
     if (diagnosis.ai.diagnoses.length > 1) {
       const second = diagnosis.ai.diagnoses[1];
       const conf2 = Math.round((second.confidence || 0) * 100);
-      msg1 += `Also possible: ${second.cause} (${conf2}%)\n`;
+      msg1 += `Also possible: ${escapeMarkdown(second.cause)} (${conf2}%)\n`;
     }
 
     if (diagnosis.ai.low_confidence_warning) {
@@ -53,8 +106,10 @@ function formatForWhatsApp(results) {
     msg1 += `\n`;
   }
 
-  // Estimate total
-  if (estimate?.total) {
+  // Estimate total — suppressed when pricing gate is blocked
+  if (blocked) {
+    msg1 += `\n\u26A0 *Parts pricing couldn't be resolved — review before sending*\n`;
+  } else if (estimate?.total) {
     msg1 += `*ESTIMATE TOTAL: $${estimate.total.toFixed(2)}*\n`;
     if (estimate.totalLabor != null && estimate.totalParts != null) {
       msg1 += `Labor: $${estimate.totalLabor.toFixed(2)} | Parts: $${estimate.totalParts.toFixed(2)}\n`;
@@ -75,12 +130,23 @@ function formatForWhatsApp(results) {
     msg1 += `_(+ tax & shop supplies)_\n`;
   }
 
-  if (pdfPath) {
+  if (pdfPath && !blocked) {
     msg1 += `\n\u{1F4C4} PDF estimate attached`;
   }
 
   if (results.warnings?.length > 0) {
-    msg1 += `\n⚠ _${results.warnings.map(w => w.msg).join("; ")}_`;
+    const notices = [];
+    for (const w of results.warnings) {
+      const friendly = getErrorMessage(w.code);
+      if (friendly) {
+        notices.push(friendly);
+      } else if (w.msg) {
+        notices.push(w.msg);
+      }
+    }
+    if (notices.length > 0) {
+      msg1 += "\n\n\u26A0 " + notices.join("\n\u26A0 ");
+    }
   }
 
   messages.push(msg1.trim());
@@ -110,10 +176,11 @@ function formatForWhatsApp(results) {
   const rp = diagnosis?.ai?.repair_plan;
   if (rp) {
     if (rp.labor) {
-      const srcLabel = rp.labor.source === "ari" ? "ARI" :
-                       rp.labor.source === "labor_cache" ? "Cached" :
-                       rp.labor.source === "prodemand" ? "ProDemand" :
-                       "Estimated";
+      const src = rp.labor.source;
+      const srcLabel = (src === "prodemand" || src === "ari" || src === "labor_cache") ? "MOTOR" :
+                       src === "ai_fallback" ? "AI est." :
+                       src === "estimated" ? "AI est." :
+                       src ? src : "TBD";
       msg2 += `*LABOR:* ${rp.labor.hours}h (${srcLabel})`;
       if (rp.labor.requires_lift) msg2 += ` \u{1F6E0} Needs lift`;
       msg2 += `\n`;
@@ -129,20 +196,28 @@ function formatForWhatsApp(results) {
     }
   }
 
-  // Parts list
+  // Parts list — show part names; retail totals come from AutoLeap (not wholesale cost)
   if (parts?.bestValueBundle?.parts?.length > 0) {
-    msg2 += `*PARTS:*\n`;
+    const isNative = results.estimateSource === "autoleap-native";
+    msg2 += isNative ? `*PARTS (via PartsTech \u2192 AutoLeap):*\n` : `*PARTS:*\n`;
     for (const item of parts.bestValueBundle.parts) {
       if (item.selected) {
         const p = item.selected;
-        msg2 += `\u2713 ${p.brand} ${p.description}`;
-        if (p.position) msg2 += ` (${p.position})`;
-        msg2 += `\n  #${p.partNumber} | $${p.totalCost.toFixed(2)} | ${p.availability}\n`;
+        msg2 += `\u2713 ${escapeMarkdown(p.brand)} ${escapeMarkdown(p.description)}`;
+        if (p.position) msg2 += ` (${escapeMarkdown(p.position)})`;
+        msg2 += `\n  #${escapeMarkdown(p.partNumber)} | ${escapeMarkdown(p.availability)}\n`;
+        // Don't show wholesale price — AutoLeap has the retail price
       }
     }
-    msg2 += `Total: $${parts.bestValueBundle.totalCost.toFixed(2)}`;
-    msg2 += parts.bestValueBundle.allInStock ? ` \u2713 All in stock` : ` \u26A0 Some backordered`;
-    msg2 += `\n`;
+    if (blocked) {
+      msg2 += `_Parts pricing pending — review in AutoLeap_\n`;
+    } else if (estimate?.totalParts > 0) {
+      msg2 += `*Parts Total (retail): $${estimate.totalParts.toFixed(2)}*\n`;
+    } else {
+      msg2 += `Total: $${parts.bestValueBundle.totalCost.toFixed(2)}`;
+      msg2 += parts.bestValueBundle.allInStock ? ` \u2713 All in stock` : ` \u26A0 Some backordered`;
+      msg2 += `\n`;
+    }
   }
 
   // Platform research summary
@@ -240,8 +315,14 @@ function formatForWhatsApp(results) {
 
   messages.push(prompt.trim());
 
-  console.log(`${LOG} Formatted ${messages.length} messages (${messages.map(m => m.length).join("+")} chars)`);
-  return messages;
+  // Split any message that exceeds 4000 chars
+  const finalMessages = [];
+  for (const m of messages) {
+    finalMessages.push(...splitMessage(m, 4000));
+  }
+
+  console.log(`${LOG} Formatted ${finalMessages.length} messages (${finalMessages.map(m => m.length).join("+")} chars)`);
+  return finalMessages;
 }
 
 /**
@@ -303,15 +384,15 @@ function formatResearchFirst(results) {
   const messages = [];
   const { vehicle, diagnosis } = results;
 
-  const vName = `${vehicle.year} ${vehicle.make} ${vehicle.model}`.trim();
+  const vName = escapeMarkdown(`${vehicle.year} ${vehicle.make} ${vehicle.model}`.trim());
   let msg = `*RESEARCH READY* \u{1F50D}\n${vName}\n\n`;
 
   // Diagnosis
   if (diagnosis?.ai?.diagnoses?.length > 0) {
     const top = diagnosis.ai.diagnoses[0];
     const conf = Math.round((top.confidence || 0) * 100);
-    msg += `*Diagnosis:* ${top.cause} (${conf}%)\n`;
-    if (top.reasoning) msg += `_${top.reasoning}_\n`;
+    msg += `*Diagnosis:* ${escapeMarkdown(top.cause)} (${conf}%)\n`;
+    if (top.reasoning) msg += `_${escapeMarkdown(top.reasoning)}_\n`;
     msg += `\n`;
   }
 
@@ -355,4 +436,4 @@ function formatResearchFirst(results) {
   return messages;
 }
 
-module.exports = { formatForWhatsApp, formatHelp, formatStatus, formatGreeting, formatResearchFirst };
+module.exports = { formatForWhatsApp, formatHelp, formatStatus, formatGreeting, formatResearchFirst, getErrorMessage, escapeMarkdown, splitMessage };

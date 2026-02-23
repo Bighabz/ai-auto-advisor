@@ -34,7 +34,6 @@ const {
   createEstimate,
 } = require("../../autoleap-estimate/scripts/estimate");
 const { getVehicleSpecs } = require("../../vehicle-specs/scripts/specs");
-const { generateEstimatePDF } = require("../../estimate-pdf/scripts/generate");
 const { diagnose } = require("../../ai-diagnostics/scripts/diagnose");
 const {
   getVehicleHistory,
@@ -80,7 +79,7 @@ const autoLeapBrowser = null;
 // --- Shared infrastructure (feature-flagged) ---
 const { createLogger, generateRunId } = require("../../shared/logger");
 const { withRetry, circuitBreaker, FailureClass } = require("../../shared/retry");
-const { validateLaborResult, validatePartQuote, normalizePrice, mergeResults } = require("../../shared/contracts");
+const { validateLaborResult, validatePartQuote, normalizePrice, mergeResults, PRICING_GATE, PRICING_SOURCE } = require("../../shared/contracts");
 const { SessionManager } = require("../../shared/session-manager");
 const { TabManager } = require("../../shared/tab-manager");
 const { checkHealth, cleanupArtifacts, validateEnv } = require("../../shared/health");
@@ -291,6 +290,23 @@ function formatDiagnosisSummary(aiDiagnosis) {
   }
 
   return lines.join("\n");
+}
+
+function getPartsMarkupPercent(shopConfig) {
+  const pct = Number(shopConfig?.markup?.partsMarkupPercent);
+  return Number.isFinite(pct) && pct >= 0 ? pct : 40;
+}
+
+function getRetailUnitPrice(part, partsMarkupPercent) {
+  if (!part) return 0;
+
+  const explicitRetail = Number(part.retailPrice ?? part.customerPrice ?? part.priceRetail ?? 0);
+  if (Number.isFinite(explicitRetail) && explicitRetail > 0) return explicitRetail;
+
+  const base = Number(part.totalCost ?? part.cost ?? part.price ?? 0);
+  if (!Number.isFinite(base) || base <= 0) return 0;
+
+  return Math.round(base * (1 + partsMarkupPercent / 100) * 100) / 100;
 }
 
 /**
@@ -1297,12 +1313,12 @@ async function buildEstimate(params) {
     }
   }
 
-  // ─── Step 6: Build Estimate in AutoLeap ───
+  // ─── Step 6: Build Estimate in AutoLeap (Native PartsTech Integration) ───
   if (params.progressCallback) await params.progressCallback("building_estimate").catch(() => {});
 
   if (autoLeapApi && params.customer) {
-    // Direct REST API path — token from Chrome CDP session, then REST calls
-    log.info("Step 6: Creating estimate in AutoLeap (API)...");
+    // Native path: labor via REST API + parts via AutoLeap's embedded PartsTech (applies shop markup matrix)
+    log.info("Step 6: Creating estimate in AutoLeap (native PartsTech)...");
 
     try {
       const estParts = results.parts?.bestValueBundle?.parts || [];
@@ -1314,7 +1330,9 @@ async function buildEstimate(params) {
         ? { hours: pdBestLabor.hours, source: "MOTOR", description: pdBestLabor.procedure || null }
         : null;
 
-      console.log(`  → Labor source: ${laborHoursOverride ? `MOTOR ${pdBestLabor.hours}h` : "AI/default"}`);
+      const partsWithSelection = estParts.filter(p => p.selected);
+      console.log(`  → Labor source: ${laborHoursOverride ? `MOTOR(${pdBestLabor.hours}h)` : "AI/default"}`);
+      console.log(`  → Parts to add via PartsTech: ${partsWithSelection.length}`);
 
       const autoLeapEstArgs = {
         customerName: params.customer.name,
@@ -1323,11 +1341,11 @@ async function buildEstimate(params) {
         vehicleMake: vehicle.make,
         vehicleModel: vehicle.model,
         vin: vehicle.vin || null,
-        diagnosis: results.diagnosis,         // untouched
+        diagnosis: results.diagnosis,
         parts: estParts,
-        laborHoursOverride,                   // explicit override
+        laborHoursOverride,
       };
-      const doAutoLeapEstimate = async () => autoLeapApi.buildEstimate(autoLeapEstArgs);
+      const doAutoLeapEstimate = async () => autoLeapApi.buildEstimateNative(autoLeapEstArgs);
       const apiEstimate = FEAT_RETRY_ENABLED
         ? await breakers.autoleap.call(() => withRetry(doAutoLeapEstimate, { maxRetries: 1, baseDelay: 2000 }))
         : await doAutoLeapEstimate();
@@ -1346,21 +1364,24 @@ async function buildEstimate(params) {
           tax: null,
           customerName: apiEstimate.customerName,
           vehicleDesc: apiEstimate.vehicleDesc,
+          pricingSource: apiEstimate.pricingSource,  // "autoleap-native"
         };
-        // Store resolved labor so Step 7 PDF uses the same value
         results.resolvedLaborHours = apiEstimate.laborHours;
         results.resolvedLaborRate  = apiEstimate.laborRate;
-        results.estimateSource = "autoleap-api";
+        results.estimateSource = "autoleap-native";
         console.log(`  → Estimate ${apiEstimate.estimateCode} created for ${apiEstimate.customerName}`);
         console.log(`  → Vehicle: ${apiEstimate.vehicleDesc}`);
+        console.log(`  → Pricing: AutoLeap native (markup applied by AutoLeap)`);
+        console.log(`  → Parts added: ${apiEstimate.partsAddedViaUI || 0}/${partsWithSelection.length}`);
         console.log(`  → Total: $${apiEstimate.total}`);
 
         trackEvent(shopId, "estimate_created", {
           vehicle: { year: vehicle.year, make: vehicle.make, model: vehicle.model },
           total: apiEstimate.total,
           estimateId: apiEstimate.estimateId,
-          source: "autoleap-api",
+          source: "autoleap-native",
           partsCount: estParts.length,
+          partsAddedViaUI: apiEstimate.partsAddedViaUI || 0,
           platformsUsed: [
             alldata && !alldata.error ? "alldata" : null,
             identifix && !identifix.error ? "identifix" : null,
@@ -1368,11 +1389,11 @@ async function buildEstimate(params) {
           ].filter(Boolean),
         }).catch(() => {});
       } else {
-        console.error(`  → AutoLeap API estimate failed: ${apiEstimate.error}`);
+        console.error(`  → AutoLeap native estimate failed: ${apiEstimate.error}`);
         results.estimate = { error: apiEstimate.error };
       }
     } catch (err) {
-      console.error(`  → AutoLeap API error: ${err.message}`);
+      console.error(`  → AutoLeap native error: ${err.message}`);
       results.estimate = { error: err.message };
     }
   } else if (params.customer) {
@@ -1461,124 +1482,33 @@ async function buildEstimate(params) {
     log.info("Step 6: Skipped AutoLeap (provide customer info to create)");
   }
 
-  // ─── Step 7: Generate PDF Estimate ───
-  log.info("Step 7: Generating PDF estimate...");
+  // ─── Step 7: Download AutoLeap PDF (native — no custom PDF) ───
+  log.info("Step 7: Downloading AutoLeap estimate PDF...");
 
-  try {
-    const pdfOutputPath = require("path").join(
-      require("os").tmpdir(),
-      `estimate-${vehicle.year}-${vehicle.make}-${vehicle.model}-${Date.now()}.pdf`
-    );
-
-    // Attempt AutoLeap PDF first (matches what customer sees in AutoLeap)
-    let gotAutoLeapPdf = false;
-    if (autoLeapApi && results.estimate?.estimateId) {
-      console.log(`  → Attempting AutoLeap PDF for estimate ${results.estimate.estimateId}...`);
-      try {
-        const token = await autoLeapApi.getToken();
-        const alPdfPath = await autoLeapApi.downloadEstimatePDF(token, results.estimate.estimateId, pdfOutputPath);
-        if (alPdfPath) {
-          results.pdfPath = alPdfPath;
-          gotAutoLeapPdf = true;
-          console.log(`  → AutoLeap PDF: ${alPdfPath}`);
-        }
-      } catch (pdfErr) {
-        console.log(`  → AutoLeap PDF error (non-fatal): ${pdfErr.message}`);
-      }
-    }
-
-    // Fallback: generate local PDF
-    if (!gotAutoLeapPdf) {
-      console.log(`  → Falling back to local PDF generation...`);
-
-      // Use SAME labor hours/rate as sent to AutoLeap
-      const pdfLaborHours = results.resolvedLaborHours ||
-        results.diagnosis?.ai?.repair_plan?.labor?.hours ||
-        (results.prodemandLabor?.length > 0 ? results.prodemandLabor[0].hours : null) ||
-        params.laborHours || 1.0;
-      const pdfLaborRate = results.resolvedLaborRate ||
-        Number(process.env.AUTOLEAP_LABOR_RATE) || shopConfig.shop.laborRatePerHour;
-
-      const laborLines = [{
-        description: params.query,
-        hours: pdfLaborHours,
-        rate: pdfLaborRate,
-        total: pdfLaborHours * pdfLaborRate,
-      }];
-
-      const partLines = [];
-      if (results.parts?.bestValueBundle?.parts) {
-        for (const item of results.parts.bestValueBundle.parts) {
-          if (item.selected) {
-            const p = item.selected;
-            partLines.push({
-              description: p.description,
-              partNumber: p.partNumber,
-              qty: item.requested?.qty || 1,
-              unitPrice: p.totalCost,
-              total: p.totalCost,
-              supplier: p.supplier,
-            });
-          } else if (item.requested) {
-            const name = item.requested.partType || "Part";
-            const pos = item.requested.position ? ` (${item.requested.position})` : "";
-            partLines.push({
-              description: name.charAt(0).toUpperCase() + name.slice(1) + pos,
-              partNumber: null,
-              qty: item.requested.qty || 1,
-              unitPrice: 0,
-              total: 0,
-              supplier: "pricing TBD",
-            });
-          }
-        }
-      }
-
-      // Totals — no parts markup (parts are at AutoLeap cost price)
-      const laborTotal = laborLines.reduce((sum, l) => sum + l.total, 0);
-      const partsTotal = partLines.reduce((sum, p) => sum + p.total, 0);
-      const suppliesTotal = Math.min(
-        (laborTotal + partsTotal) * (shopConfig.shop.shopSuppliesPercent / 100),
-        shopConfig.shop.shopSuppliesCap
+  if (autoLeapApi && results.estimate?.estimateId) {
+    try {
+      const pdfOutputPath = require("path").join(
+        require("os").tmpdir(),
+        `estimate-${vehicle.year}-${vehicle.make}-${vehicle.model}-${Date.now()}.pdf`
       );
-      const subtotal = laborTotal + partsTotal + suppliesTotal;
-      const taxTotal = subtotal * shopConfig.shop.taxRate;
-      const grandTotal = subtotal + taxTotal;
-
-      results.pdfPath = await generateEstimatePDF({
-        shop: shopConfig.shop,
-        customer: params.customer,
-        vehicle: {
-          year: vehicle.year,
-          make: vehicle.make,
-          model: vehicle.model,
-          trim: vehicle.trim,
-          engine: vehicle.engine?.displacement,
-          vin: vehicle.vin,
-          mileage: vehicle.mileage,
-        },
-        diagnosis: results.diagnosis?.summary,
-        laborLines,
-        partLines,
-        partsOptions: results.parts?.bestValueBundle?.parts?.[0] ? {
-          aftermarket: results.parts.bestValueBundle.parts[0].selected,
-          oem: results.oemAlternatives?.[0],
-        } : null,
-        totals: {
-          labor: laborTotal,
-          parts: partsTotal,
-          supplies: suppliesTotal,
-          tax: taxTotal,
-          total: grandTotal,
-        },
-        mechanicSpecs: results.mechanicSpecs,
-        outputPath: pdfOutputPath,
-      });
+      const token = await autoLeapApi.getToken();
+      const pdfPath = await autoLeapApi.downloadEstimatePDF(token, results.estimate.estimateId, pdfOutputPath);
+      if (pdfPath) {
+        results.pdfPath = pdfPath;
+        results.pdfSource = "autoleap-native";
+        console.log(`  → AutoLeap PDF: ${pdfPath}`);
+      } else {
+        console.log(`  → AutoLeap PDF not available`);
+        results.warnings = results.warnings || [];
+        results.warnings.push({ code: "PDF_AUTOLEAP_UNAVAILABLE", msg: "AutoLeap PDF download failed" });
+      }
+    } catch (pdfErr) {
+      console.error(`  → AutoLeap PDF error: ${pdfErr.message}`);
+      results.warnings = results.warnings || [];
+      results.warnings.push({ code: "PDF_AUTOLEAP_UNAVAILABLE", msg: "AutoLeap PDF download failed" });
     }
-
-    console.log(`  → PDF: ${results.pdfPath}`);
-  } catch (err) {
-    console.error(`  → PDF generation error: ${err.message}`);
+  } else {
+    console.log(`  → No AutoLeap estimate — skipping PDF`);
   }
 
   // ─── Step 8: Capture Procedure Screenshots ───
@@ -1621,6 +1551,45 @@ async function buildEstimate(params) {
 
   results.runId = runId;
   results._runCtx = runCtx;
+
+  // ─── Pricing Gate ───
+  const hasParts = (results.parts?.bestValueBundle?.parts || []).length > 0;
+  const partsMarkupPct = getPartsMarkupPercent(shopConfig);
+  let partsRetailTotal = 0;
+  if (hasParts) {
+    for (const item of results.parts.bestValueBundle.parts) {
+      if (item.selected) {
+        const retail = getRetailUnitPrice(item.selected, partsMarkupPct);
+        const qty = item.requested?.qty || 1;
+        partsRetailTotal += retail * qty;
+      }
+    }
+  }
+
+  // Determine pricing source
+  if (results.estimateSource === "autoleap-native" && results.estimate?.success) {
+    results.pricing_source = PRICING_SOURCE.AUTOLEAP_NATIVE;
+  } else if (partsRetailTotal > 0) {
+    results.pricing_source = PRICING_SOURCE.MATRIX_FALLBACK;
+  } else if (hasParts) {
+    results.pricing_source = PRICING_SOURCE.FAILED;
+  } else {
+    results.pricing_source = PRICING_SOURCE.NO_PARTS;
+  }
+
+  // Hard gate: block customer-facing output when parts exist but no retail pricing resolved
+  if (hasParts && partsRetailTotal <= 0) {
+    results.customer_ready = false;
+    results.pricing_gate = PRICING_GATE.BLOCKED;
+    results.warnings = results.warnings || [];
+    results.warnings.push({ code: "PRICING_GATE_BLOCKED", msg: "Parts pricing couldn't be resolved — review before sending" });
+    log.warn("Pricing gate BLOCKED", { parts_count: results.parts.bestValueBundle.parts.length, retail_total: partsRetailTotal, pricing_source: results.pricing_source });
+  } else {
+    results.customer_ready = true;
+    results.pricing_gate = PRICING_GATE.PASSED;
+  }
+
+  log.info(`Pricing: source=${results.pricing_source}, gate=${results.pricing_gate}, retail_total=$${partsRetailTotal.toFixed(2)}`);
 
   // Format response for service advisor
   results.formattedResponse = formatServiceAdvisorResponse(results);

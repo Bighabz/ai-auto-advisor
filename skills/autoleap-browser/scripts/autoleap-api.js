@@ -88,6 +88,38 @@ function validateServices(services) {
   return { valid: true };
 }
 
+function resolvePartsMarkupPercent(partsMarkupPercent) {
+  const fromArg = Number(partsMarkupPercent);
+  if (Number.isFinite(fromArg) && fromArg >= 0) return fromArg;
+
+  const fromEnvPercent = Number(process.env.AUTOLEAP_PARTS_MARKUP_PERCENT);
+  if (Number.isFinite(fromEnvPercent) && fromEnvPercent >= 0) return fromEnvPercent;
+
+  const fromEnvMultiplier = Number(process.env.AUTOLEAP_PARTS_MARKUP_MULTIPLIER);
+  if (Number.isFinite(fromEnvMultiplier) && fromEnvMultiplier > 0) {
+    return Math.max(0, (fromEnvMultiplier - 1) * 100);
+  }
+
+  return 40;
+}
+
+function resolveRetailPartPrice(sel, markupPercent) {
+  const explicitRetail = Number(sel?.retailPrice ?? sel?.customerPrice ?? sel?.priceRetail ?? 0);
+  if (Number.isFinite(explicitRetail) && explicitRetail > 0) return explicitRetail;
+
+  // Some pipelines may populate shopPrice as an already-calculated customer price.
+  const shopPrice = Number(sel?.shopPrice ?? 0);
+  const cost = Number(sel?.cost ?? sel?.price ?? sel?.totalCost ?? 0);
+  if (Number.isFinite(shopPrice) && shopPrice > 0 && (!Number.isFinite(cost) || cost <= 0 || shopPrice > cost)) {
+    return shopPrice;
+  }
+
+  const baseCost = Number.isFinite(cost) && cost > 0 ? cost : shopPrice;
+  if (!Number.isFinite(baseCost) || baseCost <= 0) return 0;
+
+  return Math.round(baseCost * (1 + markupPercent / 100) * 100) / 100;
+}
+
 // ─── Token management ────────────────────────────────────────────────────────
 
 function loadCachedToken() {
@@ -289,7 +321,7 @@ async function getEstimate(token, estimateId) {
  * @param {object[]} [parts] - Parts from partstech search
  * @returns {object[]} AutoLeap services array
  */
-function buildServices(diagnosis, parts, laborHoursOverride) {
+function buildServices(diagnosis, parts, laborHoursOverride, partsMarkupPercent) {
   const services = [];
   const repairPlan = diagnosis?.ai?.repair_plan || diagnosis?.repair_plan;
   const diagnoses = diagnosis?.ai?.diagnoses || diagnosis?.diagnoses || [];
@@ -302,6 +334,7 @@ function buildServices(diagnosis, parts, laborHoursOverride) {
 
   // Gather labor items
   const laborItems = [];
+  const effectivePartsMarkup = resolvePartsMarkupPercent(partsMarkupPercent);
 
   // Labor source precedence: MOTOR override > AI repair_plan > default 1.5
   const motorHours = laborHoursOverride?.hours;
@@ -332,7 +365,7 @@ function buildServices(diagnosis, parts, laborHoursOverride) {
       if (!sel) continue;
 
       const partDesc = sel.description || sel.name || sel.partType || "Part";
-      const partPrice = Number(sel.shopPrice || sel.price || sel.cost || 0);
+      const partPrice = resolveRetailPartPrice(sel, effectivePartsMarkup);
       const partNum = sel.partNumber || sel.partNum || "";
 
       partItems.push({
@@ -340,7 +373,7 @@ function buildServices(diagnosis, parts, laborHoursOverride) {
         title: (partDesc + (partNum ? ` — ${partNum}` : "")).substring(0, 100),
         pricingType: "flatFee",
         price: partPrice,
-        count: 1,
+        count: Number(part?.requested?.qty || sel?.qty || 1) || 1,
         isTaxable: true,
         partNumber: partNum || undefined,
         brand: sel.brand || sel.manufacturer || undefined,
@@ -403,7 +436,7 @@ function buildServices(diagnosis, parts, laborHoursOverride) {
  * @param {object[]} [params.parts]     - Parts from partstech search
  * @returns {Promise<{ success, estimateCode, estimateId, customerName, vehicleDesc, total, error }>}
  */
-async function buildEstimate({ customerName, phone, vehicleYear, vehicleMake, vehicleModel, vin, diagnosis, parts, laborHoursOverride }) {
+async function buildEstimate({ customerName, phone, vehicleYear, vehicleMake, vehicleModel, vin, diagnosis, parts, laborHoursOverride, partsMarkupPercent }) {
   try {
     // 1. Get auth token
     const token = await getToken();
@@ -463,7 +496,7 @@ async function buildEstimate({ customerName, phone, vehicleYear, vehicleMake, ve
     }
 
     // 4. Build services from diagnosis + parts
-    const services = buildServices(diagnosis, parts, laborHoursOverride);
+    const services = buildServices(diagnosis, parts, laborHoursOverride, partsMarkupPercent);
     log.info("services built", { count: services.length, items: services[0]?.items?.length || 0 });
 
     // Strip internal metadata before sending to AutoLeap API
@@ -604,8 +637,310 @@ async function downloadEstimatePDF(token, estimateId, outputPath) {
   }
 }
 
+// ─── Native PartsTech integration (browser-based) ─────────────────────────────
+
+/**
+ * Add parts to an AutoLeap estimate through the embedded PartsTech UI.
+ *
+ * Uses puppeteer-core (same Chrome CDP session used for token capture)
+ * to navigate to the estimate, open PartsTech iframe, search for each part,
+ * and add it — letting AutoLeap apply its markup matrix for retail pricing.
+ *
+ * @param {string} estimateId - AutoLeap estimate _id
+ * @param {object[]} parts - Parts array from partstech search (each has .selected and .requested)
+ * @returns {{ addedCount: number, failedCount: number, addedParts: object[], failedParts: object[] }}
+ */
+async function addPartsThroughAutoLeap(estimateId, parts) {
+  let puppeteer;
+  try { puppeteer = require("puppeteer-core"); } catch {
+    console.log(`${LOG} puppeteer-core not available — skipping browser parts`);
+    return { addedCount: 0, failedCount: parts.length, addedParts: [], failedParts: parts.map(p => ({ part: p, reason: "puppeteer-core not available" })) };
+  }
+
+  const addedParts = [];
+  const failedParts = [];
+  let browser;
+
+  try {
+    browser = await puppeteer.connect({ browserURL: CHROME_CDP_URL, defaultViewport: null });
+
+    // Find or open AutoLeap tab
+    let page = (await browser.pages()).find(p => p.url().includes("myautoleap.com"));
+    if (!page) {
+      page = (await browser.pages())[0] || await browser.newPage();
+    }
+
+    // Navigate to the estimate
+    const estimateUrl = `${AUTOLEAP_APP_URL}/#/estimates/${estimateId}`;
+    console.log(`${LOG} Navigating to estimate: ${estimateUrl}`);
+    await page.goto(estimateUrl, { waitUntil: "networkidle2", timeout: 30000 });
+    await new Promise(r => setTimeout(r, 3000));
+
+    // Find and click the PartsTech button/tab within the estimate
+    const ptButtonClicked = await page.evaluate(() => {
+      // Look for PartsTech button by common patterns in AutoLeap estimate UI
+      const candidates = Array.from(document.querySelectorAll("button, a, [role='tab'], [role='button'], span"));
+      for (const el of candidates) {
+        const txt = (el.textContent || "").toLowerCase().trim();
+        if (txt.includes("partstech") || txt.includes("parts tech") || txt.includes("order parts") || txt.includes("parts ordering")) {
+          el.click();
+          return true;
+        }
+      }
+      // Try mat-tab or Angular material tab labels
+      const tabs = document.querySelectorAll(".mat-tab-label, .mat-mdc-tab");
+      for (const tab of tabs) {
+        if ((tab.textContent || "").toLowerCase().includes("part")) {
+          tab.click();
+          return true;
+        }
+      }
+      return false;
+    });
+
+    if (!ptButtonClicked) {
+      console.log(`${LOG} Could not find PartsTech button in estimate — trying direct icon click`);
+      // Try clicking any element with a parts-related icon
+      await page.evaluate(() => {
+        const icons = document.querySelectorAll("[class*='parts'], [class*='partstech'], img[alt*='parts']");
+        if (icons.length > 0) icons[0].click();
+      });
+    }
+
+    await new Promise(r => setTimeout(r, 3000));
+
+    // Wait for PartsTech iframe to appear
+    let ptFrame = null;
+    for (let attempt = 0; attempt < 10; attempt++) {
+      const frames = page.frames();
+      ptFrame = frames.find(f => {
+        const url = f.url();
+        return url.includes("partstech") || url.includes("parts-tech") || url.includes("pt-embed");
+      });
+      if (ptFrame) break;
+      await new Promise(r => setTimeout(r, 1500));
+    }
+
+    if (!ptFrame) {
+      console.log(`${LOG} PartsTech iframe not found — falling back to page-level search`);
+      // Some AutoLeap setups embed PartsTech directly (no iframe)
+      ptFrame = page;
+    } else {
+      console.log(`${LOG} Found PartsTech iframe: ${ptFrame.url().substring(0, 80)}`);
+    }
+
+    // Process each part
+    for (const partItem of parts) {
+      const sel = partItem.selected || partItem;
+      if (!sel) {
+        failedParts.push({ part: partItem, reason: "no selected part data" });
+        continue;
+      }
+
+      const searchTerms = partItem.requested?.searchTerms || [];
+      const partType = partItem.requested?.partType || sel.description || sel.partType || "";
+      const searchQuery = searchTerms[0] || partType;
+
+      if (!searchQuery) {
+        failedParts.push({ part: partItem, reason: "no search term" });
+        continue;
+      }
+
+      try {
+        console.log(`${LOG} Searching PartsTech for: "${searchQuery}"`);
+
+        // Find search input in the PartsTech context (iframe or page)
+        const searchInput = await ptFrame.$('input[type="search"], input[placeholder*="search" i], input[placeholder*="part" i], input[name*="search" i], .search-input input, input.search-box');
+        if (!searchInput) {
+          console.log(`${LOG} No search input found for: ${searchQuery}`);
+          failedParts.push({ part: partItem, reason: "no search input in PartsTech" });
+          continue;
+        }
+
+        // Clear and type search
+        await searchInput.click({ clickCount: 3 });
+        await searchInput.type(searchQuery, { delay: 50 });
+        await searchInput.press("Enter");
+
+        // Wait for results to load
+        await new Promise(r => setTimeout(r, 5000));
+
+        // Try to find and click the best matching result, then "Add to Estimate"
+        const added = await ptFrame.evaluate((partNumber, brand) => {
+          // Look for results list items
+          const items = document.querySelectorAll("[class*='result'], [class*='product'], [class*='item'], tr, li");
+          let bestMatch = null;
+
+          for (const item of items) {
+            const text = (item.textContent || "").toLowerCase();
+            // Match by part number if available
+            if (partNumber && text.includes(partNumber.toLowerCase())) {
+              bestMatch = item;
+              break;
+            }
+            // Match by brand
+            if (brand && text.includes(brand.toLowerCase()) && text.includes("$")) {
+              bestMatch = item;
+              break;
+            }
+          }
+
+          // If no specific match, take first item with a price
+          if (!bestMatch) {
+            for (const item of items) {
+              if ((item.textContent || "").includes("$") && item.querySelector("button, [role='button'], a")) {
+                bestMatch = item;
+                break;
+              }
+            }
+          }
+
+          if (!bestMatch) return false;
+
+          // Click the item or its "Add" button
+          const addBtn = bestMatch.querySelector("button, [role='button']");
+          if (addBtn) {
+            const btnText = (addBtn.textContent || "").toLowerCase();
+            if (btnText.includes("add") || btnText.includes("select") || btnText.includes("cart")) {
+              addBtn.click();
+              return true;
+            }
+          }
+
+          // Click the item itself to expand it
+          bestMatch.click();
+          return "clicked_item";
+        }, sel.partNumber || "", sel.brand || "");
+
+        if (added === true) {
+          addedParts.push({ partType, partNumber: sel.partNumber, brand: sel.brand });
+          console.log(`${LOG} Part added: ${searchQuery}`);
+          await new Promise(r => setTimeout(r, 2000));
+          continue;
+        }
+
+        if (added === "clicked_item") {
+          // Item was clicked, now look for "Add to Estimate" button
+          await new Promise(r => setTimeout(r, 2000));
+          const addResult = await ptFrame.evaluate(() => {
+            const buttons = document.querySelectorAll("button, [role='button']");
+            for (const btn of buttons) {
+              const txt = (btn.textContent || "").toLowerCase();
+              if (txt.includes("add to estimate") || txt.includes("add to order") || txt.includes("select") || txt.includes("add part")) {
+                btn.click();
+                return true;
+              }
+            }
+            return false;
+          });
+
+          if (addResult) {
+            addedParts.push({ partType, partNumber: sel.partNumber, brand: sel.brand });
+            console.log(`${LOG} Part added (2-step): ${searchQuery}`);
+            await new Promise(r => setTimeout(r, 2000));
+            continue;
+          }
+        }
+
+        console.log(`${LOG} Could not add part: ${searchQuery}`);
+        failedParts.push({ part: partItem, reason: "no add button found" });
+      } catch (partErr) {
+        console.log(`${LOG} Error adding part "${searchQuery}": ${partErr.message}`);
+        failedParts.push({ part: partItem, reason: partErr.message });
+      }
+    }
+  } catch (err) {
+    console.error(`${LOG} addPartsThroughAutoLeap error: ${err.message}`);
+    // Mark remaining parts as failed
+    const alreadyProcessed = addedParts.length + failedParts.length;
+    for (let i = alreadyProcessed; i < parts.length; i++) {
+      failedParts.push({ part: parts[i], reason: err.message });
+    }
+  } finally {
+    if (browser) browser.disconnect();
+  }
+
+  console.log(`${LOG} PartsTech browser: ${addedParts.length} added, ${failedParts.length} failed`);
+  return { addedCount: addedParts.length, failedCount: failedParts.length, addedParts, failedParts };
+}
+
+/**
+ * Build an AutoLeap estimate using the native PartsTech workflow.
+ *
+ * Hybrid approach:
+ *   1. Create estimate shell via REST API (labor only — fast, reliable)
+ *   2. Open estimate in browser, add parts through AutoLeap's embedded PartsTech
+ *      (AutoLeap applies its markup matrix → retail pricing)
+ *   3. Re-fetch estimate via REST to get final totals with markup applied
+ *
+ * Returns same shape as buildEstimate() so orchestrator interface doesn't change.
+ */
+async function buildEstimateNative({ customerName, phone, vehicleYear, vehicleMake, vehicleModel, vin, diagnosis, parts, laborHoursOverride }) {
+  try {
+    // 1. Create estimate via REST with labor only (no parts)
+    console.log(`${LOG} buildEstimateNative: creating labor-only estimate shell...`);
+    const apiResult = await buildEstimate({
+      customerName, phone, vehicleYear, vehicleMake, vehicleModel, vin,
+      diagnosis,
+      parts: [],                    // No parts via API — they go through browser
+      laborHoursOverride,
+      partsMarkupPercent: 0,        // irrelevant since no parts
+    });
+
+    if (!apiResult.success) {
+      log.error("buildEstimateNative: shell estimate failed", { error: apiResult.error });
+      return apiResult;
+    }
+
+    console.log(`${LOG} Shell estimate created: ${apiResult.estimateCode} (${apiResult.estimateId})`);
+
+    // 2. Filter to parts that have selections (actual products found)
+    const partsToAdd = (parts || []).filter(p => p.selected);
+    if (partsToAdd.length === 0) {
+      console.log(`${LOG} No parts to add via browser — returning labor-only estimate`);
+      return { ...apiResult, partsAddedViaUI: 0, partsFailedViaUI: 0, pricingSource: "autoleap-native" };
+    }
+
+    // 3. Open estimate in browser and add parts via PartsTech
+    console.log(`${LOG} Adding ${partsToAdd.length} parts via AutoLeap PartsTech browser...`);
+    const partsResult = await addPartsThroughAutoLeap(apiResult.estimateId, partsToAdd);
+
+    // 4. Re-fetch estimate from API to get final totals (with AutoLeap markup)
+    console.log(`${LOG} Re-fetching estimate for final totals...`);
+    const token = await getToken();
+    const finalData = await getEstimate(token, apiResult.estimateId);
+
+    // Extract totals from the re-fetched estimate
+    const grandTotal = finalData?.grandTotal ?? finalData?.total ?? null;
+    const totalParts = finalData?.totalParts ?? finalData?.partsTotal ?? null;
+    const totalLabor = finalData?.totalLabor ?? finalData?.laborTotal ?? apiResult.totalLabor;
+
+    // Use AutoLeap totals if they're > 0, otherwise fall back to original
+    const useAutoLeapTotals = (grandTotal != null && grandTotal > 0);
+
+    const result = {
+      ...apiResult,
+      total:       useAutoLeapTotals ? grandTotal : apiResult.total,
+      totalParts:  (totalParts != null && totalParts > 0) ? totalParts : 0,
+      totalLabor:  (totalLabor != null && totalLabor > 0) ? totalLabor : apiResult.totalLabor,
+      partsAddedViaUI:  partsResult.addedCount,
+      partsFailedViaUI: partsResult.failedCount,
+      pricingSource:    "autoleap-native",   // markup applied by AutoLeap, not code
+    };
+
+    console.log(`${LOG} buildEstimateNative complete: total=$${result.total}, parts=$${result.totalParts}, labor=$${result.totalLabor}`);
+    console.log(`${LOG}   Parts via UI: ${partsResult.addedCount} added, ${partsResult.failedCount} failed`);
+
+    return result;
+  } catch (err) {
+    log.error("buildEstimateNative failed", { error: err.message });
+    return { success: false, error: err.message };
+  }
+}
+
 module.exports = {
   buildEstimate,
+  buildEstimateNative,
   getToken,
   searchCustomer,
   createCustomer,
@@ -613,4 +948,5 @@ module.exports = {
   getEstimate,
   buildServices,
   downloadEstimatePDF,
+  addPartsThroughAutoLeap,
 };

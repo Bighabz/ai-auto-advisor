@@ -77,6 +77,19 @@ function mergeResults(base, overlay) {
   return merged;
 }
 
+// Pricing gate reason codes
+const PRICING_GATE = {
+  PASSED: "PASSED",
+  BLOCKED: "BLOCKED",
+};
+
+const PRICING_SOURCE = {
+  AUTOLEAP_NATIVE: "autoleap-native",
+  MATRIX_FALLBACK: "matrix-fallback",
+  FAILED: "FAILED_PRICING_SOURCE",
+  NO_PARTS: "no-parts",
+};
+
 module.exports = {
   normalizePrice,
   validateLaborResult,
@@ -84,4 +97,6 @@ module.exports = {
   validateEstimateLine,
   mergeResults,
   LABOR_PRECEDENCE,
+  PRICING_GATE,
+  PRICING_SOURCE,
 };
