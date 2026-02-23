@@ -275,7 +275,29 @@ async function selectVehicle(page, { year, make, model, engine }) {
     else if (activeTab === "model") picked = await clickQualifier(page, wantedValues.model);
     else if (activeTab === "engine") {
       picked = wantedValues.engine ? await clickQualifier(page, wantedValues.engine) : null;
-      if (!picked) picked = await clickQualifier(page, qualifiers[0]);
+      if (!picked) {
+        // No engine specified — score options to prefer gas over electric
+        picked = await page.evaluate(() => {
+          const items = Array.from(document.querySelectorAll("li.qualifier:not(.selected)"));
+          if (items.length === 0) return null;
+          const score = (text) => {
+            const t = text.toLowerCase();
+            let s = 0;
+            if (t.includes("gas") || t.includes("gasoline")) s += 6;
+            if (/\d\.\d/.test(t)) s += 3; // displacement like "2.0L" = likely gas
+            if (t.includes("electric")) s -= 8;
+            if (/\bev\b/.test(t)) s -= 8;
+            if (t.includes("plugin") || t.includes("plug-in")) s -= 5;
+            if (t.includes("hybrid")) s -= 3;
+            if (t.includes("diesel")) s -= 2;
+            return s;
+          };
+          const scored = items.map(li => ({ li, text: li.textContent.trim(), s: score(li.textContent.trim()) }));
+          scored.sort((a, b) => b.s - a.s);
+          scored[0].li.click();
+          return scored[0].text;
+        });
+      }
     } else if (activeTab === "submodel") {
       picked = await clickQualifier(page, qualifiers[0]);
     } else {
