@@ -274,25 +274,21 @@ async function searchOnePart(ptPage, client, searchTerm) {
 }
 
 /**
- * Pick the best product from a pool of results.
- * Prefers: products with local availability, then cheapest price.
+ * Pick the best (cheapest available) product from a pool of results.
+ * PartsTech NETWORK warehouse is same/next-day — no store-type preference.
  */
 function pickBestProduct(products) {
   if (!products || products.length === 0) return null;
 
-  // Must have a valid price
-  const withPrice = products.filter(p => p.price && p.price > 0);
-  if (withPrice.length === 0) return null;
-
-  // Prefer products available at MAIN or CLOSEST store (not just NETWORK warehouse)
-  const nearby = withPrice.filter(p =>
-    p.availability?.some(a => a.quantity > 0 && (a.type === "MAIN" || a.type === "CLOSEST"))
+  // Must have a valid price AND be available somewhere (any store type)
+  const available = products.filter(p =>
+    p.price && p.price > 0 &&
+    p.availability?.some(a => a.quantity > 0)
   );
+  if (available.length === 0) return null;
 
-  const pool = nearby.length > 0 ? nearby : withPrice;
-
-  // Return cheapest from the preferred pool
-  return pool.reduce((best, p) => (!best || p.price < best.price) ? p : best, null);
+  // Return cheapest — NETWORK delivery is still same/next-day, no local bias
+  return available.reduce((best, p) => (!best || p.price < best.price) ? p : best, null);
 }
 
 // ─── Main export ─────────────────────────────────────────────────────────────
