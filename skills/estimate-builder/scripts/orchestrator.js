@@ -1197,10 +1197,19 @@ async function buildEstimate(params) {
           success: true,
           estimateId: apiEstimate.estimateId,
           estimateCode: apiEstimate.estimateCode,
-          total: apiEstimate.total,
+          total:       apiEstimate.total,
+          totalLabor:  apiEstimate.totalLabor,
+          totalParts:  apiEstimate.totalParts,
+          laborHours:  apiEstimate.laborHours,
+          laborRate:   apiEstimate.laborRate,
+          shopSupplies: null,
+          tax: null,
           customerName: apiEstimate.customerName,
           vehicleDesc: apiEstimate.vehicleDesc,
         };
+        // Store resolved labor so Step 7 PDF uses the same value
+        results.resolvedLaborHours = apiEstimate.laborHours;
+        results.resolvedLaborRate  = apiEstimate.laborRate;
         results.estimateSource = "autoleap-api";
         console.log(`  → Estimate ${apiEstimate.estimateCode} created for ${apiEstimate.customerName}`);
         console.log(`  → Vehicle: ${apiEstimate.vehicleDesc}`);
@@ -1316,16 +1325,18 @@ async function buildEstimate(params) {
   console.log("\n[Step 7] Generating PDF estimate...");
 
   try {
-    // Build labor lines for PDF — use repair plan hours, then ProDemand, then params
-    const pdfRepairPlan = results.diagnosis?.ai?.repair_plan;
-    const pdfLaborHours = pdfRepairPlan?.labor?.hours ||
+    // Use SAME labor hours/rate as sent to AutoLeap (single source of truth)
+    const pdfLaborHours = results.resolvedLaborHours ||
+      results.diagnosis?.ai?.repair_plan?.labor?.hours ||
       (results.prodemandLabor?.length > 0 ? results.prodemandLabor[0].hours : null) ||
       params.laborHours || 1.0;
+    const pdfLaborRate = results.resolvedLaborRate ||
+      Number(process.env.AUTOLEAP_LABOR_RATE) || shopConfig.shop.laborRatePerHour;
     const laborLines = [{
       description: params.query,
       hours: pdfLaborHours,
-      rate: shopConfig.shop.laborRatePerHour,
-      total: pdfLaborHours * shopConfig.shop.laborRatePerHour,
+      rate: pdfLaborRate,
+      total: pdfLaborHours * pdfLaborRate,
     }];
 
     // Build parts lines for PDF
@@ -1358,9 +1369,9 @@ async function buildEstimate(params) {
       }
     }
 
-    // Calculate totals
+    // Calculate totals — match AutoLeap exactly (no additional markup)
     const laborTotal = laborLines.reduce((sum, l) => sum + l.total, 0);
-    const partsTotal = partLines.reduce((sum, p) => sum + p.total, 0) * (1 + shopConfig.markup.partsMarkupPercent / 100);
+    const partsTotal = partLines.reduce((sum, p) => sum + p.total, 0);
     const suppliesTotal = Math.min(
       (laborTotal + partsTotal) * (shopConfig.shop.shopSuppliesPercent / 100),
       shopConfig.shop.shopSuppliesCap

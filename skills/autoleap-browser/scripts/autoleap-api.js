@@ -329,7 +329,10 @@ function buildServices(diagnosis, parts, laborHoursOverride) {
 
   // Build a single service combining labor + parts
   const allItems = [...laborItems, ...partItems];
-  const totalPrice = allItems.reduce((sum, i) => sum + (i.price || 0), 0);
+
+  // Compute breakdown totals for caller (needed for consistent display)
+  const laborItemsTotal = laborItems.reduce((s, i) => s + (i.price || 0), 0);
+  const partItemsTotal  = partItems.reduce((s, i) => s + (i.price || 0), 0);
 
   services.push({
     title: serviceTitle.substring(0, 120),
@@ -338,6 +341,10 @@ function buildServices(diagnosis, parts, laborHoursOverride) {
     status: "new",
     includeInInvoice: true,
     items: allItems,
+    _laborTotal: laborItemsTotal,
+    _partsTotal: partItemsTotal,
+    _laborHours: laborHours,
+    _laborRate:  laborRate,
   });
 
   return services;
@@ -426,6 +433,10 @@ async function buildEstimate({ customerName, phone, vehicleYear, vehicleMake, ve
       (sum, svc) => sum + svc.items.reduce((s, i) => s + (i.price || 0), 0),
       0
     );
+    const totalLabor    = services.reduce((s, svc) => s + (svc._laborTotal || 0), 0);
+    const totalParts    = services.reduce((s, svc) => s + (svc._partsTotal || 0), 0);
+    const laborHoursUsed = services[0]?._laborHours || 0;
+    const laborRateUsed  = services[0]?._laborRate  || (Number(process.env.AUTOLEAP_LABOR_RATE) || 120);
 
     const vehicleDesc = vehicleYear && vehicleMake && vehicleModel
       ? `${vehicleYear} ${vehicleMake} ${vehicleModel}`
@@ -437,7 +448,11 @@ async function buildEstimate({ customerName, phone, vehicleYear, vehicleMake, ve
       estimateId: estimate._id,
       customerName: customer.fullName,
       vehicleDesc,
-      total: Math.round(total * 100) / 100,
+      total:      Math.round(total * 100) / 100,
+      totalLabor: Math.round(totalLabor * 100) / 100,
+      totalParts: Math.round(totalParts * 100) / 100,
+      laborHours: laborHoursUsed,
+      laborRate:  laborRateUsed,
     };
   } catch (err) {
     console.error(`${LOG} buildEstimate error:`, err.message);

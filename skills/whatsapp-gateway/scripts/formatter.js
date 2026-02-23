@@ -55,17 +55,18 @@ function formatForWhatsApp(results) {
 
   // Estimate total
   if (estimate?.total) {
-    msg1 += `*ESTIMATE TOTAL: $${estimate.total}*\n`;
-    msg1 += `Labor: $${estimate.totalLabor} | Parts: $${estimate.totalParts}\n`;
-    msg1 += `Shop supplies: $${estimate.shopSupplies} | Tax: $${estimate.tax}\n`;
+    msg1 += `*ESTIMATE TOTAL: $${estimate.total.toFixed(2)}*\n`;
+    if (estimate.totalLabor != null && estimate.totalParts != null) {
+      msg1 += `Labor: $${estimate.totalLabor.toFixed(2)} | Parts: $${estimate.totalParts.toFixed(2)}\n`;
+    }
     if (estimate.estimateId) {
-      msg1 += `AutoLeap: ${estimate.estimateId}\n`;
+      msg1 += `AutoLeap: #${estimate.estimateCode || estimate.estimateId}\n`;
     }
   } else if (parts?.bestValueBundle?.totalCost) {
-    // No AutoLeap estimate but have parts pricing
+    // No AutoLeap estimate — rough estimate using env var rate
     const rp = diagnosis?.ai?.repair_plan;
     const laborHours = rp?.labor?.hours || 1.0;
-    const laborRate = 135; // default
+    const laborRate = Number(process.env.AUTOLEAP_LABOR_RATE) || 120;
     const laborTotal = laborHours * laborRate;
     const partsTotal = parts.bestValueBundle.totalCost;
     const rough = laborTotal + partsTotal;
