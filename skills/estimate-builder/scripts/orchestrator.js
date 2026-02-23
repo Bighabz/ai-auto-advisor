@@ -1323,90 +1323,116 @@ async function buildEstimate(params) {
   console.log("\n[Step 7] Generating PDF estimate...");
 
   try {
-    // Use SAME labor hours/rate as sent to AutoLeap (single source of truth)
-    const pdfLaborHours = results.resolvedLaborHours ||
-      results.diagnosis?.ai?.repair_plan?.labor?.hours ||
-      (results.prodemandLabor?.length > 0 ? results.prodemandLabor[0].hours : null) ||
-      params.laborHours || 1.0;
-    const pdfLaborRate = results.resolvedLaborRate ||
-      Number(process.env.AUTOLEAP_LABOR_RATE) || shopConfig.shop.laborRatePerHour;
-    const laborLines = [{
-      description: params.query,
-      hours: pdfLaborHours,
-      rate: pdfLaborRate,
-      total: pdfLaborHours * pdfLaborRate,
-    }];
+    const pdfOutputPath = require("path").join(
+      require("os").tmpdir(),
+      `estimate-${vehicle.year}-${vehicle.make}-${vehicle.model}-${Date.now()}.pdf`
+    );
 
-    // Build parts lines for PDF
-    const partLines = [];
-    if (results.parts?.bestValueBundle?.parts) {
-      for (const item of results.parts.bestValueBundle.parts) {
-        if (item.selected) {
-          const p = item.selected;
-          partLines.push({
-            description: p.description,
-            partNumber: p.partNumber,
-            qty: item.requested?.qty || 1,
-            unitPrice: p.totalCost,
-            total: p.totalCost,
-            supplier: p.supplier,
-          });
-        } else if (item.requested) {
-          // Part identified but no pricing — list it with $0 so the customer sees it
-          const name = item.requested.partType || "Part";
-          const pos = item.requested.position ? ` (${item.requested.position})` : "";
-          partLines.push({
-            description: name.charAt(0).toUpperCase() + name.slice(1) + pos,
-            partNumber: null,
-            qty: item.requested.qty || 1,
-            unitPrice: 0,
-            total: 0,
-            supplier: "pricing TBD",
-          });
+    // Attempt AutoLeap PDF first (matches what customer sees in AutoLeap)
+    let gotAutoLeapPdf = false;
+    if (autoLeapApi && results.estimate?.estimateId) {
+      console.log(`  → Attempting AutoLeap PDF for estimate ${results.estimate.estimateId}...`);
+      try {
+        const token = await autoLeapApi.getToken();
+        const alPdfPath = await autoLeapApi.downloadEstimatePDF(token, results.estimate.estimateId, pdfOutputPath);
+        if (alPdfPath) {
+          results.pdfPath = alPdfPath;
+          gotAutoLeapPdf = true;
+          console.log(`  → AutoLeap PDF: ${alPdfPath}`);
         }
+      } catch (pdfErr) {
+        console.log(`  → AutoLeap PDF error (non-fatal): ${pdfErr.message}`);
       }
     }
 
-    // Calculate totals — match AutoLeap exactly (no additional markup)
-    const laborTotal = laborLines.reduce((sum, l) => sum + l.total, 0);
-    const partsTotal = partLines.reduce((sum, p) => sum + p.total, 0);
-    const suppliesTotal = Math.min(
-      (laborTotal + partsTotal) * (shopConfig.shop.shopSuppliesPercent / 100),
-      shopConfig.shop.shopSuppliesCap
-    );
-    const subtotal = laborTotal + partsTotal + suppliesTotal;
-    const taxTotal = subtotal * shopConfig.shop.taxRate;
-    const grandTotal = subtotal + taxTotal;
+    // Fallback: generate local PDF
+    if (!gotAutoLeapPdf) {
+      console.log(`  → Falling back to local PDF generation...`);
 
-    results.pdfPath = await generateEstimatePDF({
-      shop: shopConfig.shop,
-      customer: params.customer,
-      vehicle: {
-        year: vehicle.year,
-        make: vehicle.make,
-        model: vehicle.model,
-        trim: vehicle.trim,
-        engine: vehicle.engine?.displacement,
-        vin: vehicle.vin,
-        mileage: vehicle.mileage,
-      },
-      diagnosis: results.diagnosis?.summary,
-      laborLines,
-      partLines,
-      partsOptions: results.parts?.bestValueBundle?.parts?.[0] ? {
-        aftermarket: results.parts.bestValueBundle.parts[0].selected,
-        oem: results.oemAlternatives?.[0],
-      } : null,
-      totals: {
-        labor: laborTotal,
-        parts: partsTotal,
-        supplies: suppliesTotal,
-        tax: taxTotal,
-        total: grandTotal,
-      },
-      mechanicSpecs: results.mechanicSpecs,
-      outputPath: require("path").join(require("os").tmpdir(), `estimate-${vehicle.year}-${vehicle.make}-${vehicle.model}-${Date.now()}.pdf`),
-    });
+      // Use SAME labor hours/rate as sent to AutoLeap
+      const pdfLaborHours = results.resolvedLaborHours ||
+        results.diagnosis?.ai?.repair_plan?.labor?.hours ||
+        (results.prodemandLabor?.length > 0 ? results.prodemandLabor[0].hours : null) ||
+        params.laborHours || 1.0;
+      const pdfLaborRate = results.resolvedLaborRate ||
+        Number(process.env.AUTOLEAP_LABOR_RATE) || shopConfig.shop.laborRatePerHour;
+
+      const laborLines = [{
+        description: params.query,
+        hours: pdfLaborHours,
+        rate: pdfLaborRate,
+        total: pdfLaborHours * pdfLaborRate,
+      }];
+
+      const partLines = [];
+      if (results.parts?.bestValueBundle?.parts) {
+        for (const item of results.parts.bestValueBundle.parts) {
+          if (item.selected) {
+            const p = item.selected;
+            partLines.push({
+              description: p.description,
+              partNumber: p.partNumber,
+              qty: item.requested?.qty || 1,
+              unitPrice: p.totalCost,
+              total: p.totalCost,
+              supplier: p.supplier,
+            });
+          } else if (item.requested) {
+            const name = item.requested.partType || "Part";
+            const pos = item.requested.position ? ` (${item.requested.position})` : "";
+            partLines.push({
+              description: name.charAt(0).toUpperCase() + name.slice(1) + pos,
+              partNumber: null,
+              qty: item.requested.qty || 1,
+              unitPrice: 0,
+              total: 0,
+              supplier: "pricing TBD",
+            });
+          }
+        }
+      }
+
+      // Totals — no parts markup (parts are at AutoLeap cost price)
+      const laborTotal = laborLines.reduce((sum, l) => sum + l.total, 0);
+      const partsTotal = partLines.reduce((sum, p) => sum + p.total, 0);
+      const suppliesTotal = Math.min(
+        (laborTotal + partsTotal) * (shopConfig.shop.shopSuppliesPercent / 100),
+        shopConfig.shop.shopSuppliesCap
+      );
+      const subtotal = laborTotal + partsTotal + suppliesTotal;
+      const taxTotal = subtotal * shopConfig.shop.taxRate;
+      const grandTotal = subtotal + taxTotal;
+
+      results.pdfPath = await generateEstimatePDF({
+        shop: shopConfig.shop,
+        customer: params.customer,
+        vehicle: {
+          year: vehicle.year,
+          make: vehicle.make,
+          model: vehicle.model,
+          trim: vehicle.trim,
+          engine: vehicle.engine?.displacement,
+          vin: vehicle.vin,
+          mileage: vehicle.mileage,
+        },
+        diagnosis: results.diagnosis?.summary,
+        laborLines,
+        partLines,
+        partsOptions: results.parts?.bestValueBundle?.parts?.[0] ? {
+          aftermarket: results.parts.bestValueBundle.parts[0].selected,
+          oem: results.oemAlternatives?.[0],
+        } : null,
+        totals: {
+          labor: laborTotal,
+          parts: partsTotal,
+          supplies: suppliesTotal,
+          tax: taxTotal,
+          total: grandTotal,
+        },
+        mechanicSpecs: results.mechanicSpecs,
+        outputPath: pdfOutputPath,
+      });
+    }
 
     console.log(`  → PDF: ${results.pdfPath}`);
   } catch (err) {

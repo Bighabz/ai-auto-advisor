@@ -463,6 +463,96 @@ async function buildEstimate({ customerName, phone, vehicleYear, vehicleMake, ve
   }
 }
 
+/**
+ * Download the AutoLeap estimate as a PDF.
+ *
+ * Strategy:
+ *   1. Try REST: GET /estimates/{id}/pdf — returns binary application/pdf
+ *   2. If REST fails/404, use puppeteer: navigate to estimate page + page.pdf()
+ *
+ * @param {string} token - AutoLeap auth token
+ * @param {string} estimateId - AutoLeap estimate _id
+ * @param {string} outputPath - local file path to write PDF to
+ * @returns {string|null} outputPath on success, null on failure
+ */
+async function downloadEstimatePDF(token, estimateId, outputPath) {
+  // ── Attempt 1: REST API ────────────────────────────────────────────────────
+  try {
+    const pdf = await new Promise((resolve) => {
+      const opts = {
+        hostname: API_HOST,
+        path: `/api/v1/estimates/${estimateId}/pdf`,
+        method: "GET",
+        headers: {
+          "Accept": "application/pdf, */*",
+          "authorization": token,
+          "origin": AUTOLEAP_APP_URL,
+          "referer": AUTOLEAP_APP_URL + "/",
+        },
+        timeout: 15000,
+      };
+      const req = https.request(opts, (res) => {
+        const contentType = res.headers["content-type"] || "";
+        if (res.statusCode !== 200 || !contentType.includes("pdf")) {
+          res.resume();
+          resolve(null);
+          return;
+        }
+        const chunks = [];
+        res.on("data", (c) => chunks.push(c));
+        res.on("end", () => resolve(Buffer.concat(chunks)));
+      });
+      req.on("timeout", () => { req.destroy(); resolve(null); });
+      req.on("error", () => resolve(null));
+      req.end();
+    });
+
+    if (pdf && pdf.length > 1000) {
+      fs.writeFileSync(outputPath, pdf);
+      console.log(`${LOG} AutoLeap PDF downloaded via REST (${pdf.length} bytes)`);
+      return outputPath;
+    }
+    console.log(`${LOG} REST PDF endpoint returned no PDF — trying puppeteer fallback`);
+  } catch (err) {
+    console.log(`${LOG} REST PDF attempt failed: ${err.message} — trying puppeteer`);
+  }
+
+  // ── Attempt 2: Puppeteer print-to-PDF ─────────────────────────────────────
+  let puppeteer;
+  try { puppeteer = require("puppeteer-core"); } catch { return null; }
+
+  let browser;
+  try {
+    browser = await puppeteer.connect({ browserURL: CHROME_CDP_URL, defaultViewport: null });
+
+    // Find or open AutoLeap tab
+    let page = (await browser.pages()).find(p => p.url().includes("myautoleap.com"));
+    if (!page) {
+      page = (await browser.pages())[0];
+    }
+
+    const estimateUrl = `${AUTOLEAP_APP_URL}/estimates/${estimateId}`;
+    console.log(`${LOG} Puppeteer: navigating to ${estimateUrl}`);
+    await page.goto(estimateUrl, { waitUntil: "networkidle2", timeout: 30000 });
+    await new Promise(r => setTimeout(r, 4000));
+
+    const pdfBuffer = await page.pdf({
+      format: "A4",
+      printBackground: true,
+      margin: { top: "12mm", bottom: "12mm", left: "10mm", right: "10mm" },
+    });
+
+    fs.writeFileSync(outputPath, pdfBuffer);
+    console.log(`${LOG} AutoLeap PDF captured via puppeteer (${pdfBuffer.length} bytes)`);
+    return outputPath;
+  } catch (err) {
+    console.error(`${LOG} Puppeteer PDF failed: ${err.message}`);
+    return null;
+  } finally {
+    if (browser) browser.disconnect();
+  }
+}
+
 module.exports = {
   buildEstimate,
   getToken,
@@ -471,4 +561,5 @@ module.exports = {
   createEstimate,
   getEstimate,
   buildServices,
+  downloadEstimatePDF,
 };
