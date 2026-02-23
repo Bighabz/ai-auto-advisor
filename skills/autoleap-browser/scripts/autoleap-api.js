@@ -17,8 +17,11 @@ const https = require("https");
 const os = require("os");
 const fs = require("fs");
 const path = require("path");
+const { createLogger } = require("../../shared/logger");
+const { withRetry } = require("../../shared/retry");
 
 const LOG = "[autoleap-api]";
+const log = createLogger("autoleap-api");
 const API_HOST = "api.myautoleap.com";
 const AUTOLEAP_APP_URL = "https://app.myautoleap.com";
 const TOKEN_CACHE = path.join(os.tmpdir(), "autoleap-token.json");
@@ -60,6 +63,31 @@ function apiCall(method, apiPath, body, token) {
   });
 }
 
+// ─── Retry wrapper ───────────────────────────────────────────────────────────
+
+async function apiCallWithRetry(method, apiPath, body, token) {
+  if (process.env.SAM_RETRY_ENABLED !== "true") {
+    return apiCall(method, apiPath, body, token);
+  }
+  return withRetry(
+    () => apiCall(method, apiPath, body, token),
+    { maxRetries: 2, baseDelay: 1000 }
+  );
+}
+
+// ─── Service validation ─────────────────────────────────────────────────────
+
+function validateServices(services) {
+  if (!services || !Array.isArray(services) || services.length === 0) {
+    return { valid: false, reason: "empty services array" };
+  }
+  for (const svc of services) {
+    if (!svc.title) return { valid: false, reason: "service missing title" };
+    if (!svc.items || svc.items.length === 0) return { valid: false, reason: "service has no items" };
+  }
+  return { valid: true };
+}
+
 // ─── Token management ────────────────────────────────────────────────────────
 
 function loadCachedToken() {
@@ -99,7 +127,7 @@ function saveToken(token) {
 async function getToken() {
   const cached = loadCachedToken();
   if (cached) {
-    console.log(`${LOG} Using cached token`);
+    log.info("token acquired", { token_source: "cache" });
     return cached;
   }
 
@@ -183,7 +211,16 @@ async function getToken() {
   if (!token) throw new Error("Failed to capture AutoLeap auth token from Chrome session");
 
   saveToken(token);
-  console.log(`${LOG} Token acquired and cached`);
+  // Log token metadata (never the actual token value)
+  let tokenExpiresInMin = 120; // default assumption
+  try {
+    const parts = token.split(".");
+    if (parts.length === 3) {
+      const payload = JSON.parse(Buffer.from(parts[1], "base64url").toString());
+      if (payload.exp) tokenExpiresInMin = Math.round((payload.exp * 1000 - Date.now()) / 60000);
+    }
+  } catch (_) {}
+  log.info("token acquired", { token_source: "fresh", token_expires_in_min: tokenExpiresInMin });
   return token;
 }
 
@@ -195,7 +232,7 @@ async function getToken() {
  * or null if not found.
  */
 async function searchCustomer(token, query) {
-  const res = await apiCall(
+  const res = await apiCallWithRetry(
     "PUT",
     "/customers/list?limit=10&skip=0&sort=fullName&order=1&activeStatus=true",
     { multiInvoiceDateRange: [], multiRoDateRange: [], language: [], search: query },
@@ -213,7 +250,7 @@ async function createCustomer(token, { firstName, lastName, phone, email }) {
   if (phone) body.phone = phone;
   if (email) body.email = email;
 
-  const res = await apiCall("POST", "/customers", body, token);
+  const res = await apiCallWithRetry("POST", "/customers", body, token);
   if (res.data?.response?._id) return res.data.response;
   throw new Error(`Failed to create customer: ${JSON.stringify(res.data?.error || res.raw)}`);
 }
@@ -230,7 +267,7 @@ async function createEstimate(token, { customerId, vehicleId, services }) {
   if (vehicleId) body.vehicle = { vehicleId };
   if (services?.length) body.services = services;
 
-  const res = await apiCall("POST", "/estimates", body, token);
+  const res = await apiCallWithRetry("POST", "/estimates", body, token);
   if (res.data?.response?._id) return res.data.response;
   throw new Error(`Failed to create estimate: ${JSON.stringify(res.data?.error || res.raw)}`);
 }
@@ -239,7 +276,7 @@ async function createEstimate(token, { customerId, vehicleId, services }) {
  * Get estimate by ID.
  */
 async function getEstimate(token, estimateId) {
-  const res = await apiCall("GET", `/estimates/${estimateId}`, null, token);
+  const res = await apiCallWithRetry("GET", `/estimates/${estimateId}`, null, token);
   return res.data?.response || null;
 }
 
@@ -271,7 +308,7 @@ function buildServices(diagnosis, parts, laborHoursOverride) {
   const aiHours    = repairPlan?.labor?.hours;
   const laborHours = motorHours || aiHours || 1.5;
   const laborSource = motorHours ? `MOTOR(${motorHours}h)` : (aiHours ? `AI(${aiHours}h)` : "default(1.5h)");
-  console.log(`${LOG} Labor source: ${laborSource}`);
+  log.info("labor source resolved", { laborSource, laborHours });
 
   const laborRate  = Number(process.env.AUTOLEAP_LABOR_RATE) || 120;
   const laborTotal = Math.round(laborHours * laborRate * 100) / 100;
@@ -427,14 +464,21 @@ async function buildEstimate({ customerName, phone, vehicleYear, vehicleMake, ve
 
     // 4. Build services from diagnosis + parts
     const services = buildServices(diagnosis, parts, laborHoursOverride);
-    console.log(`${LOG} Built ${services.length} service(s) with ${services[0]?.items?.length || 0} item(s)`);
+    log.info("services built", { count: services.length, items: services[0]?.items?.length || 0 });
 
     // Strip internal metadata before sending to AutoLeap API
     const apiServices = services.map(({ _laborTotal, _partsTotal, _laborHours, _laborRate, ...rest }) => rest);
 
+    // Validate services before sending to API
+    const validation = validateServices(apiServices);
+    if (!validation.valid) {
+      log.warn("services validation failed", { reason: validation.reason });
+      return { success: false, error: `Service validation failed: ${validation.reason}` };
+    }
+
     // 5. Create estimate
     const estimate = await createEstimate(token, { customerId, vehicleId, services: apiServices });
-    console.log(`${LOG} Estimate created: ${estimate.code} (${estimate._id})`);
+    log.info("estimate created", { code: estimate.code, id: estimate._id });
 
     // 6. Compute total from service items (API serviceTotal may be 0 initially)
     const total = services.reduce(
@@ -463,7 +507,7 @@ async function buildEstimate({ customerName, phone, vehicleYear, vehicleMake, ve
       laborRate:  laborRateUsed,
     };
   } catch (err) {
-    console.error(`${LOG} buildEstimate error:`, err.message);
+    log.error("buildEstimate failed", { error: err.message });
     return { success: false, error: err.message };
   }
 }
