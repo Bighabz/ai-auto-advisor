@@ -94,7 +94,7 @@ function saveToken(token) {
 
 /**
  * Acquire JWT from the running Chrome session via puppeteer CDP.
- * Connects to the AutoLeap tab, reloads it, and captures the auth header.
+ * If AutoLeap is on the login page, logs in automatically using env vars.
  */
 async function getToken() {
   const cached = loadCachedToken();
@@ -107,36 +107,72 @@ async function getToken() {
   try {
     puppeteer = require("puppeteer-core");
   } catch (e) {
-    throw new Error("puppeteer-core not available — install it or set AUTOLEAP_TOKEN env var");
+    throw new Error("puppeteer-core not available — install it");
   }
 
   console.log(`${LOG} Acquiring token from Chrome session...`);
-  const browser = await puppeteer.connect({
-    browserURL: CHROME_CDP_URL,
-    defaultViewport: null,
-  });
+  const browser = await puppeteer.connect({ browserURL: CHROME_CDP_URL, defaultViewport: null });
 
-  const pages = await browser.pages();
-  const page = pages.find((p) => p.url().includes("autoleap"));
+  // Find AutoLeap tab, or open a new one
+  let page = (await browser.pages()).find(p => p.url().includes("myautoleap.com"));
   if (!page) {
-    browser.disconnect();
-    throw new Error("No AutoLeap tab found in Chrome — open app.myautoleap.com first");
+    page = (await browser.pages())[0];
+    await page.goto(AUTOLEAP_APP_URL, { waitUntil: "domcontentloaded", timeout: 15000 });
+    await new Promise(r => setTimeout(r, 2000));
   }
 
   const client = await page.createCDPSession();
   await client.send("Network.enable");
 
   let token = null;
-  client.on("Network.requestWillBeSent", (params) => {
+  const onRequest = (params) => {
     if (params.request.url.includes("api.myautoleap.com") && !token) {
-      token =
-        params.request.headers["authorization"] ||
-        params.request.headers["Authorization"] ||
-        null;
+      token = params.request.headers["authorization"] ||
+              params.request.headers["Authorization"] || null;
     }
-  });
+  };
+  client.on("Network.requestWillBeSent", onRequest);
 
-  await page.reload({ waitUntil: "networkidle0", timeout: 30000 });
+  // If on the login page, log in automatically
+  const currentUrl = page.url();
+  const onLoginPage = currentUrl.includes("/login") ||
+                      currentUrl === AUTOLEAP_APP_URL ||
+                      currentUrl === AUTOLEAP_APP_URL + "/";
+
+  if (onLoginPage) {
+    console.log(`${LOG} AutoLeap session expired — logging in automatically...`);
+    const email = process.env.AUTOLEAP_EMAIL;
+    const password = process.env.AUTOLEAP_PASSWORD;
+    if (!email || !password) {
+      client.off("Network.requestWillBeSent", onRequest);
+      await client.detach();
+      browser.disconnect();
+      throw new Error("AUTOLEAP_EMAIL / AUTOLEAP_PASSWORD not set — cannot auto-login");
+    }
+
+    // Navigate to app root (redirects to login form)
+    await page.goto(AUTOLEAP_APP_URL, { waitUntil: "domcontentloaded", timeout: 15000 });
+    await new Promise(r => setTimeout(r, 1500));
+
+    // Fill login form
+    await page.waitForSelector('input[type="email"], input[name="email"], input[placeholder*="mail"]', { timeout: 10000 });
+    await page.fill('input[type="email"], input[name="email"]', email);
+    await page.fill('input[type="password"], input[name="password"]', password);
+    await page.click('button[type="submit"], button:has-text("Log in"), button:has-text("Login"), button:has-text("Sign in")');
+
+    // Wait for redirect away from login page
+    await page.waitForFunction(
+      () => !window.location.href.includes("/login"),
+      { timeout: 20000 }
+    );
+    // Let the app boot and fire its initial API calls
+    await new Promise(r => setTimeout(r, 4000));
+  } else {
+    // Already authenticated — reload to trigger API calls and capture token
+    await page.reload({ waitUntil: "networkidle0", timeout: 30000 });
+  }
+
+  client.off("Network.requestWillBeSent", onRequest);
   await client.detach();
   browser.disconnect();
 
