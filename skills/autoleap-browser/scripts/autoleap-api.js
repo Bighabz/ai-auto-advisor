@@ -154,11 +154,15 @@ async function getToken() {
     await page.goto(AUTOLEAP_APP_URL, { waitUntil: "domcontentloaded", timeout: 15000 });
     await new Promise(r => setTimeout(r, 1500));
 
-    // Fill login form
-    await page.waitForSelector('input[type="email"], input[name="email"], input[placeholder*="mail"]', { timeout: 10000 });
-    await page.fill('input[type="email"], input[name="email"]', email);
-    await page.fill('input[type="password"], input[name="password"]', password);
-    await page.click('button[type="submit"], button:has-text("Log in"), button:has-text("Login"), button:has-text("Sign in")');
+    // Fill login form (AutoLeap uses id="login-email" / id="login-password", type="text")
+    await page.waitForSelector('#login-email, input[type="email"], input[name="email"]', { timeout: 10000 });
+    const emailSel = await page.$('#login-email') ? '#login-email' : 'input[type="email"], input[name="email"]';
+    const passSel  = await page.$('#login-password') ? '#login-password' : 'input[type="password"], input[name="password"]';
+    await page.focus(emailSel);
+    await page.keyboard.type(email, { delay: 60 });
+    await page.focus(passSel);
+    await page.keyboard.type(password, { delay: 60 });
+    await page.keyboard.press('Enter');
 
     // Wait for redirect away from login page
     await page.waitForFunction(
