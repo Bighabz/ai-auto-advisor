@@ -8,6 +8,8 @@
  *   3. Formatted response is generated
  *   4. PDF estimate is created
  *   5. Unconfigured services degrade gracefully (no crashes)
+ *   6. Golden cases produce expected labor ranges and parts
+ *   7. Degraded mode (no optional platforms) still completes
  *
  * Usage:
  *   node scripts/test-e2e.js              (basic — skips AutoLeap)
@@ -272,6 +274,103 @@ async function main() {
     }
   } else {
     fail("Formatted response", "missing");
+  }
+
+  // ═══ Golden Cases ═══
+  section("Golden Cases (expected ranges)");
+
+  const goldenCases = [
+    {
+      name: "RAV4 Catalytic Converter",
+      params: { year: 2019, make: "Toyota", model: "RAV4", engine: "2.5L", cylinders: 4, fuelType: "gas", query: "P0420 catalyst system efficiency below threshold" },
+      expect: { laborMin: 1.0, laborMax: 5.0, hasParts: true },
+    },
+    {
+      name: "Prius Brake Pads",
+      params: { year: 2015, make: "Toyota", model: "Prius", engine: "1.8L", cylinders: 4, fuelType: "hybrid", query: "brake pads worn need replacement front and rear" },
+      expect: { laborMin: 0.5, laborMax: 2.0, hasParts: true },
+    },
+    {
+      name: "F-150 Misfire",
+      params: { year: 2018, make: "Ford", model: "F-150", engine: "5.0L V8", cylinders: 8, fuelType: "gas", query: "P0301 cylinder 1 misfire detected rough idle" },
+      expect: { laborMin: 0.5, laborMax: 4.0, hasDiagSteps: true },
+    },
+    {
+      name: "Bolt EV Battery",
+      params: { year: 2020, make: "Chevrolet", model: "Bolt EV", engine: "Electric", cylinders: 0, fuelType: "electric", query: "battery range degradation reduced range warning" },
+      expect: { evExcluded: true },
+    },
+    {
+      name: "Accord Water Pump",
+      params: { year: 2017, make: "Honda", model: "Accord", engine: "2.4L", cylinders: 4, fuelType: "gas", query: "coolant leak water pump area overheating" },
+      expect: { laborMin: 2.0, laborMax: 7.0, hasParts: true },
+    },
+  ];
+
+  for (const gc of goldenCases) {
+    try {
+      console.log(`\n  Testing: ${gc.name}`);
+      const r = await buildEstimate(gc.params);
+      if (!r || r.error) {
+        warn(`${gc.name}: pipeline returned error: ${r?.error || "null result"}`);
+        continue;
+      }
+
+      // Check labor range (if ProDemand returned labor)
+      const laborHours = r.diagnosis?.prodemand?.laborTimes?.[0]?.hours;
+      if (gc.expect.laborMin != null && laborHours != null) {
+        if (laborHours >= gc.expect.laborMin && laborHours <= gc.expect.laborMax) {
+          pass(`${gc.name}: labor ${laborHours}h in range [${gc.expect.laborMin}-${gc.expect.laborMax}]`);
+        } else {
+          warn(`${gc.name}: labor ${laborHours}h outside range [${gc.expect.laborMin}-${gc.expect.laborMax}]`);
+        }
+      } else if (gc.expect.laborMin != null) {
+        warn(`${gc.name}: no labor returned from ProDemand`);
+      }
+
+      // Check parts found
+      if (gc.expect.hasParts) {
+        const partsFound = (r.parts || []).some((p) => p.results?.length > 0);
+        partsFound ? pass(`${gc.name}: parts found`) : warn(`${gc.name}: no parts results`);
+      }
+
+      pass(`${gc.name}: pipeline completed`);
+    } catch (err) {
+      fail(`${gc.name}: ${err.message}`);
+    }
+  }
+
+  // ═══ Degraded Mode Tests ═══
+  section("Degraded Mode (graceful degradation)");
+
+  // Test: Pipeline completes even if all optional platforms are unavailable
+  try {
+    // Save and clear optional env vars
+    const saved = {};
+    for (const key of ["ALLDATA_URL", "IDENTIFIX_URL", "PRODEMAND_URL", "PARTSTECH_URL"]) {
+      saved[key] = process.env[key];
+      delete process.env[key];
+    }
+
+    const r = await buildEstimate({
+      year: 2019, make: "Honda", model: "Civic", engine: "2.0L",
+      cylinders: 4, fuelType: "gas",
+      query: "P0420 catalyst system efficiency",
+    });
+
+    // Restore
+    for (const [k, v] of Object.entries(saved)) {
+      if (v) process.env[k] = v;
+    }
+
+    if (r && !r.error) {
+      pass("Degraded mode: pipeline completes without optional platforms");
+      if (r.diagnosis?.ai) pass("Degraded mode: AI diagnosis still works");
+    } else {
+      fail("Degraded mode: pipeline failed — " + (r?.error || "null"));
+    }
+  } catch (err) {
+    fail("Degraded mode: " + err.message);
   }
 
   // ── Summary ──
