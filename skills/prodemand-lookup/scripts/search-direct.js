@@ -87,6 +87,7 @@ async function getBrowser() {
   const browser = await puppeteer.connect({
     browserURL: `http://127.0.0.1:${CHROME_DEBUG_PORT}`,
     defaultViewport: { width: 1280, height: 900 },
+    protocolTimeout: 60000,
   });
 
   const pages = await browser.pages();

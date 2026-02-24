@@ -171,13 +171,13 @@ async function getToken() {
   }
 
   console.log(`${LOG} Acquiring token from Chrome session...`);
-  const browser = await puppeteer.connect({ browserURL: CHROME_CDP_URL, defaultViewport: null });
+  const browser = await puppeteer.connect({ browserURL: CHROME_CDP_URL, defaultViewport: null, protocolTimeout: 60000 });
 
   // Find AutoLeap tab, or open a new one
   let page = (await browser.pages()).find(p => p.url().includes("myautoleap.com"));
   if (!page) {
     page = (await browser.pages())[0];
-    await page.goto(AUTOLEAP_APP_URL, { waitUntil: "domcontentloaded", timeout: 15000 });
+    await page.goto(AUTOLEAP_APP_URL, { waitUntil: "domcontentloaded", timeout: 30000 });
     await new Promise(r => setTimeout(r, 2000));
   }
 
@@ -607,7 +607,7 @@ async function downloadEstimatePDF(token, estimateId, outputPath) {
 
   let browser;
   try {
-    browser = await puppeteer.connect({ browserURL: CHROME_CDP_URL, defaultViewport: null });
+    browser = await puppeteer.connect({ browserURL: CHROME_CDP_URL, defaultViewport: null, protocolTimeout: 60000 });
 
     // Find or open AutoLeap tab
     let page = (await browser.pages()).find(p => p.url().includes("myautoleap.com"));
@@ -662,7 +662,7 @@ async function addPartsThroughAutoLeap(estimateId, parts) {
   let browser;
 
   try {
-    browser = await puppeteer.connect({ browserURL: CHROME_CDP_URL, defaultViewport: null });
+    browser = await puppeteer.connect({ browserURL: CHROME_CDP_URL, defaultViewport: null, protocolTimeout: 60000 });
 
     // Find or open AutoLeap tab
     let page = (await browser.pages()).find(p => p.url().includes("myautoleap.com"));
