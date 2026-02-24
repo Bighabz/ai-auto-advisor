@@ -181,11 +181,13 @@ async function processMessage(chatId, userMessage) {
   let system = SAM_SYSTEM;
   const lastEstimate = sessions.get(chatId);
   if (lastEstimate) {
-    const d = lastEstimate.diagnosis || {};
+    const v = lastEstimate.vehicle || {};
+    const topCause = lastEstimate.diagnosis?.ai?.diagnoses?.[0]?.cause;
     system += `\n\nCONTEXT — Most recent estimate in this chat:
-- Vehicle: ${d.year || "?"} ${d.make || "?"} ${d.model || "?"}
-- Problem: ${d.query || "?"}
-- Diagnosis: ${d.topDiagnosis || d.diagnoses?.[0]?.name || "?"}
+- Vehicle: ${v.year || "?"} ${v.make || "?"} ${v.model || "?"}
+- Problem: ${lastEstimate._runCtx?.symptom || "?"}
+- Diagnosis: ${topCause || "?"}
+- Pricing: ${lastEstimate.pricing_source || "unknown"} (gate: ${lastEstimate.pricing_gate || "?"})
 User can say "order parts" or "customer approved" to take action on it.`;
   }
 
@@ -289,7 +291,7 @@ async function handleToolCall(chatId, toolCall) {
         content: [{
           type: "tool_result",
           tool_use_id: toolCall.id,
-          content: `Estimate built successfully for ${input.year || ""} ${input.make} ${input.model}. Diagnosis: ${results.diagnosis?.topDiagnosis || results.diagnosis?.diagnoses?.[0]?.name || "completed"}. Results sent to user.`,
+          content: `Estimate built successfully for ${input.year || ""} ${input.make} ${input.model}. Diagnosis: ${results.diagnosis?.ai?.diagnoses?.[0]?.cause || "completed"}. Pricing: ${results.pricing_source || "unknown"} (gate: ${results.pricing_gate || "?"}). Results sent to user.`,
         }],
       });
 

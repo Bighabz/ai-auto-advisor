@@ -78,20 +78,16 @@ const autoLeapBrowser = null;
 
 // --- Shared infrastructure (feature-flagged) ---
 const { createLogger, generateRunId } = require("../../shared/logger");
-const { withRetry, circuitBreaker, FailureClass } = require("../../shared/retry");
-const { validateLaborResult, validatePartQuote, normalizePrice, mergeResults, PRICING_GATE, PRICING_SOURCE } = require("../../shared/contracts");
+const { withRetry, circuitBreaker } = require("../../shared/retry");
+const { validateLaborResult, validatePartQuote, normalizePrice, PRICING_GATE, PRICING_SOURCE } = require("../../shared/contracts");
 const { SessionManager } = require("../../shared/session-manager");
-const { TabManager } = require("../../shared/tab-manager");
-const { checkHealth, cleanupArtifacts, validateEnv } = require("../../shared/health");
 
 // Feature flags
-const FEAT_STRUCTURED_LOGGING = process.env.SAM_STRUCTURED_LOGGING === "true";
 const FEAT_SESSION_PREFLIGHT = process.env.SAM_SESSION_PREFLIGHT === "true";
 const FEAT_RETRY_ENABLED = process.env.SAM_RETRY_ENABLED === "true";
 
 // Shared instances
 const sessionManager = new SessionManager({ logger: createLogger("session-manager") });
-const tabManager = new TabManager();
 
 // Circuit breakers per platform
 const breakers = {
@@ -644,31 +640,8 @@ ${diagnosis?.summary || "See research results"}
  * @returns {object} { success, orderId, total, partsOrdered, error }
  */
 async function handleApprovalAndOrder(lastEstimateResults) {
-  if (!autoLeapBrowser) {
-    return { success: false, error: "AutoLeap browser not configured" };
-  }
-
-  if (!lastEstimateResults?.estimate?.estimateId) {
-    return { success: false, error: "No estimate ID from previous estimate" };
-  }
-
-  const orderResult = autoLeapBrowser.order.placePartsOrder(
-    lastEstimateResults.estimate.estimateId
-  );
-
-  // Track order event
-  if (orderResult.success) {
-    const vehicle = lastEstimateResults.vehicle;
-    const orderShopId = lastEstimateResults.shopId || process.env.SHOP_ID || null;
-    trackEvent(orderShopId, "order_placed", {
-      vehicle: { year: vehicle.year, make: vehicle.make, model: vehicle.model },
-      partsOrdered: orderResult.partsOrdered || 0,
-      total: orderResult.total,
-      source: "autoleap_browser",
-    }).catch(() => {});
-  }
-
-  return orderResult;
+  // Route through handleOrderRequest which supports both PartsTech browser and API paths
+  return handleOrderRequest(lastEstimateResults);
 }
 
 /**
@@ -1480,9 +1453,10 @@ async function buildEstimate(params) {
 
   if (autoLeapApi && results.estimate?.estimateId) {
     try {
+      const safeName = `${vehicle.year}-${vehicle.make}-${vehicle.model}`.replace(/[^a-zA-Z0-9 \-]/g, "").replace(/\s+/g, "-");
       const pdfOutputPath = require("path").join(
         require("os").tmpdir(),
-        `estimate-${vehicle.year}-${vehicle.make}-${vehicle.model}-${Date.now()}.pdf`
+        `estimate-${safeName}-${Date.now()}.pdf`
       );
       const token = await autoLeapApi.getToken();
       const pdfPath = await autoLeapApi.downloadEstimatePDF(token, results.estimate.estimateId, pdfOutputPath);
