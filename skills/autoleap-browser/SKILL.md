@@ -1,119 +1,104 @@
 ---
 name: autoleap-browser
 description: >
-  100% browser-driven AutoLeap estimate creation. Uses puppeteer-core to
-  replicate the 14-step manual workflow: customer/vehicle creation, PartsTech
-  parts (new tab SSO), MOTOR labor (category tree with Claude AI),
-  part-to-labor linking (triggers markup matrix), save, and PDF export.
+  AutoLeap REST API integration for estimate creation with code-calculated
+  retail pricing (cost × markup%). Token acquired via puppeteer CDP from
+  live Chrome session. Also includes browser scripts for sending estimates
+  and placing parts orders.
 requires:
   bins:
     - node
   env:
     - AUTOLEAP_EMAIL
     - AUTOLEAP_PASSWORD
-    - ANTHROPIC_API_KEY
   config:
     autoleap_url: https://app.myautoleap.com
     chrome_cdp_port: 18800
 ---
 
-# AutoLeap Browser Automation
+# AutoLeap Integration
 
-100% browser-driven estimate pipeline through AutoLeap's web UI.
-No REST API for estimate creation. AutoLeap handles all pricing
-through its native markup matrix.
+REST API for estimate creation + browser automation for post-estimate flows.
 
 ## Architecture
 
 ```
-playbook.js (master sequencer)
-├── helpers/selectors.js   — CSS selectors (one place)
-├── helpers/pt-tab.js      — PartsTech new-tab SSO flow
-└── helpers/motor-nav.js   — MOTOR 7-level tree + Claude AI
+autoleap-api.js (REST client — estimate creation, token, customer, PDF)
+├── Token: puppeteer CDP captures JWT from live Chrome session
+├── Pricing: code-calculated retail = cost × (1 + markup%)
+└── Markup: AUTOLEAP_PARTS_MARKUP_PERCENT env var (default 40%)
+
+login.js        → OpenClaw auth (used by send.js, order.js)
+send.js         → Send estimate to customer (browser)
+order.js        → Place parts order after approval (browser)
+partstech-search.js → Standalone PartsTech pricing lookup
 ```
 
-## Why Browser-Only
+## How Pricing Works
 
-- REST API injects parts at wholesale cost, bypassing markup matrix
-- MOTOR labor times only accessible through AutoLeap's browse UI
-- Part-to-labor linking (Step 12) triggers the shop's markup matrix
-- Only the manual workflow produces correct retail pricing
+PartsTech returns wholesale/cost prices. The `resolveRetailPartPrice()` function
+applies the shop's markup percentage in code:
+
+1. Check for explicit retail/customer price fields (none exist in PartsTech data)
+2. Check for shopPrice > cost (not present)
+3. Fall back to: `retail = cost × (1 + markupPercent / 100)`
+
+This produces correct retail pricing without needing AutoLeap's native markup matrix.
 
 ## Scripts
 
 | Script | Purpose |
 |--------|---------|
-| `playbook.js` | Master 14-step sequencer (entry point) |
-| `helpers/selectors.js` | All CSS selectors in one place |
-| `helpers/pt-tab.js` | PartsTech new-tab flow (SSO, search, cart, submit) |
-| `helpers/motor-nav.js` | MOTOR category tree navigation with Claude AI |
-| `autoleap-api.js` | Token management, customer search, PDF download |
-| `partstech-search.js` | Standalone pricing lookup (orchestrator Step 5) |
+| `autoleap-api.js` | REST client: token, customer, estimate, PDF |
+| `partstech-search.js` | Standalone PartsTech pricing lookup (orchestrator Step 5) |
 | `login.js` | Auth via OpenClaw (used by send.js, order.js) |
-| `send.js` | Send estimate to customer |
-| `order.js` | Place parts order after approval |
+| `send.js` | Send estimate to customer (browser) |
+| `order.js` | Place parts order after approval (browser) |
 
-## The 14-Step Playbook (6 Phases)
+## Key Functions (autoleap-api.js)
 
-```
-Phase 1: Authentication
-  1. ensureLoggedIn()              → puppeteer login if needed
-
-Phase 2: Customer & Vehicle
-  2. Click "New" button            → open customer/vehicle drawer
-  3. Fill customer info            → firstName, lastName, phone
-  4. Enter vehicle                 → VIN decode or YMME dropdowns
-  5. "Save & Create Estimate"      → RO# generated, estimate page loaded
-
-Phase 3: Parts via PartsTech
-  6. Click "Parts ordering" tab    → PartsTech card visible
-  7. Click "+" on PartsTech card   → new browser tab (SSO)
-  8. Search + select cheapest      → in-stock, lowest price
-  9. Submit cart to AutoLeap       → parts sync at wholesale cost
-
-Phase 4: Labor via MOTOR
-  10. Open labor catalog           → Services tab → Browse
-  11. Navigate MOTOR tree          → Claude AI picks categories (3-5 calls)
-      GOLDEN RULE: NEVER modify Qty/Hrs after MOTOR populates
-
-Phase 5: Link Parts to Labor (THE PROFIT STEP)
-  12. Link each part to service    → triggers AutoLeap markup matrix
-      wholesale $649 → retail $950+
-
-Phase 6: Save + PDF
-  13. Save estimate                → button click + wait
-  14. Export PDF                   → page.pdf() → /tmp/estimate-*.pdf
-```
+| Function | Purpose |
+|----------|---------|
+| `getToken()` | Puppeteer CDP token capture, cached to /tmp |
+| `searchCustomer(query)` | PUT /customers/list |
+| `createCustomer(data)` | POST /customers |
+| `buildEstimate(args)` | Full estimate: customer + vehicle + services + parts (retail) |
+| `buildServices(diagnosis, parts, opts)` | Build AutoLeap service objects with markup |
+| `getEstimate(id)` | GET /estimates/{id} |
+| `downloadEstimatePDF(id, path)` | GET /estimates/{id}/pdf |
+| `resolveRetailPartPrice(sel, markup%)` | Cost → retail pricing |
 
 ## Integration
 
-Called from the orchestrator (Step 6):
+Called from orchestrator Step 6:
 
 ```javascript
-const { runPlaybook } = require("../../autoleap-browser/scripts/playbook");
-const result = await runPlaybook({
-  customer: { name: "John Doe", phone: "555-1234" },
-  vehicle: { year: 2002, make: "Toyota", model: "RAV4", vin: "..." },
+const autoLeapApi = require("../../autoleap-browser/scripts/autoleap-api");
+const result = await autoLeapApi.buildEstimate({
+  customerName: "John Doe",
+  phone: "555-1234",
+  vehicleYear: 2002, vehicleMake: "Toyota", vehicleModel: "RAV4",
+  vin: "...",
   diagnosis: results.diagnosis,
-  parts: results.parts?.bestValueBundle?.parts || [],
-  progressCallback: (phase) => sendTelegramUpdate(phase),
+  parts: estParts,
+  laborHoursOverride: { hours: 1.7, source: "MOTOR" },
 });
-// result: { success, roNumber, estimateId, total, totalLabor, totalParts,
-//           laborHours, pdfPath, pricingSource, partsAdded, laborResult }
+// result: { success, estimateId, estimateCode, total, totalLabor, totalParts,
+//           laborHours, laborRate, customerName, vehicleDesc }
 ```
 
-## Error Handling
+## Environment Variables
 
-Every phase has try/catch. Partial failures produce warnings, not hard stops:
-- PartsTech tab doesn't open → parts skipped, warning added
-- MOTOR nav fails → labor skipped, warning added
-- Part-to-labor link fails → estimate valid but no markup
-- PDF fails → result returned without pdfPath
+| Variable | Default | Purpose |
+|----------|---------|---------|
+| `AUTOLEAP_EMAIL` | required | Login email |
+| `AUTOLEAP_PASSWORD` | required | Login password |
+| `AUTOLEAP_LABOR_RATE` | 120 | $/hour for labor |
+| `AUTOLEAP_PARTS_MARKUP_PERCENT` | 40 | Cost → retail markup % |
 
 ## Notes
 
-- Uses puppeteer-core connecting to Chrome CDP on port 18800
-- Claude AI (haiku) for MOTOR category selection (~100 tokens per call)
-- Expected total time: 2-4 minutes per estimate
+- Token cached to `/tmp/autoleap-token.json`, expires after ~24h
 - All functions return `{ success, error }` objects for graceful degradation
-- Log prefix: `[playbook]`, `[playbook:pt-tab]`, `[playbook:motor]`
+- Log prefix: `[autoleap-api]`
+- Playbook files (playbook.js, helpers/) exist but are unused — kept for future reference
