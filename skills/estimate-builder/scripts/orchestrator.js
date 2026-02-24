@@ -774,6 +774,19 @@ async function buildEstimate(params) {
   console.log(`  ESTIMATE BUILDER — Starting Full Pipeline [${runId}]`);
   console.log("═══════════════════════════════════════════════════════════════");
 
+  // ─── Pre-warm: acquire AutoLeap token while Chrome is fresh ───
+  // ProDemand research (Step 3) hammers Chrome for 30-60s.
+  // If we wait until Step 5/6 to get the token, Chrome is overwhelmed and CDP times out.
+  if (autoLeapApi && params.customer) {
+    try {
+      const token = await autoLeapApi.getToken();
+      if (token) console.log(`  → AutoLeap token pre-cached ✓`);
+      else console.log(`  → AutoLeap token pre-warm: no token (will retry later)`);
+    } catch (e) {
+      console.log(`  → AutoLeap token pre-warm failed: ${e.message} (will retry later)`);
+    }
+  }
+
   // ─── Step 1: Vehicle Identification (Exact) ───
   log.info("Step 1: Decoding vehicle (exact specs for parts accuracy)");
   let vehicle;
