@@ -615,16 +615,28 @@ async function downloadEstimatePDF(token, estimateId, outputPath) {
       page = await browser.newPage();
     }
 
-    const estimateUrl = `${AUTOLEAP_APP_URL}/estimates/${estimateId}`;
+    const estimateUrl = `${AUTOLEAP_APP_URL}/#/estimates/${estimateId}`;
     console.log(`${LOG} Puppeteer: navigating to ${estimateUrl}`);
     await page.goto(estimateUrl, { waitUntil: "networkidle2", timeout: 30000 });
-    await new Promise(r => setTimeout(r, 4000));
+    await new Promise(r => setTimeout(r, 5000)); // extra settle time for Angular SPA
+
+    // Sanity check: page should have estimate content, not a 404 or login page
+    const pageText = await page.evaluate(() => document.body?.innerText?.slice(0, 500) || "");
+    if (pageText.includes("404") || pageText.includes("Not Found") || pageText.length < 50) {
+      console.log(`${LOG} Puppeteer PDF: page did not load estimate (${pageText.slice(0, 80)})`);
+      return null;
+    }
 
     const pdfBuffer = await page.pdf({
       format: "A4",
       printBackground: true,
       margin: { top: "12mm", bottom: "12mm", left: "10mm", right: "10mm" },
     });
+
+    if (pdfBuffer.length < 20000) {
+      console.log(`${LOG} Puppeteer PDF too small (${pdfBuffer.length} bytes) — likely not a real estimate`);
+      return null;
+    }
 
     fs.writeFileSync(outputPath, pdfBuffer);
     console.log(`${LOG} AutoLeap PDF captured via puppeteer (${pdfBuffer.length} bytes)`);
