@@ -503,37 +503,30 @@ ${diagnosis?.summary || "See research results"}
     }
   }
 
-  // Parts with best value highlighted
+  // Parts identified (pricing comes from AutoLeap, not displayed here)
   if (parts?.bestValueBundle?.parts?.length > 0) {
     response += `
-🛒 PARTS — BEST VALUE (Ready to Order)
+🛒 PARTS (added to AutoLeap via PartsTech)
 `;
     for (const item of parts.bestValueBundle.parts) {
       if (item.selected) {
         const p = item.selected;
         response += `   ✓ ${p.brand} ${p.description}${p.position ? ` (${p.position})` : ""}
-     Part #: ${p.partNumber} | $${p.totalCost.toFixed(2)} | ${p.availability}
-     Supplier: ${p.supplier}
+     Part #: ${p.partNumber} | ${p.availability} | ${p.supplier}
 `;
       } else {
         response += `   ✗ ${item.requested.partType} — NOT FOUND
 `;
       }
     }
-    response += `
-   PARTS TOTAL: $${parts.bestValueBundle.totalCost.toFixed(2)}
-   ${parts.bestValueBundle.allInStock ? "✓ All in stock" : "⚠️ Some parts need to be ordered"}
+    response += `   ${parts.bestValueBundle.allInStock ? "✓ All in stock" : "⚠️ Some parts need to be ordered"}
 `;
-
-    // OEM alternatives
-    if (parts.oemAlternatives?.length > 0) {
-      response += `
-   OEM ALTERNATIVES:
+    if (estimate?.totalParts > 0) {
+      response += `   PARTS TOTAL (AutoLeap retail): $${estimate.totalParts.toFixed(2)}
 `;
-      for (const alt of parts.oemAlternatives.slice(0, 3)) {
-        response += `   • ${alt.brand} ${alt.partNumber}: $${alt.totalCost.toFixed(2)}
+    } else {
+      response += `   See AutoLeap estimate for retail pricing
 `;
-      }
     }
   }
 

@@ -117,17 +117,8 @@ function formatForWhatsApp(results) {
     if (estimate.estimateId) {
       msg1 += `AutoLeap: #${estimate.estimateCode || estimate.estimateId}\n`;
     }
-  } else if (parts?.bestValueBundle?.totalCost) {
-    // No AutoLeap estimate — rough estimate using env var rate
-    const rp = diagnosis?.ai?.repair_plan;
-    const laborHours = rp?.labor?.hours || 1.0;
-    const laborRate = Number(process.env.AUTOLEAP_LABOR_RATE) || 120;
-    const laborTotal = laborHours * laborRate;
-    const partsTotal = parts.bestValueBundle.totalCost;
-    const rough = laborTotal + partsTotal;
-    msg1 += `*ESTIMATED COST: ~$${rough.toFixed(0)}+*\n`;
-    msg1 += `Labor: ~${laborHours}h ($${laborTotal.toFixed(0)}) | Parts: $${partsTotal.toFixed(2)}\n`;
-    msg1 += `_(+ tax & shop supplies)_\n`;
+  } else {
+    msg1 += `_Pricing in AutoLeap estimate_\n`;
   }
 
   if (pdfPath && !blocked) {
@@ -214,9 +205,7 @@ function formatForWhatsApp(results) {
     } else if (estimate?.totalParts > 0) {
       msg2 += `*Parts Total (retail): $${estimate.totalParts.toFixed(2)}*\n`;
     } else {
-      msg2 += `Total: $${parts.bestValueBundle.totalCost.toFixed(2)}`;
-      msg2 += parts.bestValueBundle.allInStock ? ` \u2713 All in stock` : ` \u26A0 Some backordered`;
-      msg2 += `\n`;
+      msg2 += `_See AutoLeap estimate for parts pricing_\n`;
     }
   }
 
