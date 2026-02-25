@@ -801,15 +801,35 @@ async function findFirstElement(page, selectorStr) {
 }
 
 async function fillField(page, selectorStr, value) {
-  const el = await findFirstElement(page, selectorStr);
-  if (!el) {
-    console.log(`${LOG} Field not found: ${selectorStr.substring(0, 40)}`);
-    return false;
+  // Use page.evaluate to set value directly — avoids "not clickable" errors
+  for (const sel of selectorStr.split(", ")) {
+    try {
+      const filled = await page.evaluate((selector, val) => {
+        const el = document.querySelector(selector);
+        if (!el) return false;
+        // Focus the element
+        el.focus();
+        // Clear and set value
+        el.value = "";
+        // Use native input setter to trigger Angular's change detection
+        const nativeInputValueSetter = Object.getOwnPropertyDescriptor(
+          window.HTMLInputElement.prototype, "value"
+        ).set;
+        nativeInputValueSetter.call(el, val);
+        // Dispatch events Angular listens to
+        el.dispatchEvent(new Event("input", { bubbles: true }));
+        el.dispatchEvent(new Event("change", { bubbles: true }));
+        el.dispatchEvent(new Event("blur", { bubbles: true }));
+        return true;
+      }, sel, value);
+      if (filled) {
+        console.log(`${LOG}   Filled: ${sel.substring(0, 30)} = "${value}"`);
+        return true;
+      }
+    } catch { /* try next selector */ }
   }
-  await el.click({ clickCount: 3 });
-  await sleep(100);
-  await el.type(value, { delay: 40 });
-  return true;
+  console.log(`${LOG} Field not found: ${selectorStr.substring(0, 40)}`);
+  return false;
 }
 
 async function selectDropdown(page, selectorStr, value) {
