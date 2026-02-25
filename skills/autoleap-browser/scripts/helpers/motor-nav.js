@@ -491,6 +491,20 @@ async function navigateMotorTree(page, diagnosis, vehicle) {
 
     lastPickedName = pick;
     await sleep(2000);
+
+    // Debug: screenshot and DOM dump after each click
+    await page.screenshot({ path: `/tmp/debug-motor-level${currentLevel}-after.png` });
+    const postClickState = await page.evaluate(() => {
+      // Dump ALL visible items in any tree-like structure
+      const allEls = Array.from(document.querySelectorAll(
+        "div[role='button'], li[role='treeitem'], [class*='category-item'], [class*='tree-node'], " +
+        "[class*='tree'] li, [class*='catalog'] li, [class*='category'] li, [class*='service-list'] li, " +
+        "[class*='subcategory'], [class*='child-item'], [class*='nested'], [class*='expand']"
+      )).filter(el => el.offsetParent !== null);
+      const texts = allEls.map(el => el.textContent.trim().substring(0, 50)).filter(t => t.length > 1 && t.length < 60);
+      return { count: allEls.length, unique: [...new Set(texts)].slice(0, 20) };
+    });
+    console.log(`${LOG} Post-click DOM (${postClickState.count} items): ${postClickState.unique.slice(0, 10).join(" | ")}`);
   }
 
   // ── Handle qualifiers (if present) ──
