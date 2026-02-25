@@ -100,50 +100,116 @@ async function openPartsTechTab(page, browser) {
     });
   });
 
-  // Click the PartsTech "+" button — it's inside a card with "partstech" class and "Connected" text
-  const ptBtnClicked = await page.evaluate(() => {
-    // Find PartsTech card containers
-    const ptCards = Array.from(document.querySelectorAll('[class*="partstech" i]'))
+  // Debug: dump the exact PartsTech card structure to find the "+" button element
+  const ptCardDebug = await page.evaluate(() => {
+    // Find the PartsTech card specifically (not Manual Ordering)
+    const cards = Array.from(document.querySelectorAll('.ro-partstech-new, .ro-partstech-inner'))
+      .filter(el => el.offsetParent !== null && el.textContent.includes("PartsTech") && !el.textContent.includes("manual"));
+    if (cards.length === 0) return { found: false };
+
+    // Get the outermost card
+    const card = cards[cards.length - 1];
+    // Dump ALL children to find the "+" element
+    const children = Array.from(card.querySelectorAll("*"))
+      .filter(el => el.offsetParent !== null)
+      .map(el => ({
+        tag: el.tagName,
+        class: (el.className || "").substring(0, 60),
+        text: el.textContent.trim().substring(0, 20),
+        hasClick: typeof el.onclick === "function",
+        role: el.getAttribute("role") || "",
+        cursor: window.getComputedStyle(el).cursor,
+      }))
+      .slice(0, 30);
+    return { found: true, children };
+  });
+  console.log(`${LOG} PT card children: ${JSON.stringify(ptCardDebug)}`);
+
+  // Click the PartsTech "+" button using puppeteer native click for proper event dispatch
+  // The "+" button is inside a .ro-partstech-new card with "PartsTech" text
+  let ptBtnClicked = { clicked: false };
+
+  // Strategy 1: Find PartsTech card, then click the teal "+" element inside it
+  const ptBtnSelector = await page.evaluate(() => {
+    // Find all ro-partstech-new cards
+    const cards = Array.from(document.querySelectorAll('.ro-partstech-new'))
       .filter(el => el.offsetParent !== null);
 
-    for (const card of ptCards) {
+    for (const card of cards) {
       const text = card.textContent || "";
-      // Find the card that has "PartsTech" text and "Connected"
-      if (text.includes("PartsTech") && text.includes("Connected")) {
-        // Find the + button inside this card
-        const btns = card.querySelectorAll("button, a, [role='button']");
-        for (const btn of btns) {
-          const btnText = btn.textContent.trim();
-          if (btnText === "+" || btnText === "Add" || btn.querySelector("i.fa-plus, i.fas.fa-plus")) {
-            btn.click();
-            return { clicked: true, btnText };
-          }
+      if (!text.includes("PartsTech")) continue;
+      if (text.includes("manual") || text.includes("Manual")) continue;
+
+      // Look for ANY element that could be the "+" button
+      const allEls = Array.from(card.querySelectorAll("*")).filter(el => el.offsetParent !== null);
+
+      // Priority 1: element with "+" text
+      for (const el of allEls) {
+        const ownText = el.childNodes.length <= 1 ? el.textContent.trim() : "";
+        if (ownText === "+" || ownText === "+") {
+          el.setAttribute("data-pt-plus", "true");
+          return { found: true, tag: el.tagName, text: ownText, strategy: "plus-text" };
         }
-        // If no text "+" button, just click the last button in the card
-        if (btns.length > 0) {
-          btns[btns.length - 1].click();
-          return { clicked: true, btnText: "last-btn" };
+      }
+
+      // Priority 2: element with fa-plus icon
+      for (const el of allEls) {
+        if (el.classList.contains("fa-plus") || el.querySelector(".fa-plus, .pi-plus")) {
+          const clickTarget = el.closest("button, a, div[class*='btn'], div[class*='add']") || el;
+          clickTarget.setAttribute("data-pt-plus", "true");
+          return { found: true, tag: clickTarget.tagName, text: "+icon", strategy: "fa-plus" };
         }
-        // Try clicking the card itself
-        card.click();
-        return { clicked: true, btnText: "card-click" };
+      }
+
+      // Priority 3: element with cursor:pointer that's small (likely a button)
+      for (const el of allEls) {
+        const style = window.getComputedStyle(el);
+        const rect = el.getBoundingClientRect();
+        if (style.cursor === "pointer" && rect.width < 60 && rect.height < 60 && rect.width > 10) {
+          el.setAttribute("data-pt-plus", "true");
+          return { found: true, tag: el.tagName, text: el.textContent.trim().substring(0, 10), strategy: "cursor-pointer" };
+        }
+      }
+
+      // Priority 4: last interactive-looking element in the card
+      const interactives = allEls.filter(el => {
+        const tag = el.tagName;
+        return tag === "BUTTON" || tag === "A" || el.getAttribute("role") === "button" ||
+          el.classList.contains("pointer") || el.style.cursor === "pointer";
+      });
+      if (interactives.length > 0) {
+        const target = interactives[interactives.length - 1];
+        target.setAttribute("data-pt-plus", "true");
+        return { found: true, tag: target.tagName, text: target.textContent.trim().substring(0, 10), strategy: "last-interactive" };
       }
     }
-
-    // Broader fallback: find any button with "+" next to PartsTech image
-    const allBtns = Array.from(document.querySelectorAll("button"))
-      .filter(b => b.offsetParent !== null && b.textContent.trim() === "+");
-    // Filter to ones near partstech text
-    for (const btn of allBtns) {
-      const parent = btn.closest('[class*="partstech" i], [class*="ro-partstech" i]');
-      if (parent) {
-        btn.click();
-        return { clicked: true, btnText: "+:near-partstech" };
-      }
-    }
-
-    return { clicked: false };
+    return { found: false };
   });
+
+  console.log(`${LOG} PT button located: ${JSON.stringify(ptBtnSelector)}`);
+
+  if (ptBtnSelector.found) {
+    // Use puppeteer native click instead of JS click for proper event dispatch
+    try {
+      const markedEl = await page.$('[data-pt-plus="true"]');
+      if (markedEl) {
+        await markedEl.click();
+        ptBtnClicked = { clicked: true, btnText: ptBtnSelector.text, strategy: ptBtnSelector.strategy };
+      }
+    } catch (clickErr) {
+      console.log(`${LOG} Puppeteer click failed: ${clickErr.message} — trying JS click`);
+      await page.evaluate(() => {
+        const el = document.querySelector('[data-pt-plus="true"]');
+        if (el) el.click();
+      });
+      ptBtnClicked = { clicked: true, btnText: ptBtnSelector.text, strategy: ptBtnSelector.strategy + "-js" };
+    }
+    // Clean up marker
+    await page.evaluate(() => {
+      const el = document.querySelector('[data-pt-plus="true"]');
+      if (el) el.removeAttribute("data-pt-plus");
+    });
+  }
 
   console.log(`${LOG} PartsTech button click: ${JSON.stringify(ptBtnClicked)}`);
 

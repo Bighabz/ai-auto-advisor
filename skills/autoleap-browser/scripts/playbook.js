@@ -102,17 +102,14 @@ async function runPlaybook({ customer, vehicle, diagnosis, parts, progressCallba
     // ═══════════════════════════════════════════════════════════════════════════
     // PHASE 2b: Add vehicle to estimate (if not linked via API)
     // ═══════════════════════════════════════════════════════════════════════════
-    // Check if "Select vehicle" text is visible — means no vehicle linked
+    // Check if "Select vehicle" is visible — means no vehicle linked
     const needsVehicle = await page.evaluate(() => {
-      // Look for elements whose own direct text (not children) includes "Select vehicle"
-      const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT, null, false);
-      let node;
-      while (node = walker.nextNode()) {
-        if (node.textContent.includes("Select vehicle") && node.parentElement?.offsetParent !== null) {
-          return true;
-        }
-      }
-      return false;
+      // Check page's visible text for "Select vehicle"
+      const pageText = document.body?.innerText || "";
+      if (pageText.includes("Select vehicle")) return true;
+      // Also check placeholder attributes (may be inside an input)
+      const inputs = Array.from(document.querySelectorAll("input, [placeholder]"));
+      return inputs.some(i => (i.placeholder || "").includes("Select vehicle"));
     });
 
     if (needsVehicle && (vehicle.year || vehicle.make || vehicle.vin)) {
