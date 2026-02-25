@@ -170,92 +170,138 @@ async function navigateMotorTree(page, diagnosis, vehicle) {
     console.log(`${LOG} MOTOR Primary tab element not found`);
   }
 
-  // ── Step 3c: Try "Connect to MOTOR" button (scroll into view first) ──
+  // ── Step 3c: Click "Connect to MOTOR" → opens vehicle/engine selection sidebar ──
+  // From screenshots: clicking "Connect to MOTOR" opens the customer sidebar with
+  // a "Search vehicle" dropdown showing engine options:
+  //   - "2002 Toyota RAV4 Base - Engine: U/K L (S) BATTERY EV (EV/BEV)" (wrong)
+  //   - "2002 Toyota RAV4 Base - Engine: 2.0L L4 (1AZ-FE) GAS FI" (correct)
+  // We need to select the GAS engine, click Save, then re-open Browse for MOTOR tree.
   if (!motorTabFound) {
     console.log(`${LOG} Trying "Connect to MOTOR" button...`);
 
-    // Scroll the button into view before clicking
-    const connectClicked = await page.evaluate(() => {
+    // Scroll into view first (button is often off-screen at x>1200)
+    await page.evaluate(() => {
       const btns = Array.from(document.querySelectorAll("button"));
       for (const btn of btns) {
         if (btn.textContent.trim() === "Connect to MOTOR" && btn.offsetParent !== null) {
-          // Scroll into view
           btn.scrollIntoView({ block: "center", inline: "center" });
-          return { found: true, scrolled: true };
+          return true;
         }
       }
-      return { found: false };
+      return false;
+    });
+    await sleep(500);
+
+    // Get fresh coordinates and click
+    const connectRect = await page.evaluate(() => {
+      const btns = Array.from(document.querySelectorAll("button"));
+      for (const btn of btns) {
+        if (btn.textContent.trim() === "Connect to MOTOR") {
+          const rect = btn.getBoundingClientRect();
+          return { x: rect.x + rect.width / 2, y: rect.y + rect.height / 2, inView: rect.x >= 0 && rect.x < 1280 };
+        }
+      }
+      return null;
     });
 
-    if (connectClicked.found) {
-      await sleep(500);
-      // Now get fresh coordinates after scroll
-      const connectRect = await page.evaluate(() => {
-        const btns = Array.from(document.querySelectorAll("button"));
-        for (const btn of btns) {
-          if (btn.textContent.trim() === "Connect to MOTOR") {
-            const rect = btn.getBoundingClientRect();
-            return { x: rect.x + rect.width / 2, y: rect.y + rect.height / 2, inView: rect.x >= 0 && rect.x < 1280 };
-          }
-        }
-        return null;
-      });
+    if (connectRect && connectRect.inView) {
+      console.log(`${LOG} "Connect to MOTOR" at (${Math.round(connectRect.x)}, ${Math.round(connectRect.y)}) — clicking...`);
+      await page.mouse.click(connectRect.x, connectRect.y);
+      await sleep(4000);
 
-      if (connectRect && connectRect.inView) {
-        console.log(`${LOG} "Connect to MOTOR" at (${Math.round(connectRect.x)}, ${Math.round(connectRect.y)}) — clicking...`);
-        await page.mouse.click(connectRect.x, connectRect.y);
-        await sleep(5000);
-        await page.screenshot({ path: "/tmp/debug-motor-after-connect.png" });
+      await page.screenshot({ path: "/tmp/debug-motor-after-connect.png" });
 
-        // Check what happened
-        const postConnect = await page.evaluate(() => {
-          const treeItems = Array.from(document.querySelectorAll(
-            "div[role='button'], li[role='treeitem'], [class*='category-item'], [class*='tree-node']"
-          )).filter(el => el.offsetParent !== null);
-          // Also check for any new dialogs/prompts
-          const allTexts = Array.from(document.querySelectorAll("[role='dialog'], [class*='modal']"))
-            .filter(d => d.offsetParent !== null)
-            .map(d => d.textContent.trim().substring(0, 150));
-          return { treeItemCount: treeItems.length, dialogTexts: allTexts };
-        });
-        console.log(`${LOG} After Connect to MOTOR: tree=${postConnect.treeItemCount} items, dialogs=${postConnect.dialogTexts.length}`);
+      // ── Step 3d: Handle the vehicle/engine selection sidebar ──
+      // The sidebar shows "Search vehicle" with engine options in a dropdown.
+      // We need to select the GAS engine (not EV/BEV).
+      const engineSelected = await selectMotorEngine(page, vehicle);
 
-        if (postConnect.treeItemCount > 0) {
-          motorTabFound = true;
-        } else {
-          // Try clicking MOTOR Primary tab again after connection
-          const retryTab = await page.evaluate(() => {
-            const all = Array.from(document.querySelectorAll("*"));
-            for (const el of all) {
-              if (!el.offsetParent && el.offsetWidth === 0) continue;
-              const text = (el.innerText || el.textContent || "").trim();
-              if (text === "MOTOR Primary" || (text.includes("MOTOR Primary") && text.length < 30)) {
-                const clickEl = el.closest("li, a, [role='tab'], button") || el;
-                const rect = clickEl.getBoundingClientRect();
-                if (rect.width > 5 && rect.x < 1280) {
-                  return { found: true, rect: { x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 } };
-                }
+      if (engineSelected) {
+        console.log(`${LOG} Engine selected — saving and closing sidebar...`);
+
+        // Click Save button in the sidebar
+        const saveClicked = await page.evaluate(() => {
+          const btns = Array.from(document.querySelectorAll("button"));
+          for (const b of btns) {
+            if (b.textContent.trim() === "Save" && b.offsetParent !== null) {
+              // Prefer buttons inside the sidebar dialog
+              const inDialog = b.closest("[role='dialog']");
+              if (inDialog) {
+                const rect = b.getBoundingClientRect();
+                return { found: true, rect: { x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 } };
               }
             }
-            return { found: false };
+          }
+          // Fallback: any visible Save button
+          for (const b of btns) {
+            if (b.textContent.trim() === "Save" && b.offsetParent !== null) {
+              const rect = b.getBoundingClientRect();
+              return { found: true, rect: { x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 } };
+            }
+          }
+          return { found: false };
+        });
+
+        if (saveClicked.found) {
+          await page.mouse.click(saveClicked.rect.x, saveClicked.rect.y);
+          console.log(`${LOG} Save clicked in vehicle sidebar`);
+          await sleep(5000);
+        }
+
+        // Close the sidebar
+        await closeCustomerSidebar(page);
+        await sleep(2000);
+
+        // ── Step 3e: Re-open Browse and click MOTOR Primary tab ──
+        console.log(`${LOG} Re-opening Browse after MOTOR connection...`);
+        await clickByTextOutsideDialog(page, "Browse", ["button"]);
+        await sleep(3000);
+
+        await page.screenshot({ path: "/tmp/debug-motor-after-reopen.png" });
+
+        // Try MOTOR Primary tab again (should now be active/linked)
+        const retryTab = await page.evaluate(() => {
+          const all = Array.from(document.querySelectorAll("*"));
+          for (const el of all) {
+            if (!el.offsetParent && el.offsetWidth === 0) continue;
+            const text = (el.innerText || el.textContent || "").trim();
+            if (text === "MOTOR Primary" || (text.includes("MOTOR Primary") && text.length < 30)) {
+              const clickEl = el.closest("li, a, [role='tab'], button, p") || el;
+              const rect = clickEl.getBoundingClientRect();
+              if (rect.width > 5 && rect.x < 1280) {
+                return { found: true, rect: { x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 } };
+              }
+            }
+          }
+          return { found: false };
+        });
+
+        if (retryTab.found) {
+          console.log(`${LOG} MOTOR Primary tab found after connection — clicking...`);
+          await page.mouse.click(retryTab.rect.x, retryTab.rect.y);
+          await sleep(3000);
+
+          // Check for tree items
+          const treeCheck = await page.evaluate(() => {
+            const items = Array.from(document.querySelectorAll(
+              "div[role='button'], li[role='treeitem'], [class*='category-item'], [class*='tree-node']"
+            )).filter(el => el.offsetParent !== null);
+            return {
+              count: items.length,
+              items: items.slice(0, 8).map(el => el.textContent.trim().substring(0, 40)),
+            };
           });
-          if (retryTab.found) {
-            await page.mouse.click(retryTab.rect.x, retryTab.rect.y);
-            await sleep(3000);
-            const treeCheck = await page.evaluate(() => {
-              const items = Array.from(document.querySelectorAll(
-                "div[role='button'], li[role='treeitem'], [class*='category-item'], [class*='tree-node']"
-              )).filter(el => el.offsetParent !== null);
-              return items.length;
-            });
-            if (treeCheck > 0) motorTabFound = true;
+          console.log(`${LOG} MOTOR tree after connection: ${JSON.stringify(treeCheck)}`);
+
+          if (treeCheck.count > 0) {
+            motorTabFound = true;
           }
         }
       } else {
-        console.log(`${LOG} "Connect to MOTOR" still off-screen after scroll`);
+        console.log(`${LOG} Could not select engine in vehicle sidebar`);
       }
     } else {
-      console.log(`${LOG} "Connect to MOTOR" button not found`);
+      console.log(`${LOG} "Connect to MOTOR" button not found or off-screen`);
     }
   }
 
@@ -456,6 +502,167 @@ async function closeCustomerSidebar(page) {
   // If no sidebar found, try pressing Escape just in case
   await page.keyboard.press("Escape");
   await sleep(300);
+  return false;
+}
+
+// ─── Vehicle/Engine Selection for MOTOR Linking ─────────────────────────────
+
+/**
+ * Select the correct engine in the MOTOR vehicle linking sidebar.
+ * The sidebar shows a "Search vehicle" dropdown with engine options.
+ * We need the GAS engine, not EV/BEV/Hybrid.
+ *
+ * @param {import('puppeteer-core').Page} page
+ * @param {object} vehicle - { year, make, model, engine }
+ * @returns {Promise<boolean>} true if an engine was selected
+ */
+async function selectMotorEngine(page, vehicle) {
+  // Check if the sidebar opened with vehicle search dropdown
+  const dropdownItems = await page.evaluate(() => {
+    // Look for autocomplete dropdown items or search result items
+    const items = Array.from(document.querySelectorAll(
+      ".p-autocomplete-panel li, .p-autocomplete-items li, " +
+      "[class*='autocomplete'] li, [role='option'], [role='listbox'] li, " +
+      "[class*='dropdown-menu'] li, [class*='search-result']"
+    )).filter(el => el.offsetParent !== null);
+
+    if (items.length > 0) {
+      return items.map((el, i) => ({
+        index: i,
+        text: el.textContent.trim().substring(0, 100),
+        rect: (() => {
+          const r = el.getBoundingClientRect();
+          return { x: r.x + r.width / 2, y: r.y + r.height / 2 };
+        })(),
+      }));
+    }
+
+    // Also check for any visible list items in the sidebar that look like vehicle options
+    const sidebarItems = Array.from(document.querySelectorAll("[role='dialog'] li, [role='dialog'] [class*='option']"))
+      .filter(el => el.offsetParent !== null && el.textContent.includes("Engine"));
+    return sidebarItems.map((el, i) => ({
+      index: i,
+      text: el.textContent.trim().substring(0, 100),
+      rect: (() => {
+        const r = el.getBoundingClientRect();
+        return { x: r.x + r.width / 2, y: r.y + r.height / 2 };
+      })(),
+    }));
+  });
+
+  console.log(`${LOG} Engine dropdown items: ${JSON.stringify(dropdownItems)}`);
+
+  if (dropdownItems.length === 0) {
+    // No dropdown visible — maybe we need to click on the vehicle search first
+    console.log(`${LOG} No engine dropdown visible — trying to trigger it...`);
+
+    // Look for "Search vehicle" input or vehicle name that can be clicked
+    const searchInput = await page.evaluate(() => {
+      const inputs = Array.from(document.querySelectorAll("[role='dialog'] input"))
+        .filter(el => el.offsetParent !== null);
+      for (const inp of inputs) {
+        const placeholder = (inp.placeholder || "").toLowerCase();
+        const value = (inp.value || "").toLowerCase();
+        if (placeholder.includes("vehicle") || placeholder.includes("search") || value.includes("toyota") || value.includes("rav4")) {
+          const rect = inp.getBoundingClientRect();
+          return { found: true, rect: { x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 }, value: inp.value };
+        }
+      }
+      return { found: false };
+    });
+
+    if (searchInput.found) {
+      console.log(`${LOG} Found vehicle search input: "${searchInput.value}" — clicking to open dropdown...`);
+      await page.mouse.click(searchInput.rect.x, searchInput.rect.y);
+      await sleep(2000);
+
+      // Re-check for dropdown items
+      const retryItems = await page.evaluate(() => {
+        const items = Array.from(document.querySelectorAll(
+          ".p-autocomplete-panel li, .p-autocomplete-items li, " +
+          "[class*='autocomplete'] li, [role='option'], [role='listbox'] li"
+        )).filter(el => el.offsetParent !== null && el.textContent.includes("Engine"));
+        return items.map((el, i) => ({
+          index: i,
+          text: el.textContent.trim().substring(0, 100),
+          rect: (() => {
+            const r = el.getBoundingClientRect();
+            return { x: r.x + r.width / 2, y: r.y + r.height / 2 };
+          })(),
+        }));
+      });
+
+      if (retryItems.length > 0) {
+        return await pickGasEngine(page, retryItems, vehicle);
+      }
+    }
+
+    return false;
+  }
+
+  return await pickGasEngine(page, dropdownItems, vehicle);
+}
+
+/**
+ * From a list of engine options, pick the GAS engine (not EV/BEV/Hybrid).
+ */
+async function pickGasEngine(page, items, vehicle) {
+  // Score each item — prefer GAS, avoid EV/BEV/Hybrid
+  const PREFER = ["gas", "fi", "mfi", "dohc", "sohc"];
+  const AVOID = ["ev", "bev", "electric", "battery", "hybrid", "phev", "u/k"];
+
+  let bestIdx = -1;
+  let bestScore = -999;
+
+  for (const item of items) {
+    const lower = item.text.toLowerCase();
+    let score = 0;
+
+    // Check for preferred terms
+    for (const p of PREFER) {
+      if (lower.includes(p)) score += 5;
+    }
+    // Check for avoid terms
+    for (const a of AVOID) {
+      if (lower.includes(a)) score -= 10;
+    }
+    // Bonus for matching engine displacement if we know it
+    if (vehicle.engine?.displacement && lower.includes(vehicle.engine.displacement.toLowerCase())) {
+      score += 8;
+    }
+    // Bonus for matching cylinder count
+    if (vehicle.engine?.cylinders && lower.includes(`${vehicle.engine.cylinders}`)) {
+      score += 3;
+    }
+
+    console.log(`${LOG}   Engine option ${item.index}: score=${score} "${item.text.substring(0, 60)}"`);
+
+    if (score > bestScore) {
+      bestScore = score;
+      bestIdx = item.index;
+    }
+  }
+
+  if (bestIdx >= 0 && items[bestIdx]) {
+    const chosen = items[bestIdx];
+    console.log(`${LOG} Selected engine: "${chosen.text.substring(0, 60)}" (score ${bestScore})`);
+    await page.mouse.click(chosen.rect.x, chosen.rect.y);
+    await sleep(2000);
+    return true;
+  }
+
+  // Fallback: if only 2 options and one is EV, pick the other
+  if (items.length === 2) {
+    const evIdx = items.findIndex(i => i.text.toLowerCase().includes("ev") || i.text.toLowerCase().includes("battery"));
+    const gasIdx = evIdx === 0 ? 1 : 0;
+    if (evIdx >= 0) {
+      console.log(`${LOG} Fallback: picking non-EV option: "${items[gasIdx].text.substring(0, 60)}"`);
+      await page.mouse.click(items[gasIdx].rect.x, items[gasIdx].rect.y);
+      await sleep(2000);
+      return true;
+    }
+  }
+
   return false;
 }
 
