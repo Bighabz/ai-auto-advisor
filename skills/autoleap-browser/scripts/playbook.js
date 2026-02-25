@@ -344,89 +344,133 @@ async function createEstimateWithCustomerVehicle(page, customer, vehicle) {
   await sleep(3000);
   console.log(`${LOG} Blank estimate created ✓`);
 
-  // Step 2c: Click on the newly created estimate card to open it
-  // The new blank estimate should be the first card in the "Estimate" column
-  // It has no customer name (shows "-") and $0.00
-  console.log(`${LOG} Opening the new estimate card...`);
-  const cardClicked = await page.evaluate(() => {
-    // Find estimate cards — look for cards with $0.00 or no customer name
-    const cards = Array.from(document.querySelectorAll('[class*="card"], [class*="kanban"], a, div'))
+  // Step 2c: Switch to List view to get clickable estimate links
+  // Kanban cards don't have <a> links — List view should show clickable rows
+  console.log(`${LOG} Switching to List view...`);
+  const listClicked = await page.evaluate(() => {
+    // Click the "List" tab (next to "Kanban" and "Items")
+    const tabs = Array.from(document.querySelectorAll("button, a, span, div, label"))
       .filter(el => el.offsetParent !== null);
-
-    // Strategy 1: Find the newest card (highest estimate number) with $0.00
-    // Look for elements containing estimate numbers
-    let highestNum = 0;
-    let bestCard = null;
-    for (const card of cards) {
-      const text = card.textContent || "";
-      // Match estimate numbers like "16299" (5-digit numbers at start of card)
-      const numMatch = text.match(/\b(1\d{4})\b/);
-      if (numMatch) {
-        const num = parseInt(numMatch[1]);
-        if (num > highestNum && text.includes("$0.00")) {
-          highestNum = num;
-          bestCard = card;
-        }
+    for (const tab of tabs) {
+      const text = (tab.textContent || "").trim();
+      if (text === "List") {
+        tab.click();
+        return true;
       }
     }
-
-    if (bestCard) {
-      // Look for a clickable link/element within the card
-      const link = bestCard.querySelector("a[href]") || bestCard;
-      link.click();
-      return { clicked: true, number: highestNum, tag: link.tagName };
-    }
-
-    // Strategy 2: Find any card with "$0.00" and "Today"
-    for (const card of cards) {
-      const text = card.textContent || "";
-      if (text.includes("$0.00") && text.includes("Today") && card.querySelector && card.querySelector("a")) {
-        const link = card.querySelector("a");
-        link.click();
-        return { clicked: true, text: text.substring(0, 40), tag: "a" };
-      }
-    }
-
-    return { clicked: false };
+    return false;
   });
 
-  if (!cardClicked.clicked) {
-    await page.screenshot({ path: "/tmp/debug-no-card.png", fullPage: true });
-    console.log(`${LOG} Could not find blank estimate card to click`);
-    return { success: false, error: "Could not find blank estimate card on workboard" };
+  if (listClicked) {
+    console.log(`${LOG} Switched to List view ✓`);
+  } else {
+    console.log(`${LOG} Could not find List tab`);
   }
-  console.log(`${LOG} Clicked estimate card: ${JSON.stringify(cardClicked)}`);
-  await sleep(5000);
+  await sleep(3000);
+  await page.screenshot({ path: "/tmp/debug-list-view.png" });
 
-  // Check if we navigated to the estimate page
-  const estUrl = page.url();
-  console.log(`${LOG} URL after card click: ${estUrl}`);
-  await page.screenshot({ path: "/tmp/debug-estimate-opened.png" });
+  // Now find the newest estimate (highest number, $0.00) and click it
+  console.log(`${LOG} Looking for clickable estimate links...`);
+  const estLink = await page.evaluate(() => {
+    // Look for ALL <a> elements with href containing estimate IDs
+    const allLinks = Array.from(document.querySelectorAll("a[href]"))
+      .filter(a => a.offsetParent !== null);
 
-  // If still on workboard, try navigating directly to the estimate
-  if (estUrl.includes("/workboard") && !estUrl.includes("/estimate")) {
-    console.log(`${LOG} Still on workboard — trying direct URL navigation...`);
-    // The estimate URL is likely /#/workboard/estimate/{mongoId}
-    // We need to find the ID. Let's look for links in the workboard
-    const estLink = await page.evaluate(() => {
-      const links = Array.from(document.querySelectorAll("a[href*='estimate']"));
-      // Get the newest one (highest number or most recent)
-      if (links.length > 0) {
-        const href = links[links.length - 1].getAttribute("href");
-        return href;
-      }
-      return null;
+    // Find estimate links (href pattern: /workboard/estimate/... or /estimates/...)
+    const estLinks = allLinks.filter(a => {
+      const href = a.getAttribute("href") || "";
+      return href.includes("estimate") && !href.includes("estimates/list");
     });
 
-    if (estLink) {
-      console.log(`${LOG} Found estimate link: ${estLink}`);
-      await page.goto(`${AUTOLEAP_APP_URL}/${estLink.startsWith("#") ? estLink : "#" + estLink}`, {
-        waitUntil: "domcontentloaded",
-        timeout: 30000,
-      });
+    if (estLinks.length > 0) {
+      // Find the one with highest estimate number
+      let best = null;
+      let bestNum = 0;
+      for (const link of estLinks) {
+        const text = link.textContent || "";
+        const numMatch = text.match(/\b(1\d{4})\b/);
+        if (numMatch) {
+          const num = parseInt(numMatch[1]);
+          if (num > bestNum) {
+            bestNum = num;
+            best = link;
+          }
+        }
+      }
+      if (best) {
+        const href = best.getAttribute("href");
+        best.click();
+        return { clicked: true, href, number: bestNum };
+      }
+      // Just click the last one (most recent)
+      const last = estLinks[estLinks.length - 1];
+      last.click();
+      return { clicked: true, href: last.getAttribute("href"), number: null };
+    }
+
+    // No estimate links found — dump all links for debugging
+    const linkDump = allLinks.map(a => ({
+      href: (a.getAttribute("href") || "").substring(0, 60),
+      text: a.textContent.trim().substring(0, 40),
+    })).slice(0, 20);
+    return { clicked: false, links: linkDump };
+  });
+
+  console.log(`${LOG} Estimate link result: ${JSON.stringify(estLink)}`);
+
+  if (!estLink.clicked) {
+    // Fallback: try clicking directly on text elements on the kanban board
+    console.log(`${LOG} No links found — trying to click estimate number text directly...`);
+
+    // Switch back to Kanban view and try clicking the estimate number
+    await page.evaluate(() => {
+      const tabs = Array.from(document.querySelectorAll("button, a, span, div"))
+        .filter(el => el.offsetParent !== null);
+      for (const tab of tabs) {
+        if ((tab.textContent || "").trim() === "Kanban") {
+          tab.click();
+          return;
+        }
+      }
+    });
+    await sleep(2000);
+
+    // Try: find elements containing JUST the estimate number, click them
+    const numClicked = await page.evaluate(() => {
+      // Find the text node with the highest 5-digit number (newest estimate)
+      const allEls = Array.from(document.querySelectorAll("span, a, div, p, strong, b"));
+      let best = null;
+      let bestNum = 0;
+      for (const el of allEls) {
+        // Only match elements with short text (just the number)
+        const text = el.textContent.trim();
+        if (/^\d{5}$/.test(text)) {
+          const num = parseInt(text);
+          if (num > bestNum && el.offsetParent !== null) {
+            bestNum = num;
+            best = el;
+          }
+        }
+      }
+      if (best) {
+        best.click();
+        return { clicked: true, number: bestNum, tag: best.tagName };
+      }
+      return { clicked: false };
+    });
+
+    console.log(`${LOG} Number click result: ${JSON.stringify(numClicked)}`);
+    if (numClicked.clicked) {
       await sleep(5000);
     }
+  } else {
+    await sleep(5000);
   }
+
+  // Check URL
+  const estUrl = page.url();
+  console.log(`${LOG} URL after click: ${estUrl}`);
+  await page.screenshot({ path: "/tmp/debug-estimate-opened.png" });
 
   // Dump the estimate page to see what's available
   const estPageDump = await page.evaluate(() => {
