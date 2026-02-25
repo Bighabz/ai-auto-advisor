@@ -319,25 +319,20 @@ async function createEstimateWithCustomerVehicle(page, customer, vehicle) {
     await sleep(3000);
   }
 
-  // Step 2: Click green "+" circle button in header (opens customer/vehicle drawer)
-  // NOTE: "Estimate" button creates a blank estimate — we need "+" which opens the form
-  console.log(`${LOG} Clicking "+" button to open customer form...`);
+  // Step 2: Click "+" button in header → opens dropdown menu
+  console.log(`${LOG} Clicking "+" button...`);
   const plusClicked = await page.evaluate(() => {
-    // Look for the round "+" button in the header area
     const allClickable = Array.from(document.querySelectorAll("button, a, [role='button'], span, i"));
-    // First: look for element with + text or plus icon in header
     for (const el of allClickable) {
       const text = el.textContent.trim();
-      // The "+" in AutoLeap header is typically a round button with just "+"
       if (text === "+" && el.offsetParent !== null) {
         el.click();
         return "+";
       }
     }
-    // Second: look for add/create button by class
     for (const el of allClickable) {
       const cls = (el.className || "").toLowerCase();
-      if ((cls.includes("add") || cls.includes("create") || cls.includes("plus") || cls.includes("fab")) && el.offsetParent !== null) {
+      if ((cls.includes("plus") || cls.includes("fab")) && el.offsetParent !== null) {
         el.click();
         return `class:${cls.substring(0, 40)}`;
       }
@@ -352,24 +347,25 @@ async function createEstimateWithCustomerVehicle(page, customer, vehicle) {
   console.log(`${LOG} Clicked: "${plusClicked}"`);
   await sleep(1500);
 
-  // Step 2b: Click "Estimate & Invoice" from the dropdown menu
-  console.log(`${LOG} Clicking "Estimate & Invoice" from dropdown...`);
+  // Step 2b: Click "Customer" from the dropdown menu (NOT "Estimate & Invoice" — that creates a blank estimate)
+  console.log(`${LOG} Clicking "Customer" from dropdown...`);
   const menuClicked = await page.evaluate(() => {
-    // The dropdown has items with text like "Estimate & Invoice", "Customer", "Vehicle", etc.
     const allEls = Array.from(document.querySelectorAll("div, li, a, button, span, [role='menuitem']"));
+    // Find the "Customer" menu item (not "Estimate & Invoice" which creates blank estimate)
     for (const el of allEls) {
       const text = (el.textContent || "").trim();
-      if (text.includes("Estimate & Invoice") || text === "Estimate & Invoice") {
-        el.click();
-        return "Estimate & Invoice";
-      }
-    }
-    // Fallback: try "Customer" (opens customer creation form)
-    for (const el of allEls) {
-      const text = (el.textContent || "").trim();
-      if (text === "Customer" || text.includes("Add a new customer")) {
+      // Match exact "Customer" — avoid matching "Customers" nav link or nested text
+      if (text === "Customer") {
         el.click();
         return "Customer";
+      }
+    }
+    // Broader fallback
+    for (const el of allEls) {
+      const text = (el.textContent || "").trim();
+      if (text.includes("Customer") && !text.includes("Customers") && text.length < 30) {
+        el.click();
+        return `Customer(${text})`;
       }
     }
     return null;
@@ -377,47 +373,47 @@ async function createEstimateWithCustomerVehicle(page, customer, vehicle) {
 
   if (!menuClicked) {
     await page.screenshot({ path: "/tmp/debug-no-menu-item.png", fullPage: true });
-    return { success: false, error: 'Could not find "Estimate & Invoice" in dropdown menu' };
+    return { success: false, error: 'Could not find "Customer" in dropdown menu' };
   }
   console.log(`${LOG} Clicked: "${menuClicked}"`);
   await sleep(3000);
 
-  // Screenshot to see what opened
-  await page.screenshot({ path: "/tmp/debug-after-menu-click.png", fullPage: true });
-  console.log(`${LOG} Screenshot: /tmp/debug-after-menu-click.png`);
+  // Wait for the customer form to appear (drawer/modal with personal-card-fname)
+  console.log(`${LOG} Waiting for customer form...`);
+  let formVisible = false;
+  for (let attempt = 0; attempt < 5; attempt++) {
+    formVisible = await page.evaluate(() => {
+      const fname = document.querySelector('#personal-card-fname');
+      return fname && fname.offsetParent !== null;
+    });
+    if (formVisible) break;
+    await sleep(1500);
+  }
 
-  // Debug: check what's now visible
-  const formCheck = await page.evaluate(() => {
-    const url = window.location.href;
-    // Check for customer form fields (by ID, placeholder, or label)
-    const fname = document.querySelector('#personal-card-fname');
-    const lname = document.querySelector('#personal-card-lname');
-    const mobile = document.querySelector('#personal-card-mobile');
-    // Check all visible inputs with meaningful placeholders
-    const meaningfulInputs = Array.from(document.querySelectorAll("input"))
-      .filter(i => i.offsetParent !== null && (i.placeholder || i.id))
-      .slice(0, 15)
-      .map(i => ({ id: i.id, placeholder: i.placeholder, type: i.type }));
-    // Check visible buttons
-    const buttons = Array.from(document.querySelectorAll("button"))
-      .filter(b => b.offsetParent !== null)
-      .map(b => b.textContent.trim().substring(0, 40))
-      .filter(t => t.length > 0)
-      .slice(0, 10);
-    return {
-      url,
-      fnameExists: !!fname, fnameVisible: fname?.offsetParent !== null,
-      lnameExists: !!lname, lnameVisible: lname?.offsetParent !== null,
-      mobileExists: !!mobile, mobileVisible: mobile?.offsetParent !== null,
-      meaningfulInputs, buttons,
-    };
-  });
-  console.log(`${LOG} URL: ${formCheck.url}`);
-  console.log(`${LOG} fname: exists=${formCheck.fnameExists} visible=${formCheck.fnameVisible}`);
-  console.log(`${LOG} lname: exists=${formCheck.lnameExists} visible=${formCheck.lnameVisible}`);
-  console.log(`${LOG} mobile: exists=${formCheck.mobileExists} visible=${formCheck.mobileVisible}`);
-  console.log(`${LOG} Visible inputs: ${JSON.stringify(formCheck.meaningfulInputs)}`);
-  console.log(`${LOG} Buttons: ${JSON.stringify(formCheck.buttons)}`);
+  if (!formVisible) {
+    await page.screenshot({ path: "/tmp/debug-no-customer-form.png", fullPage: true });
+
+    // Debug: log what IS visible
+    const debugInfo = await page.evaluate(() => {
+      const url = window.location.href;
+      const visibleInputs = Array.from(document.querySelectorAll("input"))
+        .filter(i => i.offsetParent !== null)
+        .slice(0, 10)
+        .map(i => ({ id: i.id, placeholder: i.placeholder, type: i.type }));
+      const visibleButtons = Array.from(document.querySelectorAll("button"))
+        .filter(b => b.offsetParent !== null)
+        .map(b => b.textContent.trim().substring(0, 40))
+        .filter(t => t.length > 0)
+        .slice(0, 10);
+      return { url, visibleInputs, visibleButtons };
+    });
+    console.log(`${LOG} Form NOT visible. URL: ${debugInfo.url}`);
+    console.log(`${LOG} Visible inputs: ${JSON.stringify(debugInfo.visibleInputs)}`);
+    console.log(`${LOG} Buttons: ${JSON.stringify(debugInfo.visibleButtons)}`);
+
+    return { success: false, error: 'Customer form did not appear after clicking "Customer" menu item' };
+  }
+  console.log(`${LOG} Customer form visible ✓`);
 
   // Step 3: Fill customer info using AutoLeap's actual IDs
   const nameParts = (customer.name || "Customer").trim().split(/\s+/);
