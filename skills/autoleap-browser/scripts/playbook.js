@@ -349,10 +349,47 @@ async function createEstimateWithCustomerVehicle(page, customer, vehicle) {
   });
 
   if (!newClicked) {
+    await page.screenshot({ path: "/tmp/debug-no-new-btn.png", fullPage: true });
     return { success: false, error: "Could not find New/+ button on workboard" };
   }
   console.log(`${LOG} Clicked: ${newClicked}`);
   await sleep(2000);
+
+  // Debug: screenshot after New button click
+  await page.screenshot({ path: "/tmp/debug-after-new-click.png", fullPage: true });
+  console.log(`${LOG} Screenshot: /tmp/debug-after-new-click.png`);
+
+  // Debug: dump form-related elements
+  const formDebug = await page.evaluate(() => {
+    const inputs = Array.from(document.querySelectorAll("input")).map(i => ({
+      name: i.name, type: i.type, placeholder: i.placeholder,
+      id: i.id, className: i.className.substring(0, 60),
+      formcontrolname: i.getAttribute("formcontrolname"),
+    }));
+    const selects = Array.from(document.querySelectorAll("select")).map(s => ({
+      name: s.name, id: s.id, className: s.className.substring(0, 60),
+      formcontrolname: s.getAttribute("formcontrolname"),
+      optionCount: s.options?.length || 0,
+    }));
+    const buttons = Array.from(document.querySelectorAll("button")).slice(0, 20).map(b => ({
+      text: b.textContent.trim().substring(0, 40), disabled: b.disabled,
+      className: b.className.substring(0, 60),
+    }));
+    return { inputs, selects, buttons, url: window.location.href };
+  });
+  console.log(`${LOG} DOM debug — URL: ${formDebug.url}`);
+  console.log(`${LOG} Inputs (${formDebug.inputs.length}):`);
+  for (const i of formDebug.inputs) {
+    console.log(`${LOG}   name="${i.name}" type="${i.type}" placeholder="${i.placeholder}" formcontrolname="${i.formcontrolname}" id="${i.id}"`);
+  }
+  console.log(`${LOG} Selects (${formDebug.selects.length}):`);
+  for (const s of formDebug.selects) {
+    console.log(`${LOG}   name="${s.name}" formcontrolname="${s.formcontrolname}" options=${s.optionCount}`);
+  }
+  console.log(`${LOG} Buttons (${formDebug.buttons.length}):`);
+  for (const b of formDebug.buttons) {
+    console.log(`${LOG}   "${b.text}" disabled=${b.disabled}`);
+  }
 
   // Look for "Customer & Vehicle" option in dropdown if it appeared
   await page.evaluate(() => {
