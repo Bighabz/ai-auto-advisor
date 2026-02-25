@@ -350,30 +350,74 @@ async function createEstimateWithCustomerVehicle(page, customer, vehicle) {
     return { success: false, error: 'Could not find "+" button in header' };
   }
   console.log(`${LOG} Clicked: "${plusClicked}"`);
+  await sleep(1500);
+
+  // Step 2b: Click "Estimate & Invoice" from the dropdown menu
+  console.log(`${LOG} Clicking "Estimate & Invoice" from dropdown...`);
+  const menuClicked = await page.evaluate(() => {
+    // The dropdown has items with text like "Estimate & Invoice", "Customer", "Vehicle", etc.
+    const allEls = Array.from(document.querySelectorAll("div, li, a, button, span, [role='menuitem']"));
+    for (const el of allEls) {
+      const text = (el.textContent || "").trim();
+      if (text.includes("Estimate & Invoice") || text === "Estimate & Invoice") {
+        el.click();
+        return "Estimate & Invoice";
+      }
+    }
+    // Fallback: try "Customer" (opens customer creation form)
+    for (const el of allEls) {
+      const text = (el.textContent || "").trim();
+      if (text === "Customer" || text.includes("Add a new customer")) {
+        el.click();
+        return "Customer";
+      }
+    }
+    return null;
+  });
+
+  if (!menuClicked) {
+    await page.screenshot({ path: "/tmp/debug-no-menu-item.png", fullPage: true });
+    return { success: false, error: 'Could not find "Estimate & Invoice" in dropdown menu' };
+  }
+  console.log(`${LOG} Clicked: "${menuClicked}"`);
   await sleep(3000);
 
-  // Screenshot after clicking +
-  await page.screenshot({ path: "/tmp/debug-after-plus-click.png", fullPage: true });
-  console.log(`${LOG} Screenshot: /tmp/debug-after-plus-click.png`);
+  // Screenshot to see what opened
+  await page.screenshot({ path: "/tmp/debug-after-menu-click.png", fullPage: true });
+  console.log(`${LOG} Screenshot: /tmp/debug-after-menu-click.png`);
 
-  // Debug: check key form elements
-  const hasForm = await page.evaluate(() => {
+  // Debug: check what's now visible
+  const formCheck = await page.evaluate(() => {
+    const url = window.location.href;
+    // Check for customer form fields (by ID, placeholder, or label)
     const fname = document.querySelector('#personal-card-fname');
     const lname = document.querySelector('#personal-card-lname');
     const mobile = document.querySelector('#personal-card-mobile');
-    const fnameVisible = fname && fname.offsetParent !== null;
-    const lnameVisible = lname && lname.offsetParent !== null;
-    const mobileVisible = mobile && mobile.offsetParent !== null;
-    // Find save-type buttons
-    const saveBtns = Array.from(document.querySelectorAll("button"))
+    // Check all visible inputs with meaningful placeholders
+    const meaningfulInputs = Array.from(document.querySelectorAll("input"))
+      .filter(i => i.offsetParent !== null && (i.placeholder || i.id))
+      .slice(0, 15)
+      .map(i => ({ id: i.id, placeholder: i.placeholder, type: i.type }));
+    // Check visible buttons
+    const buttons = Array.from(document.querySelectorAll("button"))
       .filter(b => b.offsetParent !== null)
       .map(b => b.textContent.trim().substring(0, 40))
-      .filter(t => t.toLowerCase().includes("save") || t.toLowerCase().includes("create") || t.toLowerCase().includes("estimate"));
-    return { fnameVisible, lnameVisible, mobileVisible, saveBtns, url: window.location.href };
+      .filter(t => t.length > 0)
+      .slice(0, 10);
+    return {
+      url,
+      fnameExists: !!fname, fnameVisible: fname?.offsetParent !== null,
+      lnameExists: !!lname, lnameVisible: lname?.offsetParent !== null,
+      mobileExists: !!mobile, mobileVisible: mobile?.offsetParent !== null,
+      meaningfulInputs, buttons,
+    };
   });
-  console.log(`${LOG} Form check — fname:${hasForm.fnameVisible} lname:${hasForm.lnameVisible} mobile:${hasForm.mobileVisible}`);
-  console.log(`${LOG} Save/Create buttons: ${JSON.stringify(hasForm.saveBtns)}`);
-  console.log(`${LOG} URL: ${hasForm.url}`);
+  console.log(`${LOG} URL: ${formCheck.url}`);
+  console.log(`${LOG} fname: exists=${formCheck.fnameExists} visible=${formCheck.fnameVisible}`);
+  console.log(`${LOG} lname: exists=${formCheck.lnameExists} visible=${formCheck.lnameVisible}`);
+  console.log(`${LOG} mobile: exists=${formCheck.mobileExists} visible=${formCheck.mobileVisible}`);
+  console.log(`${LOG} Visible inputs: ${JSON.stringify(formCheck.meaningfulInputs)}`);
+  console.log(`${LOG} Buttons: ${JSON.stringify(formCheck.buttons)}`);
 
   // Step 3: Fill customer info using AutoLeap's actual IDs
   const nameParts = (customer.name || "Customer").trim().split(/\s+/);
