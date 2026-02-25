@@ -394,18 +394,52 @@ async function navigateMotorTree(page, diagnosis, vehicle) {
   console.log(`${LOG} Repair context: ${repairContext.substring(0, 100)}...`);
 
   // ── Navigate MOTOR tree levels with Claude AI ──
+  // MOTOR uses an EXPANDING TREE — clicking a category shows children inline
+  // while keeping all siblings visible. We track which items existed BEFORE
+  // each click, and after clicking, the NEW items are the children to navigate.
   const maxLevels = 7;
   let lastPickedName = "";
+  let previousItems = new Set(); // tracks items seen before current level
 
   for (let level = 0; level < maxLevels; level++) {
     const currentLevel = level + 1;
 
-    // Read current category options from DOM (inside the dialog)
-    const options = await readCategoryOptions(page);
-    console.log(`${LOG} Level ${currentLevel} options (${options.length}): ${options.slice(0, 8).join(", ")}${options.length > 8 ? "..." : ""}`);
+    // Read ALL visible category options from DOM
+    const allOptions = await readCategoryOptions(page);
+
+    // Determine current level's options: items NOT in previousItems
+    let options;
+    if (currentLevel === 1) {
+      options = allOptions; // first level: everything is new
+    } else {
+      options = allOptions.filter(o => !previousItems.has(o));
+    }
+
+    // If no new items appeared, the tree didn't expand — check for Add button or leaf
+    if (options.length === 0 && currentLevel > 1) {
+      // Maybe the tree shows a detail view instead of more categories
+      const hasAdd = await hasAddButton(page);
+      if (hasAdd) {
+        console.log(`${LOG} Found Add button at level ${currentLevel} — adding labor`);
+        break;
+      }
+      // Take screenshot for debugging
+      await page.screenshot({ path: `/tmp/debug-motor-level${currentLevel}.png` });
+      console.log(`${LOG} No NEW options at level ${currentLevel} (all ${allOptions.length} already seen)`);
+
+      // Check if we reached a leaf: look for procedure details, hours, qualifiers
+      const hasQuals = (await readQualifierOptions(page)).length > 0;
+      if (hasQuals) {
+        console.log(`${LOG} Found qualifiers at level ${currentLevel} — at leaf node`);
+        break;
+      }
+      console.log(`${LOG} No new categories or qualifiers — may be at leaf`);
+      break;
+    }
+
+    console.log(`${LOG} Level ${currentLevel} options (${options.length}): ${options.slice(0, 10).join(", ")}${options.length > 10 ? "..." : ""}`);
 
     if (options.length === 0) {
-      // No more categories — check if we have an "Add" button
       const hasAdd = await hasAddButton(page);
       if (hasAdd) {
         console.log(`${LOG} Found Add button at level ${currentLevel} — adding labor`);
@@ -416,11 +450,12 @@ async function navigateMotorTree(page, diagnosis, vehicle) {
     }
 
     if (options.length === 1) {
-      // Auto-select single option
       console.log(`${LOG} Level ${currentLevel}: Auto-selecting "${options[0]}"`);
+      // Record all current items before clicking (so we can diff after)
+      previousItems = new Set(allOptions);
       await clickCategoryOption(page, options[0]);
       lastPickedName = options[0];
-      await sleep(1500);
+      await sleep(2000);
       continue;
     }
 
@@ -439,10 +474,12 @@ async function navigateMotorTree(page, diagnosis, vehicle) {
 
     console.log(`${LOG} Level ${currentLevel} (${levelLabel}): Claude picked "${pick}"`);
 
+    // Record all current items before clicking
+    previousItems = new Set(allOptions);
+
     // Click the picked option using native mouse click
     const clicked = await clickCategoryOption(page, pick);
     if (!clicked) {
-      // Try fuzzy match
       const fuzzy = findClosestMatch(pick, options);
       if (fuzzy && fuzzy !== pick) {
         console.log(`${LOG} Fuzzy match: "${pick}" → "${fuzzy}"`);
@@ -453,7 +490,7 @@ async function navigateMotorTree(page, diagnosis, vehicle) {
     }
 
     lastPickedName = pick;
-    await sleep(1500);
+    await sleep(2000);
   }
 
   // ── Handle qualifiers (if present) ──
