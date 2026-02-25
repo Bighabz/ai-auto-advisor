@@ -111,184 +111,196 @@ async function runPlaybook({ customer, vehicle, diagnosis, parts, progressCallba
     await sleep(3000);
 
     // ═══════════════════════════════════════════════════════════════════════════
-    // PHASE 2b: Add vehicle to estimate (if not linked via API)
+    // PHASE 2b: Ensure vehicle is selected in Angular UI
+    // The API links the vehicle, but Angular's PrimeNG autocomplete may not
+    // reflect it. PartsTech SSO requires the vehicle to be "selected" in UI.
     // ═══════════════════════════════════════════════════════════════════════════
-    let needsVehicle = false;
-    try {
-      needsVehicle = await page.evaluate(() => {
-        const vehInput = document.querySelector("#estimate-vehicle");
-        if (vehInput) {
-          const placeholder = vehInput.placeholder || vehInput.getAttribute("placeholder") || "";
-          return placeholder.includes("Select vehicle") && !vehInput.value;
-        }
-        const pageText = document.body?.innerText || "";
-        return pageText.includes("Select vehicle");
-      });
-    } catch (vehDetectErr) {
-      console.log(`${LOG} Vehicle detection error: ${vehDetectErr.message} — continuing`);
-    }
+    const vehicleStr = `${vehicle.year || ""} ${vehicle.make || ""} ${vehicle.model || ""}`.trim();
+    const vehicleAlreadyInPage = createResult.vehicleInPage;
 
-    if (needsVehicle && (vehicle.year || vehicle.make || vehicle.vin)) {
+    if (vehicleAlreadyInPage) {
+      console.log(`${LOG} Vehicle "${vehicleStr}" already visible in page ✓`);
+    } else if (vehicle.year || vehicle.make || vehicle.vin) {
       try {
-      console.log(`${LOG} Phase 2b: Adding vehicle via autocomplete (#estimate-vehicle)...`);
+        console.log(`${LOG} Phase 2b: Vehicle not visible in UI — attempting to select...`);
 
-      // The vehicle field is a PrimeNG autocomplete input: #estimate-vehicle
-      const vehInput = await page.$("#estimate-vehicle");
-      if (vehInput) {
-        // Try multiple search terms: short terms more likely to trigger autocomplete
-        const searchTerms = [
-          String(vehicle.year || ""),
-          vehicle.make || "",
-          `${vehicle.year || ""} ${vehicle.make || ""}`.trim(),
-        ].filter(t => t.length > 0);
+        // ── Attempt 1: Page reload to force Angular to re-fetch estimate with vehicle ──
+        // The API linked the vehicle; Angular may have loaded stale data on first navigation
+        console.log(`${LOG}   Attempt 1: Page reload to sync vehicle data...`);
+        try {
+          await page.reload({ waitUntil: "domcontentloaded", timeout: 30000 });
+          await sleep(5000);
 
-        let optionResult = { selected: false, count: 0, all: [] };
+          const afterReload = await page.evaluate((yr, mk, mdl) => {
+            const text = document.body?.innerText || "";
+            const vStr = `${yr} ${mk} ${mdl}`.trim();
+            const vInput = document.querySelector("#estimate-vehicle");
+            return {
+              vehicleInText: vStr ? text.includes(vStr) : false,
+              inputValue: vInput?.value?.substring(0, 60) || "",
+              hasDropdownBtn: !!document.querySelector(".p-autocomplete-dropdown"),
+            };
+          }, String(vehicle.year || ""), vehicle.make || "", vehicle.model || "");
 
-        for (const vehSearch of searchTerms) {
-          if (optionResult.selected) break;
-          console.log(`${LOG}   Trying autocomplete with: "${vehSearch}"...`);
+          console.log(`${LOG}   After reload: ${JSON.stringify(afterReload)}`);
 
-          // Focus and clear the input
-          await vehInput.click();
-          await sleep(300);
-          await page.keyboard.down("Control");
-          await page.keyboard.press("a");
-          await page.keyboard.up("Control");
-          await page.keyboard.press("Backspace");
-          await sleep(300);
+          if (afterReload.vehicleInText || (afterReload.inputValue && !afterReload.inputValue.includes("Select"))) {
+            console.log(`${LOG}   Vehicle visible after reload ✓`);
+            // Skip remaining attempts
+          } else {
+            // ── Attempt 2: Click PrimeNG dropdown button (shows full vehicle list) ──
+            console.log(`${LOG}   Attempt 2: Trying PrimeNG dropdown button...`);
+            const dropdownClicked = await page.evaluate(() => {
+              const btn = document.querySelector(".p-autocomplete-dropdown, .p-autocomplete .p-button, #estimate-vehicle + button");
+              if (btn && btn.offsetParent !== null) {
+                btn.click();
+                return true;
+              }
+              // Also try clicking the input itself (some PrimeNG configs show dropdown on focus)
+              const input = document.querySelector("#estimate-vehicle");
+              if (input) {
+                input.focus();
+                input.click();
+                // Dispatch events Angular listens to
+                input.dispatchEvent(new Event("focus", { bubbles: true }));
+                input.dispatchEvent(new Event("input", { bubbles: true }));
+                return "input-focused";
+              }
+              return false;
+            });
+            console.log(`${LOG}   Dropdown click: ${dropdownClicked}`);
+            await sleep(3000);
 
-          // Type the search term
-          await vehInput.type(vehSearch, { delay: 80 });
-          await sleep(3000); // Wait for autocomplete API call and panel
+            // Check for ANY overlay/panel appearing anywhere in the DOM
+            const overlayCheck = await page.evaluate(() => {
+              // PrimeNG overlays can be appended to <body>, not inside the autocomplete wrapper
+              const selectors = [
+                ".p-autocomplete-panel", ".p-autocomplete-overlay",
+                ".p-overlay-content", ".p-connected-overlay-enter-done",
+                ".cdk-overlay-container", ".cdk-overlay-pane",
+                "[class*='autocomplete'] [class*='panel']",
+                "[class*='autocomplete'] [class*='overlay']",
+                "[class*='overlay'][class*='enter']",
+              ];
+              const results = {};
+              for (const sel of selectors) {
+                const els = document.querySelectorAll(sel);
+                const visible = Array.from(els).filter(e => e.offsetParent !== null || e.children.length > 0);
+                if (visible.length > 0) {
+                  results[sel] = visible.map(e => ({
+                    tag: e.tagName,
+                    class: (e.className || "").substring(0, 60),
+                    text: e.textContent.trim().substring(0, 100),
+                    childCount: e.children.length,
+                  }));
+                }
+              }
+              // Also dump ALL li elements that appeared recently (potential dropdown items)
+              const allLi = Array.from(document.querySelectorAll("ul li, [role='option'], [role='listbox'] li"))
+                .filter(li => li.offsetParent !== null)
+                .map(li => li.textContent.trim().substring(0, 60))
+                .filter(t => t.length > 0)
+                .slice(0, 10);
+              return { overlays: results, visibleListItems: allLi };
+            });
+            console.log(`${LOG}   Overlay check: ${JSON.stringify(overlayCheck)}`);
 
-          // Take screenshot for debugging
-          await page.screenshot({ path: "/tmp/debug-vehicle-autocomplete.png" });
+            await page.screenshot({ path: "/tmp/debug-vehicle-autocomplete.png" });
 
-          // Check for PrimeNG autocomplete panel
-          optionResult = await page.evaluate((year, make) => {
-            // PrimeNG autocomplete panels
-            const panels = document.querySelectorAll(".p-autocomplete-panel, .p-autocomplete-overlay, [class*='autocomplete-panel']");
-            for (const panel of panels) {
-              const items = Array.from(panel.querySelectorAll("li, .p-autocomplete-item"))
-                .filter(o => o.offsetParent !== null && o.textContent.trim().length > 0);
-              if (items.length > 0) {
-                const texts = items.map(o => o.textContent.trim().substring(0, 80));
-                // Find best match
-                let best = items[0];
+            // If any list items appeared, try to click the one matching our vehicle
+            if (overlayCheck.visibleListItems.length > 0) {
+              const selectResult = await page.evaluate((yr, mk) => {
+                const items = Array.from(document.querySelectorAll("ul li, [role='option'], [role='listbox'] li, .p-autocomplete-item"))
+                  .filter(li => li.offsetParent !== null && li.textContent.trim().length > 0);
+                let best = null;
                 for (const item of items) {
                   const t = item.textContent.toLowerCase();
-                  if ((year && t.includes(String(year))) && (make && t.includes(make.toLowerCase()))) {
+                  if ((yr && t.includes(String(yr))) && (mk && t.toLowerCase().includes(mk.toLowerCase()))) {
                     best = item; break;
                   }
                 }
-                best.click();
-                return { selected: true, text: best.textContent.trim().substring(0, 60), count: items.length, all: texts };
+                if (!best && items.length > 0) best = items[0];
+                if (best) {
+                  best.click();
+                  return { selected: true, text: best.textContent.trim().substring(0, 60) };
+                }
+                return { selected: false };
+              }, vehicle.year, vehicle.make);
+              console.log(`${LOG}   Selection from dropdown: ${JSON.stringify(selectResult)}`);
+              if (selectResult.selected) {
+                await sleep(2000);
+              }
+            } else {
+              // ── Attempt 3: Type in autocomplete + ArrowDown + Enter ──
+              console.log(`${LOG}   Attempt 3: Type + keyboard selection...`);
+              const vehInput = await page.$("#estimate-vehicle");
+              if (vehInput) {
+                // Set up network monitoring to see what API calls the autocomplete makes
+                const networkLogs = [];
+                const netHandler = (response) => {
+                  const url = response.url();
+                  if (url.includes("vehicle") || url.includes("customer") || url.includes("autocomplete")) {
+                    networkLogs.push({ url: url.substring(0, 120), status: response.status() });
+                  }
+                };
+                page.on("response", netHandler);
+
+                // Clear and type vehicle name
+                await vehInput.click({ clickCount: 3 });
+                await sleep(200);
+                await vehInput.type(vehicleStr || String(vehicle.year || ""), { delay: 80 });
+                await sleep(3000);
+
+                // Try ArrowDown + Enter to select first option (even if panel not visible to us)
+                await page.keyboard.press("ArrowDown");
+                await sleep(500);
+                await page.keyboard.press("Enter");
+                await sleep(2000);
+
+                page.off("response", netHandler);
+                if (networkLogs.length > 0) {
+                  console.log(`${LOG}   Network during autocomplete: ${JSON.stringify(networkLogs)}`);
+                } else {
+                  console.log(`${LOG}   No vehicle/customer network calls detected during typing`);
+                }
+
+                // Check if vehicle was selected
+                const afterType = await page.evaluate(() => {
+                  const v = document.querySelector("#estimate-vehicle");
+                  return { value: v?.value?.substring(0, 60) || "", placeholder: (v?.placeholder || "").substring(0, 40) };
+                });
+                console.log(`${LOG}   After type+enter: ${JSON.stringify(afterType)}`);
               }
             }
-
-            // Check if the input itself shows a selected value
-            const vehInput = document.querySelector("#estimate-vehicle");
-            if (vehInput && vehInput.value && !vehInput.value.includes("Select")) {
-              return { selected: true, text: vehInput.value.substring(0, 60), count: 0, all: ["input-has-value"] };
-            }
-
-            return { selected: false, count: 0, all: [] };
-          }, vehicle.year, vehicle.make);
-
-          console.log(`${LOG}   Result: ${optionResult.count} options, selected=${optionResult.selected}`);
-          if (optionResult.all?.length > 0) console.log(`${LOG}   Options: ${JSON.stringify(optionResult.all)}`);
+          }
+        } catch (reloadErr) {
+          console.log(`${LOG}   Reload/vehicle attempt error: ${reloadErr.message}`);
         }
 
-        console.log(`${LOG}   Autocomplete options: ${optionResult.count} found`);
-        if (optionResult.all?.length > 0) console.log(`${LOG}   Options: ${JSON.stringify(optionResult.all)}`);
+        // Final vehicle verification
+        await page.screenshot({ path: "/tmp/debug-after-vehicle.png" });
+        const finalVehicleCheck = await page.evaluate((yr, mk, mdl) => {
+          const text = document.body?.innerText || "";
+          const vStr = `${yr} ${mk} ${mdl}`.trim();
+          const vInput = document.querySelector("#estimate-vehicle");
+          const val = vInput?.value || "";
+          return {
+            vehicleInText: vStr ? text.includes(vStr) : false,
+            inputHasValue: !!val && !val.includes("Select"),
+            inputValue: val.substring(0, 60),
+          };
+        }, String(vehicle.year || ""), vehicle.make || "", vehicle.model || "");
 
-        if (optionResult.selected) {
-          console.log(`${LOG}   Selected vehicle: ${optionResult.text}`);
-          await sleep(2000);
+        if (finalVehicleCheck.vehicleInText || finalVehicleCheck.inputHasValue) {
+          console.log(`${LOG}   Vehicle linked ✓ (${finalVehicleCheck.inputValue || "in page text"})`);
         } else {
-          console.log(`${LOG}   No matching vehicle in autocomplete — trying direct input or "Add vehicle" button...`);
-
-          // Close autocomplete by pressing Escape
-          await page.keyboard.press("Escape");
-          await sleep(500);
-
-          // Look for "Vehicle" or "Add vehicle" button on the page (from customer sidebar)
-          const addVehResult = await page.evaluate(() => {
-            const btns = Array.from(document.querySelectorAll("button"))
-              .filter(b => b.offsetParent !== null);
-            // Find "Vehicle" button (btn-add-vehicle class from customer sidebar)
-            const addVeh = btns.find(b =>
-              b.classList.contains("btn-add-vehicle") ||
-              b.textContent.trim() === "Vehicle" ||
-              b.textContent.trim().toLowerCase().includes("add vehicle")
-            );
-            if (addVeh) {
-              addVeh.click();
-              return { clicked: true, text: addVeh.textContent.trim().substring(0, 40) };
-            }
-            return { clicked: false };
-          });
-
-          if (addVehResult.clicked) {
-            console.log(`${LOG}   Clicked: ${addVehResult.text}`);
-            await sleep(2000);
-          }
-
-          // Look for vehicle form fields in the sidebar
-          // IDs: vehicle-update-year0, vehicle-update-make0, vehicle-update-model0
-          const yearFilled = await fillField(page, '#vehicle-update-year0, input[placeholder="Year *"]', String(vehicle.year || ""));
-          const makeFilled = await fillField(page, '#vehicle-update-make0, input[placeholder="Make"]', vehicle.make || "");
-          const modelFilled = await fillField(page, '#vehicle-update-model0, input[placeholder="Model"]', vehicle.model || "");
-          const nameFilled = await fillField(page, '#vehicle-fleet-name0, input[placeholder*="Vehicle name"]',
-            `${vehicle.year || ""} ${vehicle.make || ""} ${vehicle.model || ""}`.trim());
-
-          console.log(`${LOG}   Vehicle form fill: year=${yearFilled}, make=${makeFilled}, model=${modelFilled}, name=${nameFilled}`);
-
-          if (yearFilled || makeFilled) {
-            // Click Save button in the sidebar
-            const saved = await page.evaluate(() => {
-              const btns = Array.from(document.querySelectorAll("button"))
-                .filter(b => b.offsetParent !== null && !b.disabled && b.textContent.trim() === "Save");
-              // Prefer sidebar save
-              for (const btn of btns) {
-                const inSidebar = btn.closest('[class*="sidebar"], [class*="customer-panel"], [class*="drawer"]');
-                if (inSidebar) { btn.click(); return { clicked: true, context: "sidebar" }; }
-              }
-              if (btns.length > 0) { btns[0].click(); return { clicked: true, context: "first" }; }
-              return { clicked: false };
-            });
-            console.log(`${LOG}   Save result: ${JSON.stringify(saved)}`);
-            await sleep(3000);
-          }
+          console.log(`${LOG}   WARNING: Vehicle still not linked in UI after all attempts`);
+          result.warnings.push({ code: "NO_VEHICLE_UI", msg: "Vehicle not selected in AutoLeap UI — PartsTech SSO may fail" });
         }
-      } else {
-        console.log(`${LOG}   #estimate-vehicle input not found — vehicle selection unavailable`);
-      }
-
-      await page.screenshot({ path: "/tmp/debug-after-vehicle.png" });
-      // Verify vehicle is now linked (check input value, not just placeholder text)
-      const stillNeedsVehicle = await page.evaluate(() => {
-        const vehInput = document.querySelector("#estimate-vehicle");
-        if (vehInput) {
-          // If input still has "Select vehicle" placeholder and no value → still needs vehicle
-          const val = vehInput.value || "";
-          const placeholder = vehInput.placeholder || "";
-          return !val || placeholder.includes("Select vehicle");
-        }
-        return (document.body?.innerText || "").includes("Select vehicle");
-      }).catch(() => false);
-      if (stillNeedsVehicle) {
-        console.log(`${LOG}   WARNING: Vehicle still not linked after browser attempt`);
-        result.warnings.push({ code: "NO_VEHICLE", msg: "Vehicle not linked to estimate" });
-      } else {
-        console.log(`${LOG}   Vehicle linked ✓`);
-      }
       } catch (vehErr) {
-        console.log(`${LOG} Phase 2b vehicle error: ${vehErr.message} — continuing without vehicle`);
+        console.log(`${LOG} Phase 2b vehicle error: ${vehErr.message} — continuing`);
         result.warnings.push({ code: "VEHICLE_ERROR", msg: vehErr.message });
       }
-    } else if (!needsVehicle) {
-      console.log(`${LOG} Vehicle already linked ✓`);
     }
 
     // ═══════════════════════════════════════════════════════════════════════════
@@ -642,17 +654,68 @@ async function createEstimateWithCustomerVehicle(page, customer, vehicle) {
     return { success: false, error: `Estimate creation failed: ${err.message}` };
   }
 
-  // Step 2d: Navigate browser to the estimate page
-  // First go to workboard to reset Angular SPA state (avoids 404 loop)
-  console.log(`${LOG} Navigating to workboard first (reset SPA state)...`);
+  // Step 2e: Navigate browser to the estimate page
+  // Strategy: go to workboard → try clicking estimate from list (natural Angular routing)
+  //           → fall back to hash navigation → fall back to page.goto
+  console.log(`${LOG} Navigating to workboard...`);
   await page.goto(`${AUTOLEAP_APP_URL}/#/workboard`, { waitUntil: "domcontentloaded", timeout: 30000 });
-  await sleep(3000);
+  await sleep(4000);
 
-  // Navigate to the estimate page — correct pattern: /#/estimate/{id} (singular)
-  const estUrl = `${AUTOLEAP_APP_URL}/#/estimate/${estimateId}`;
-  console.log(`${LOG} Navigating to estimate: ${estUrl}`);
-  await page.goto(estUrl, { waitUntil: "domcontentloaded", timeout: 30000 });
-  await sleep(5000);
+  // Try to find and click the estimate from the workboard (most natural Angular flow)
+  let navigatedViaWorkboard = false;
+  if (roNumber) {
+    const wbClick = await page.evaluate((ro, custName) => {
+      // AutoLeap workboard is Kanban-style — look for cards/rows with the RO number
+      const allEls = document.querySelectorAll("a, [class*='card'], [class*='estimate'], td, span, div");
+      for (const el of allEls) {
+        const text = (el.textContent || "").trim();
+        if (text.includes(ro)) {
+          // Click the closest <a> or the element itself
+          const link = el.closest("a") || el.querySelector("a") || el;
+          link.click();
+          return { clicked: true, method: "ro", text: text.substring(0, 80) };
+        }
+      }
+      // Try by customer name
+      if (custName) {
+        for (const el of allEls) {
+          const text = (el.textContent || "").trim();
+          if (text.includes(custName) && (el.closest("a") || el.tagName === "A")) {
+            const link = el.closest("a") || el;
+            link.click();
+            return { clicked: true, method: "customer", text: text.substring(0, 80) };
+          }
+        }
+      }
+      return { clicked: false };
+    }, roNumber, customerName);
+
+    if (wbClick.clicked) {
+      console.log(`${LOG} Clicked estimate from workboard: ${wbClick.method} — "${wbClick.text}"`);
+      await sleep(5000);
+      const curUrl = page.url();
+      if (curUrl.includes("/estimate/") || curUrl.includes(estimateId)) {
+        navigatedViaWorkboard = true;
+        console.log(`${LOG} Navigation via workboard ✓ — ${curUrl.substring(0, 80)}`);
+      }
+    }
+  }
+
+  if (!navigatedViaWorkboard) {
+    // Fall back to hash-based navigation (lighter than full page.goto, triggers Angular router)
+    console.log(`${LOG} Navigating to estimate via hash: /#/estimate/${estimateId}`);
+    await page.evaluate((id) => { window.location.hash = `/estimate/${id}`; }, estimateId);
+    await sleep(5000);
+
+    const curUrl = page.url();
+    if (!curUrl.includes("/estimate/")) {
+      // Nuclear fallback: full page.goto
+      const estUrl = `${AUTOLEAP_APP_URL}/#/estimate/${estimateId}`;
+      console.log(`${LOG} Hash navigation failed — trying full goto: ${estUrl}`);
+      await page.goto(estUrl, { waitUntil: "domcontentloaded", timeout: 30000 });
+      await sleep(5000);
+    }
+  }
 
   let currentUrl = page.url();
   console.log(`${LOG} Current URL: ${currentUrl}`);
@@ -669,9 +732,29 @@ async function createEstimateWithCustomerVehicle(page, customer, vehicle) {
 
   await page.screenshot({ path: "/tmp/debug-estimate-page.png" });
 
-  // Dump the page to see what's available
+  // Check vehicle status on the page
+  const vehiclePageCheck = await page.evaluate((year, make, model) => {
+    const text = document.body?.innerText || "";
+    const vStr = `${year} ${make} ${model}`.trim();
+    const vInput = document.querySelector("#estimate-vehicle");
+    const dropdownBtn = document.querySelector(".p-autocomplete-dropdown");
+    // Check all possible overlay containers
+    const overlays = document.querySelectorAll(
+      ".p-autocomplete-panel, .p-autocomplete-overlay, .p-overlay, .p-connected-overlay, .cdk-overlay-pane, [class*='autocomplete']"
+    );
+    return {
+      vehicleInText: vStr ? text.includes(vStr) : false,
+      inputValue: vInput?.value?.substring(0, 60) || "",
+      placeholder: (vInput?.placeholder || vInput?.getAttribute("placeholder") || "").substring(0, 40),
+      hasDropdownBtn: !!dropdownBtn,
+      overlayCount: overlays.length,
+      inputExists: !!vInput,
+    };
+  }, String(vehicle.year || ""), vehicle.make || "", vehicle.model || "");
+  console.log(`${LOG} Vehicle page check: ${JSON.stringify(vehiclePageCheck)}`);
+
+  // Dump visible buttons and tabs
   const pageDump = await page.evaluate(() => {
-    const url = window.location.href;
     const visibleButtons = Array.from(document.querySelectorAll("button"))
       .filter(b => b.offsetParent !== null)
       .map(b => b.textContent.trim().substring(0, 50))
@@ -682,7 +765,7 @@ async function createEstimateWithCustomerVehicle(page, customer, vehicle) {
       .map(t => t.textContent.trim().substring(0, 30))
       .filter(t => t.length > 0)
       .slice(0, 15);
-    return { url, visibleButtons, tabs };
+    return { visibleButtons, tabs };
   });
   console.log(`${LOG} Buttons: ${JSON.stringify(pageDump.visibleButtons)}`);
   console.log(`${LOG} Tabs: ${JSON.stringify(pageDump.tabs)}`);
@@ -691,6 +774,7 @@ async function createEstimateWithCustomerVehicle(page, customer, vehicle) {
     success: true,
     estimateId,
     roNumber,
+    vehicleInPage: vehiclePageCheck.vehicleInText || !!vehiclePageCheck.inputValue,
   };
 }
 
