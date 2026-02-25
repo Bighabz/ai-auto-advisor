@@ -19,7 +19,7 @@ const path = require("path");
 const { LOGIN, CUSTOMER, ESTIMATE, PARTS_TAB, SERVICES } = require("./helpers/selectors");
 const { openPartsTechTab, searchAndAddToCart, submitCartToAutoLeap } = require("./helpers/pt-tab");
 const { navigateMotorTree } = require("./helpers/motor-nav");
-const { getToken, searchCustomer, createCustomer, createVehicle, createEstimate } = require("./autoleap-api");
+const { getToken, searchCustomer, createCustomer, createVehicle, createEstimate, getEstimate } = require("./autoleap-api");
 
 const LOG = "[playbook]";
 const CHROME_CDP_URL = "http://127.0.0.1:18800";
@@ -95,6 +95,17 @@ async function runPlaybook({ customer, vehicle, diagnosis, parts, progressCallba
     result.estimateId = createResult.estimateId;
     result.roNumber = createResult.roNumber;
     console.log(`${LOG} Phase 2: "Save & Create Estimate" → ${result.roNumber || result.estimateId}`);
+
+    // Debug: check estimate via API to verify vehicle linkage
+    try {
+      const token = await getToken();
+      const estData = await getEstimate(token, result.estimateId);
+      const vehData = estData?.vehicle || estData?.vehicleId || "none";
+      const custData = estData?.customer?.fullName || estData?.customerId || "none";
+      console.log(`${LOG} API verify: customer=${typeof custData === 'string' ? custData : JSON.stringify(custData)}, vehicle=${typeof vehData === 'string' ? vehData : JSON.stringify(vehData)}`);
+    } catch (verifyErr) {
+      console.log(`${LOG} API verify failed: ${verifyErr.message}`);
+    }
 
     // Wait for estimate page to settle
     await sleep(3000);
@@ -282,8 +293,16 @@ async function runPlaybook({ customer, vehicle, diagnosis, parts, progressCallba
           if (iframeEl) {
             ptWorkPage = await iframeEl.contentFrame();
             if (ptWorkPage) {
-              console.log(`${LOG} Phase 3: Got iframe frame, URL: ${ptWorkPage.url().substring(0, 80)}`);
-              await sleep(3000); // Let iframe content load
+              const iframeUrl = ptWorkPage.url() || "";
+              console.log(`${LOG} Phase 3: Got iframe frame, URL: ${iframeUrl.substring(0, 80)}`);
+              // Check if SSO failed (chrome-error page means PartsTech couldn't load)
+              if (iframeUrl.includes("chrome-error") || iframeUrl === "about:blank") {
+                console.log(`${LOG} Phase 3: PartsTech SSO failed (iframe shows error page)`);
+                console.log(`${LOG}   This usually means no vehicle is linked to the estimate`);
+                ptWorkPage = null;
+              } else {
+                await sleep(3000); // Let iframe content load
+              }
             }
           }
         } catch (iframeErr) {

@@ -56,7 +56,7 @@ const PARTS_TAB = {
 // ─── PartsTech (New Tab) ────────────────────────────────────────────────────
 const PARTSTECH = {
   VEHICLE_BANNER: 'div.vehicle-info-banner, [class*="vehicle-header"], [class*="vehicle-info"]',
-  SEARCH_INPUT: 'input[placeholder*="Search by job, product"], input[data-testid="global-search-input"], input[name="searchQuery"]',
+  SEARCH_INPUT: 'input[placeholder*="Search by job"], input[data-testid="global-search-input"], input[name="searchQuery"]',
   PRODUCT_CARD: '.product-card-container, div[data-testid="product-card"], .search-result-item, .product-card',
   PRICE: '.price-value, .price-amount, .product-price, span[class*="price"]',
   OUT_OF_STOCK: '[class*="out-of-stock"], [class*="unavailable"]',
