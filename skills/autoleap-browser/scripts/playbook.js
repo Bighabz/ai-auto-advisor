@@ -534,11 +534,12 @@ async function runPlaybook({ customer, vehicle, diagnosis, parts, progressCallba
             rect: (() => { const r = el.getBoundingClientRect(); return r.width > 0 ? { x: r.x + r.width / 2, y: r.y + r.height / 2 } : null; })(),
           }));
 
-          // Look for motor/wrench/settings icons specifically
+          // Look for MOTOR connection icon — it's fa-unlink (yellow = not connected)
           const motorBtn = icons.find(el => {
             const cls = (el.className || "").toLowerCase();
             const title = (el.title || el.getAttribute("aria-label") || "").toLowerCase();
-            return cls.includes("wrench") || cls.includes("motor") || cls.includes("settings") ||
+            return cls.includes("unlink") || cls.includes("link") ||
+                   cls.includes("wrench") || cls.includes("motor") || cls.includes("settings") ||
                    cls.includes("cog") || cls.includes("gear") || cls.includes("tools") ||
                    title.includes("motor") || title.includes("vehicle") || title.includes("connect");
           });
