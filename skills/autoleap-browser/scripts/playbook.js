@@ -112,9 +112,11 @@ async function runPlaybook({ customer, vehicle, diagnosis, parts, progressCallba
 
     // ═══════════════════════════════════════════════════════════════════════════
     // PHASE 2b: Select CUSTOMER then VEHICLE in Angular UI
-    // The API links them in the database, but Angular's PrimeNG autocompletes
-    // need both selected in the UI for PartsTech SSO and MOTOR to work.
-    // Key insight: vehicle autocomplete depends on customer being selected first.
+    //
+    // From screenshots: clicking #estimate-customer opens a SIDEBAR (not dropdown).
+    // The sidebar triggers Angular to load customer data including vehicles.
+    // The vehicle autocomplete only works AFTER the customer data is loaded.
+    // Strategy: Clear customer × → re-search → re-select → vehicle populates
     // ═══════════════════════════════════════════════════════════════════════════
     const vehicleStr = `${vehicle.year || ""} ${vehicle.make || ""} ${vehicle.model || ""}`.trim();
     const vehicleAlreadyInPage = createResult.vehicleInPage;
@@ -125,234 +127,299 @@ async function runPlaybook({ customer, vehicle, diagnosis, parts, progressCallba
       try {
         console.log(`${LOG} Phase 2b: Customer/vehicle not in UI — selecting via autocomplete...`);
 
-        // First, discover ALL autocomplete inputs on the page
-        const autoCompleteFields = await page.evaluate(() => {
-          const inputs = Array.from(document.querySelectorAll("input"));
-          return inputs
-            .filter(i => i.offsetParent !== null)
-            .map(i => ({
-              id: i.id || "",
-              name: i.name || "",
-              placeholder: (i.placeholder || "").substring(0, 50),
-              value: (i.value || "").substring(0, 50),
-              type: i.type || "",
-              classes: (i.className || "").substring(0, 60),
-              parentClasses: (i.parentElement?.className || "").substring(0, 60),
-            }))
-            .filter(i => i.placeholder.toLowerCase().includes("select") ||
-                         i.id.includes("estimate") ||
-                         i.parentClasses.includes("autocomplete") ||
-                         i.classes.includes("autocomplete"))
-            .slice(0, 10);
-        });
-        console.log(`${LOG}   Autocomplete fields: ${JSON.stringify(autoCompleteFields)}`);
+        // ── Step A: Clear the customer × button and re-select via autocomplete ──
+        // The customer shows "undefined -" (broken display). Clear it and re-search.
+        console.log(`${LOG}   Step A: Clearing customer selection to trigger fresh load...`);
 
-        // Set up network monitoring for ALL API calls during selection
-        const networkLogs = [];
-        const netHandler = (response) => {
-          const url = response.url();
-          if (url.includes("api.myautoleap.com") || url.includes("partstech")) {
-            networkLogs.push({ url: url.substring(url.lastIndexOf("/"), url.lastIndexOf("/") + 60), status: response.status() });
-          }
-        };
-        page.on("response", netHandler);
+        // Find the × button near the customer field to clear it
+        const clearResult = await page.evaluate(() => {
+          const custInput = document.querySelector("#estimate-customer");
+          if (!custInput) return { cleared: false, reason: "no input" };
 
-        // ── Step A: Select CUSTOMER in the customer autocomplete ──
-        // The customer field is likely #estimate-customer or similar
-        const customerInputId = autoCompleteFields.find(f =>
-          f.id.includes("customer") || f.placeholder.toLowerCase().includes("customer")
-        )?.id;
+          // Search up the DOM tree for a close/clear button
+          let container = custInput;
+          for (let i = 0; i < 5; i++) {
+            container = container.parentElement;
+            if (!container) break;
 
-        const customerSelector = customerInputId
-          ? `#${customerInputId}`
-          : 'input[placeholder*="customer" i], input[placeholder*="Customer" i], input[placeholder*="Select customer" i]';
+            // Look for × / close icons
+            const closeEls = Array.from(container.querySelectorAll(
+              "i.pi-times, i.fa-times, i[class*='close'], i[class*='times'], " +
+              "span[class*='close'], span[class*='times'], span[class*='clear'], " +
+              "button[class*='close'], [class*='remove-icon']"
+            )).filter(el => el.offsetParent !== null || el.offsetWidth > 0);
 
-        console.log(`${LOG}   Step A: Selecting customer "${customer.name}" (selector: ${customerSelector})...`);
-        const custInput = await findFirstElement(page, customerSelector);
-        let customerSelected = false;
-
-        if (custInput) {
-          // Type customer name (use phone for more precise match)
-          const searchTerm = customer.phone || customer.name || "";
-          await custInput.click({ clickCount: 3 });
-          await sleep(200);
-          await custInput.type(searchTerm, { delay: 80 });
-          await sleep(3000);
-
-          await page.screenshot({ path: "/tmp/debug-customer-autocomplete.png" });
-
-          // Look for customer in dropdown (EXCLUDE nav items)
-          const NAV_TEXTS = ["Dashboard", "Work Board", "Calendar", "Customers", "Catalog", "Inventory", "CRM", "Reviews", "Reports", "User Center"];
-          customerSelected = await page.evaluate((custName, custPhone, navTexts) => {
-            const items = Array.from(document.querySelectorAll(
-              ".p-autocomplete-panel li, .p-autocomplete-items li, [class*='autocomplete'] li, [role='option'], [role='listbox'] li"
-            )).filter(li => {
-              if (!li.offsetParent) return false;
-              const t = li.textContent.trim();
-              if (!t || navTexts.includes(t)) return false;
-              // Exclude nav sidebar items
-              const inNav = li.closest("nav, [class*='sidebar-nav'], [class*='nav-menu']");
-              return !inNav;
-            });
-
-            if (items.length === 0) return { selected: false, count: 0, items: [] };
-
-            const texts = items.map(li => li.textContent.trim().substring(0, 60));
-            // Find best match (by name or phone)
-            let best = null;
-            for (const item of items) {
-              const t = item.textContent.toLowerCase();
-              if (custPhone && t.includes(custPhone)) { best = item; break; }
-              if (custName && t.toLowerCase().includes(custName.toLowerCase())) { best = item; break; }
+            for (const el of closeEls) {
+              // Skip elements that are far from the customer field (in sidebar, etc.)
+              const inputRect = custInput.getBoundingClientRect();
+              const elRect = el.getBoundingClientRect();
+              const distance = Math.abs(elRect.top - inputRect.top);
+              if (distance < 30) {
+                el.click();
+                return { cleared: true, class: (el.className || "").substring(0, 40), tag: el.tagName };
+              }
             }
-            if (!best) best = items[0]; // take first non-nav option
-            best.click();
-            return { selected: true, text: best.textContent.trim().substring(0, 60), count: items.length, items: texts };
-          }, customer.name, customer.phone, NAV_TEXTS);
-
-          console.log(`${LOG}   Customer dropdown: ${JSON.stringify(customerSelected)}`);
-
-          if (customerSelected.selected) {
-            console.log(`${LOG}   Customer selected: "${customerSelected.text}"`);
-            await sleep(3000); // Wait for vehicle list to load after customer selection
-          } else {
-            // Try keyboard: ArrowDown + Enter
-            console.log(`${LOG}   No customer dropdown items — trying ArrowDown+Enter...`);
-            await page.keyboard.press("ArrowDown");
-            await sleep(500);
-            await page.keyboard.press("Enter");
-            await sleep(2000);
           }
-        } else {
-          console.log(`${LOG}   Customer autocomplete input not found`);
-          // Check if customer is already shown (maybe in a different format)
-          const custCheck = await page.evaluate((name) => {
-            const text = document.body?.innerText || "";
-            return { inText: name ? text.includes(name) : false };
-          }, customer.name);
-          if (custCheck.inText) {
-            console.log(`${LOG}   Customer "${customer.name}" already in page text ✓`);
-            customerSelected = { selected: true };
+
+          // Alternative: look for × text in nearby elements
+          const row = custInput.closest("[class*='row'], [class*='header'], [class*='customer']") || custInput.parentElement?.parentElement?.parentElement;
+          if (row) {
+            const allEls = row.querySelectorAll("*");
+            for (const el of allEls) {
+              if (el.textContent.trim() === "×" && el.children.length === 0 && el.offsetParent !== null) {
+                el.click();
+                return { cleared: true, text: "×" };
+              }
+            }
           }
-        }
 
-        // ── Step B: Select VEHICLE in the vehicle autocomplete ──
-        console.log(`${LOG}   Step B: Selecting vehicle "${vehicleStr}"...`);
-        const vehInput = await page.$("#estimate-vehicle");
-        let vehicleSelected = false;
+          return { cleared: false, reason: "no close button found" };
+        });
+        console.log(`${LOG}   Clear customer result: ${JSON.stringify(clearResult)}`);
 
-        if (vehInput) {
-          // Clear and type vehicle identifier
-          await vehInput.click({ clickCount: 3 });
-          await sleep(200);
-          // Try shorter search terms — autocomplete might match partial
-          const vehSearchTerms = [
-            String(vehicle.year || ""),
-            vehicle.make || "",
-            vehicleStr,
-          ].filter(t => t.length > 0);
-
-          for (const term of vehSearchTerms) {
-            if (vehicleSelected) break;
-            await vehInput.click({ clickCount: 3 });
-            await sleep(200);
-            await vehInput.type(term, { delay: 80 });
+        if (clearResult.cleared) {
+          await sleep(2000);
+          // Now search for the customer by name
+          const custInput = await page.$("#estimate-customer");
+          if (custInput) {
+            const firstName = (customer.name || "").split(/\s+/)[0] || "";
+            console.log(`${LOG}   Searching for customer "${firstName}"...`);
+            await custInput.click();
+            await sleep(300);
+            await custInput.type(firstName, { delay: 100 });
             await sleep(3000);
 
+            await page.screenshot({ path: "/tmp/debug-customer-autocomplete.png" });
+
+            // Check for dropdown results (not sidebar)
             const NAV_TEXTS = ["Dashboard", "Work Board", "Calendar", "Customers", "Catalog", "Inventory", "CRM", "Reviews", "Reports", "User Center"];
-            const vehDropdown = await page.evaluate((yr, mk, navTexts) => {
+            const custDropdown = await page.evaluate((name, phone, navTexts) => {
               const items = Array.from(document.querySelectorAll(
-                ".p-autocomplete-panel li, .p-autocomplete-items li, [class*='autocomplete'] li, [role='option'], [role='listbox'] li"
+                ".p-autocomplete-panel li, .p-autocomplete-items li, " +
+                "[class*='autocomplete'] [class*='list'] li, [role='option']"
               )).filter(li => {
                 if (!li.offsetParent) return false;
                 const t = li.textContent.trim();
-                if (!t || navTexts.includes(t)) return false;
+                if (!t || t.length < 3) return false;
+                if (navTexts.includes(t)) return false;
                 const inNav = li.closest("nav, [class*='sidebar-nav'], [class*='nav-menu']");
                 return !inNav;
               });
+              const texts = items.map(li => li.textContent.trim().substring(0, 80));
 
-              if (items.length === 0) return { count: 0, items: [] };
-              const texts = items.map(li => li.textContent.trim().substring(0, 60));
-
+              // Find best match
               let best = null;
               for (const item of items) {
                 const t = item.textContent.toLowerCase();
-                if ((yr && t.includes(String(yr))) && (mk && t.toLowerCase().includes(mk.toLowerCase()))) {
-                  best = item; break;
-                }
-              }
-              if (!best) {
-                // Check for any vehicle-looking option (has a year number)
-                for (const item of items) {
-                  const t = item.textContent.trim();
-                  if (/\b(19|20)\d{2}\b/.test(t)) { best = item; break; }
-                }
+                if (name && t.includes(name.toLowerCase())) { best = item; break; }
+                if (phone && t.includes(phone)) { best = item; break; }
               }
               if (!best && items.length > 0) best = items[0];
               if (best) {
                 best.click();
-                return { selected: true, text: best.textContent.trim().substring(0, 60), count: items.length, items: texts };
+                return { selected: true, text: best.textContent.trim().substring(0, 80), count: items.length, all: texts };
               }
-              return { selected: false, count: items.length, items: texts };
-            }, vehicle.year, vehicle.make, NAV_TEXTS);
+              return { selected: false, count: items.length, all: texts };
+            }, customer.name, customer.phone, NAV_TEXTS);
 
-            console.log(`${LOG}   Vehicle dropdown (term="${term}"): ${JSON.stringify(vehDropdown)}`);
-            if (vehDropdown.selected) {
+            console.log(`${LOG}   Customer search result: ${JSON.stringify(custDropdown)}`);
+            if (custDropdown.selected) {
+              console.log(`${LOG}   Customer re-selected: "${custDropdown.text}"`);
+              await sleep(5000); // Wait for Angular to load customer data + vehicles
+            }
+          }
+        } else {
+          // Couldn't clear via × button — try clicking customer field to trigger sidebar/data load
+          console.log(`${LOG}   Could not clear via × — clicking customer to trigger data load...`);
+          const custInput = await page.$("#estimate-customer");
+          if (custInput) {
+            await custInput.click();
+            await sleep(3000);
+            // Close any sidebar that opened (Escape key)
+            await page.keyboard.press("Escape");
+            await sleep(2000);
+          }
+        }
+
+        // ── Close any sidebar/overlay that's blocking the vehicle field ──
+        await page.keyboard.press("Escape");
+        await sleep(1000);
+
+        // Click somewhere neutral to close any popups
+        await page.mouse.click(600, 500);
+        await sleep(1000);
+
+        await page.screenshot({ path: "/tmp/debug-before-vehicle-select.png" });
+
+        // ── Step B: Select VEHICLE from autocomplete ──
+        // After customer data is loaded, the vehicle autocomplete should have options
+        console.log(`${LOG}   Step B: Selecting vehicle "${vehicleStr}"...`);
+
+        // Check the current state of the vehicle field
+        const vehState = await page.evaluate(() => {
+          const v = document.querySelector("#estimate-vehicle");
+          if (!v) return { exists: false };
+          const wrapper = v.closest("[class*='vehicle']") || v.parentElement?.parentElement;
+          const wrapperText = wrapper?.textContent?.trim()?.substring(0, 80) || "";
+          return {
+            exists: true,
+            value: (v.value || "").substring(0, 60),
+            placeholder: (v.placeholder || "").substring(0, 40),
+            wrapperText,
+            // Check if PT button is still disabled
+            ptDisabled: !!document.querySelector('.ro-partstech-new button.if-disabled'),
+          };
+        });
+        console.log(`${LOG}   Vehicle state: ${JSON.stringify(vehState)}`);
+
+        // If vehicle already appears in the wrapper text (not just the input), it may be selected
+        if (vehState.wrapperText.includes(String(vehicle.year)) && vehState.wrapperText.includes(vehicle.make || "")) {
+          console.log(`${LOG}   Vehicle appears in wrapper text — may be auto-selected ✓`);
+        }
+
+        const vehInput = await page.$("#estimate-vehicle");
+        let vehicleSelected = false;
+
+        if (vehInput && (!vehState.value || vehState.value.includes("Select") || vehState.placeholder.includes("Select"))) {
+          // Try clicking the vehicle input to see if a dropdown appears
+          await vehInput.click();
+          await sleep(2000);
+
+          // Check for dropdown
+          const NAV_TEXTS = ["Dashboard", "Work Board", "Calendar", "Customers", "Catalog", "Inventory", "CRM", "Reviews", "Reports", "User Center"];
+
+          // First check what appeared after clicking
+          const afterClick = await page.evaluate((navTexts) => {
+            const items = Array.from(document.querySelectorAll(
+              ".p-autocomplete-panel li, .p-autocomplete-items li, " +
+              "[class*='autocomplete'] [class*='list'] li, [role='option']"
+            )).filter(li => {
+              if (!li.offsetParent) return false;
+              const t = li.textContent.trim();
+              return t.length > 0 && !navTexts.includes(t) &&
+                !li.closest("nav, [class*='sidebar-nav'], [class*='nav-menu']");
+            });
+            return {
+              count: items.length,
+              items: items.map(li => li.textContent.trim().substring(0, 60)).slice(0, 10),
+            };
+          }, NAV_TEXTS);
+          console.log(`${LOG}   After vehicle click: ${afterClick.count} dropdown items`);
+
+          if (afterClick.count > 0) {
+            // Dropdown appeared on click! Select matching vehicle
+            const selectResult = await page.evaluate((yr, mk, navTexts) => {
+              const items = Array.from(document.querySelectorAll(
+                ".p-autocomplete-panel li, .p-autocomplete-items li, " +
+                "[class*='autocomplete'] [class*='list'] li, [role='option']"
+              )).filter(li => {
+                if (!li.offsetParent) return false;
+                const t = li.textContent.trim();
+                return t.length > 0 && !navTexts.includes(t) &&
+                  !li.closest("nav, [class*='sidebar-nav'], [class*='nav-menu']");
+              });
+              let best = null;
+              for (const item of items) {
+                const t = item.textContent.toLowerCase();
+                if ((yr && t.includes(String(yr))) && (mk && t.includes(mk.toLowerCase()))) {
+                  best = item; break;
+                }
+              }
+              if (!best && items.length > 0) best = items[0];
+              if (best) { best.click(); return { selected: true, text: best.textContent.trim().substring(0, 60) }; }
+              return { selected: false };
+            }, vehicle.year, vehicle.make, NAV_TEXTS);
+            if (selectResult.selected) {
               vehicleSelected = true;
-              console.log(`${LOG}   Vehicle selected: "${vehDropdown.text}"`);
+              console.log(`${LOG}   Vehicle selected from dropdown: "${selectResult.text}"`);
               await sleep(2000);
             }
           }
 
           if (!vehicleSelected) {
-            // Last resort: ArrowDown + Enter
-            console.log(`${LOG}   No vehicle dropdown — trying ArrowDown+Enter...`);
+            // Type to search
+            await vehInput.click({ clickCount: 3 });
+            await sleep(200);
+            await vehInput.type(String(vehicle.year || ""), { delay: 80 });
+            await sleep(3000);
+
+            const typed = await page.evaluate((yr, mk, navTexts) => {
+              const items = Array.from(document.querySelectorAll(
+                ".p-autocomplete-panel li, .p-autocomplete-items li, " +
+                "[class*='autocomplete'] [class*='list'] li, [role='option']"
+              )).filter(li => {
+                if (!li.offsetParent) return false;
+                const t = li.textContent.trim();
+                return t.length > 0 && !navTexts.includes(t) &&
+                  !li.closest("nav, [class*='sidebar-nav'], [class*='nav-menu']");
+              });
+              if (items.length === 0) return { count: 0 };
+              let best = null;
+              for (const item of items) {
+                const t = item.textContent.toLowerCase();
+                if ((yr && t.includes(String(yr))) && (mk && t.includes(mk.toLowerCase()))) {
+                  best = item; break;
+                }
+              }
+              if (!best && items.length > 0) best = items[0];
+              if (best) { best.click(); return { selected: true, text: best.textContent.trim().substring(0, 60), count: items.length }; }
+              return { selected: false, count: items.length };
+            }, vehicle.year, vehicle.make, NAV_TEXTS);
+            console.log(`${LOG}   Vehicle type search: ${JSON.stringify(typed)}`);
+            if (typed.selected) {
+              vehicleSelected = true;
+              await sleep(2000);
+            }
+          }
+
+          if (!vehicleSelected) {
+            // Try ArrowDown + Enter
             await page.keyboard.press("ArrowDown");
             await sleep(500);
             await page.keyboard.press("Enter");
             await sleep(2000);
           }
-        } else {
-          console.log(`${LOG}   #estimate-vehicle input not found`);
         }
 
-        page.off("response", netHandler);
-        if (networkLogs.length > 0) {
-          console.log(`${LOG}   Network during selection: ${JSON.stringify(networkLogs.slice(0, 10))}`);
-        }
-
-        // ── Verify we're still on the estimate page (nav items may have been clicked) ──
-        const curUrlAfterVeh = page.url();
-        if (!curUrlAfterVeh.includes("/estimate/")) {
-          console.log(`${LOG}   WARNING: Navigated away from estimate (${curUrlAfterVeh.substring(0, 60)}) — going back`);
+        // ── Verify we're still on the estimate page ──
+        if (!page.url().includes("/estimate/")) {
+          console.log(`${LOG}   WARNING: Navigated away — going back to estimate`);
           await page.evaluate((id) => { window.location.hash = `/estimate/${id}`; }, result.estimateId);
           await sleep(5000);
         }
 
-        // Final verification
+        // ── Final verification using PT button disabled state (most reliable indicator) ──
         await page.screenshot({ path: "/tmp/debug-after-vehicle.png" });
         const finalCheck = await page.evaluate((yr, mk, mdl) => {
-          const text = document.body?.innerText || "";
-          const vStr = `${yr} ${mk} ${mdl}`.trim();
           const vInput = document.querySelector("#estimate-vehicle");
           const val = vInput?.value || "";
+          // Check wrapper text (PrimeNG might show value in span, not input)
+          const wrapper = vInput?.closest("[class*='vehicle']") || vInput?.parentElement?.parentElement;
+          const wrapperText = wrapper?.textContent?.trim() || "";
+          const vStr = `${yr} ${mk} ${mdl}`.trim();
+          // Check if PT button lost its disabled class
+          const ptDisabled = !!document.querySelector(".ro-partstech-new button.if-disabled");
           return {
-            vehicleInText: vStr ? text.includes(vStr) : false,
-            inputHasValue: !!val && !val.includes("Select"),
+            vehicleInWrapper: vStr ? wrapperText.includes(yr) && wrapperText.includes(mk) : false,
             inputValue: val.substring(0, 60),
+            ptDisabled,
+            wrapperText: wrapperText.substring(0, 80),
           };
         }, String(vehicle.year || ""), vehicle.make || "", vehicle.model || "");
+        console.log(`${LOG}   Final check: ${JSON.stringify(finalCheck)}`);
 
-        if (finalCheck.vehicleInText || finalCheck.inputHasValue) {
-          console.log(`${LOG}   Vehicle linked ✓ (${finalCheck.inputValue || "in page text"})`);
+        if (finalCheck.vehicleInWrapper && !finalCheck.ptDisabled) {
+          console.log(`${LOG}   Vehicle selected AND PT enabled ✓`);
+        } else if (finalCheck.vehicleInWrapper) {
+          console.log(`${LOG}   Vehicle text visible but PT still disabled — may be typed text only`);
+          result.warnings.push({ code: "VEHICLE_TEXT_ONLY", msg: "Vehicle shows in UI but may not be properly selected" });
         } else {
-          console.log(`${LOG}   WARNING: Vehicle still not linked in UI`);
+          console.log(`${LOG}   WARNING: Vehicle not linked in UI`);
           result.warnings.push({ code: "NO_VEHICLE_UI", msg: "Vehicle not selected in AutoLeap UI — PartsTech SSO may fail" });
         }
       } catch (vehErr) {
         console.log(`${LOG} Phase 2b error: ${vehErr.message} — continuing`);
         result.warnings.push({ code: "VEHICLE_ERROR", msg: vehErr.message });
-        // Ensure we're still on estimate page
         if (!page.url().includes("/estimate/")) {
           await page.evaluate((id) => { window.location.hash = `/estimate/${id}`; }, result.estimateId);
           await sleep(5000);
