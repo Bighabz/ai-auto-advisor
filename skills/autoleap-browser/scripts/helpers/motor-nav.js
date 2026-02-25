@@ -67,144 +67,195 @@ async function navigateMotorTree(page, diagnosis, vehicle) {
   });
   console.log(`${LOG} Dialog state: ${JSON.stringify(dialogState)}`);
 
-  // ── Step 3a: Try clicking MOTOR Primary tab (even if grayed out) ──
-  // From screenshots: tabs are [AutoLeap] [MOTOR Primary] [MOTOR Secondary] [Magic Services]
-  // MOTOR Primary is grayed when "Vehicle is not linked" — clicking may trigger linking
+  // ── Step 3a: Find all MOTOR-related elements in the Browse dialog ──
   let motorTabFound = false;
 
-  console.log(`${LOG} Looking for MOTOR Primary tab...`);
-  const motorTabResult = await findInDialog(page, SERVICES.MOTOR_TAB_TEXT);
-  if (motorTabResult.found) {
-    console.log(`${LOG} MOTOR Primary tab found at (${Math.round(motorTabResult.rect.x)}, ${Math.round(motorTabResult.rect.y)}) — clicking...`);
-    await page.mouse.click(motorTabResult.rect.x, motorTabResult.rect.y);
+  // Debug: find all elements containing "MOTOR" text to understand the DOM structure
+  const motorElements = await page.evaluate(() => {
+    const all = Array.from(document.querySelectorAll("*"));
+    return all
+      .filter(el => {
+        if (!el.offsetParent && el.offsetWidth === 0) return false;
+        const t = (el.innerText || el.textContent || "").trim();
+        return t.includes("MOTOR") && t.length < 80 && el.children.length < 5;
+      })
+      .map(el => {
+        const rect = el.getBoundingClientRect();
+        return {
+          tag: el.tagName,
+          text: (el.innerText || el.textContent || "").trim().substring(0, 60),
+          cls: (el.className || "").substring(0, 50),
+          x: Math.round(rect.x),
+          y: Math.round(rect.y),
+          w: Math.round(rect.width),
+          h: Math.round(rect.height),
+          children: el.children.length,
+        };
+      })
+      .slice(0, 15);
+  });
+  console.log(`${LOG} MOTOR-related elements: ${JSON.stringify(motorElements)}`);
+
+  // ── Step 3b: Click MOTOR Primary tab ──
+  // From the screenshots, MOTOR Primary is a tab in the Browse dialog's tab bar.
+  // It may be a <li>, <a>, <span>, or <div> element. Look for compact elements.
+  console.log(`${LOG} Looking for MOTOR Primary tab element...`);
+
+  const motorTabClick = await page.evaluate(() => {
+    const all = Array.from(document.querySelectorAll("*"));
+    // Look for elements whose text is exactly or nearly "MOTOR Primary"
+    for (const el of all) {
+      if (!el.offsetParent && el.offsetWidth === 0) continue;
+      const text = (el.innerText || el.textContent || "").trim();
+      if (text === "MOTOR Primary" || text === "MOTOR Primary") {
+        const rect = el.getBoundingClientRect();
+        if (rect.width > 0 && rect.height > 0 && rect.x < 1280) {
+          // Click the parent if it's a span/text node (the tab container is clickable)
+          const clickEl = el.closest("li, a, [role='tab'], button") || el;
+          const clickRect = clickEl.getBoundingClientRect();
+          return {
+            found: true,
+            rect: { x: clickRect.x + clickRect.width / 2, y: clickRect.y + clickRect.height / 2 },
+            text: text,
+            tag: clickEl.tagName,
+            cls: (clickEl.className || "").substring(0, 40),
+          };
+        }
+      }
+    }
+    // Fallback: look for elements containing "MOTOR Primary" with small text
+    for (const el of all) {
+      if (!el.offsetParent && el.offsetWidth === 0) continue;
+      const text = (el.innerText || el.textContent || "").trim();
+      if (text.includes("MOTOR Primary") && text.length < 30) {
+        const rect = el.getBoundingClientRect();
+        if (rect.width > 5 && rect.height > 5 && rect.x >= 0 && rect.x < 1280) {
+          return {
+            found: true,
+            rect: { x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 },
+            text: text,
+            tag: el.tagName,
+            cls: (el.className || "").substring(0, 40),
+          };
+        }
+      }
+    }
+    return { found: false };
+  });
+
+  if (motorTabClick.found) {
+    console.log(`${LOG} MOTOR Primary tab: ${motorTabClick.tag}.${motorTabClick.cls} at (${Math.round(motorTabClick.rect.x)}, ${Math.round(motorTabClick.rect.y)}) — clicking...`);
+    await page.mouse.click(motorTabClick.rect.x, motorTabClick.rect.y);
     await sleep(3000);
 
-    // Take screenshot to see result of clicking MOTOR Primary
     await page.screenshot({ path: "/tmp/debug-motor-after-tab-click.png" });
 
-    // Check if we got a vehicle linking dialog or MOTOR tree
-    const afterTabClick = await page.evaluate(() => {
-      // Check for any new dialog/popup about vehicle linking
-      const allDialogs = Array.from(document.querySelectorAll("[role='dialog'], [class*='modal']"))
-        .filter(d => d.offsetParent !== null || d.offsetWidth > 0);
-      const texts = allDialogs.map(d => d.textContent.trim().substring(0, 300));
-
-      // Check if MOTOR tree appeared (category items)
-      const treeItems = document.querySelectorAll(
+    // Check if MOTOR tree appeared
+    const treeCheck = await page.evaluate(() => {
+      const treeItems = Array.from(document.querySelectorAll(
         "div[role='button'], li[role='treeitem'], [class*='category-item'], [class*='tree-node']"
-      );
-      const visibleItems = Array.from(treeItems).filter(el => el.offsetParent !== null);
-
-      // Check for vehicle selection / engine selection
-      const selects = Array.from(document.querySelectorAll("select, [class*='dropdown']"))
-        .filter(el => el.offsetParent !== null)
-        .map(el => ({ tag: el.tagName, cls: (el.className || "").substring(0, 40) }));
-
+      )).filter(el => el.offsetParent !== null);
       return {
-        dialogCount: allDialogs.length,
-        dialogTexts: texts,
-        treeItemCount: visibleItems.length,
-        treeItems: visibleItems.slice(0, 5).map(el => el.textContent.trim().substring(0, 40)),
-        selects,
+        treeItemCount: treeItems.length,
+        treeItems: treeItems.slice(0, 5).map(el => el.textContent.trim().substring(0, 40)),
       };
     });
-    console.log(`${LOG} After MOTOR tab click: ${JSON.stringify(afterTabClick)}`);
+    console.log(`${LOG} After MOTOR tab click — tree items: ${JSON.stringify(treeCheck)}`);
 
-    if (afterTabClick.treeItemCount > 0) {
-      console.log(`${LOG} MOTOR tree visible with ${afterTabClick.treeItemCount} items ✓`);
+    if (treeCheck.treeItemCount > 0) {
+      console.log(`${LOG} MOTOR tree visible with ${treeCheck.treeItemCount} items ✓`);
       motorTabFound = true;
     }
+  } else {
+    console.log(`${LOG} MOTOR Primary tab element not found`);
   }
 
-  // ── Step 3b: If MOTOR tree not showing, try "Connect to MOTOR" button ──
+  // ── Step 3c: Try "Connect to MOTOR" button (scroll into view first) ──
   if (!motorTabFound) {
-    console.log(`${LOG} MOTOR tree not visible — trying "Connect to MOTOR" button...`);
-    const connectResult = await findInDialog(page, SERVICES.CONNECT_MOTOR_TEXT);
-    if (connectResult.found) {
-      console.log(`${LOG} Found "Connect to MOTOR" at (${Math.round(connectResult.rect.x)}, ${Math.round(connectResult.rect.y)}) — clicking...`);
-      await page.mouse.click(connectResult.rect.x, connectResult.rect.y);
-      await sleep(4000);
+    console.log(`${LOG} Trying "Connect to MOTOR" button...`);
 
-      // Take screenshot
-      await page.screenshot({ path: "/tmp/debug-motor-after-connect.png" });
-
-      // Check for vehicle linking dialog (may need to select engine)
-      const postConnect = await page.evaluate(() => {
-        const allDialogs = Array.from(document.querySelectorAll("[role='dialog'], [class*='modal']"))
-          .filter(d => d.offsetParent !== null || d.offsetWidth > 0);
-        const buttons = [];
-        const texts = [];
-        const inputs = [];
-        for (const d of allDialogs) {
-          const btns = d.querySelectorAll("button");
-          btns.forEach(b => {
-            if (b.offsetParent) buttons.push(b.textContent.trim().substring(0, 40));
-          });
-          texts.push(d.textContent.trim().substring(0, 200));
-          const inps = d.querySelectorAll("input, select");
-          inps.forEach(i => {
-            if (i.offsetParent) inputs.push({
-              tag: i.tagName,
-              type: i.type || "",
-              name: i.name || "",
-              placeholder: (i.placeholder || "").substring(0, 30),
-            });
-          });
+    // Scroll the button into view before clicking
+    const connectClicked = await page.evaluate(() => {
+      const btns = Array.from(document.querySelectorAll("button"));
+      for (const btn of btns) {
+        if (btn.textContent.trim() === "Connect to MOTOR" && btn.offsetParent !== null) {
+          // Scroll into view
+          btn.scrollIntoView({ block: "center", inline: "center" });
+          return { found: true, scrolled: true };
         }
-        return { dialogCount: allDialogs.length, buttons: [...new Set(buttons)], texts, inputs };
-      });
-      console.log(`${LOG} After Connect to MOTOR: ${JSON.stringify(postConnect)}`);
-
-      // Check if there's a vehicle search/select that we need to interact with
-      if (postConnect.inputs.length > 0) {
-        console.log(`${LOG} Found input fields after Connect — may need vehicle selection`);
-      }
-
-      // Wait more and retry MOTOR Primary tab
-      await sleep(5000);
-      const motorRetry = await findInDialog(page, SERVICES.MOTOR_TAB_TEXT);
-      if (motorRetry.found) {
-        console.log(`${LOG} MOTOR Primary tab found — clicking...`);
-        await page.mouse.click(motorRetry.rect.x, motorRetry.rect.y);
-        await sleep(2000);
-        motorTabFound = true;
-      }
-    } else {
-      console.log(`${LOG} "Connect to MOTOR" not found`);
-    }
-  }
-
-  // ── Step 3c: If still no MOTOR, check the "not linked" warning ──
-  if (!motorTabFound) {
-    console.log(`${LOG} Checking for "not linked" warning...`);
-    const notLinked = await page.evaluate(() => {
-      const els = Array.from(document.querySelectorAll("*")).filter(el =>
-        el.offsetParent !== null &&
-        el.textContent.includes("not linked") &&
-        el.children.length < 5
-      );
-      if (els.length > 0) {
-        const rect = els[0].getBoundingClientRect();
-        return { found: true, text: els[0].textContent.trim().substring(0, 60), rect: { x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 } };
       }
       return { found: false };
     });
-    if (notLinked.found) {
-      console.log(`${LOG} Found "${notLinked.text}" — clicking...`);
-      await page.mouse.click(notLinked.rect.x, notLinked.rect.y);
-      await sleep(5000);
-      await page.screenshot({ path: "/tmp/debug-motor-after-notlinked.png" });
 
-      // Check for any new dialog/selection that appeared
-      const afterNotLinked = await page.evaluate(() => {
-        const allDialogs = Array.from(document.querySelectorAll("[role='dialog'], [class*='modal']"))
-          .filter(d => d.offsetParent !== null || d.offsetWidth > 0);
-        return {
-          dialogCount: allDialogs.length,
-          texts: allDialogs.map(d => d.textContent.trim().substring(0, 200)),
-        };
+    if (connectClicked.found) {
+      await sleep(500);
+      // Now get fresh coordinates after scroll
+      const connectRect = await page.evaluate(() => {
+        const btns = Array.from(document.querySelectorAll("button"));
+        for (const btn of btns) {
+          if (btn.textContent.trim() === "Connect to MOTOR") {
+            const rect = btn.getBoundingClientRect();
+            return { x: rect.x + rect.width / 2, y: rect.y + rect.height / 2, inView: rect.x >= 0 && rect.x < 1280 };
+          }
+        }
+        return null;
       });
-      console.log(`${LOG} After clicking "not linked": ${JSON.stringify(afterNotLinked)}`);
+
+      if (connectRect && connectRect.inView) {
+        console.log(`${LOG} "Connect to MOTOR" at (${Math.round(connectRect.x)}, ${Math.round(connectRect.y)}) — clicking...`);
+        await page.mouse.click(connectRect.x, connectRect.y);
+        await sleep(5000);
+        await page.screenshot({ path: "/tmp/debug-motor-after-connect.png" });
+
+        // Check what happened
+        const postConnect = await page.evaluate(() => {
+          const treeItems = Array.from(document.querySelectorAll(
+            "div[role='button'], li[role='treeitem'], [class*='category-item'], [class*='tree-node']"
+          )).filter(el => el.offsetParent !== null);
+          // Also check for any new dialogs/prompts
+          const allTexts = Array.from(document.querySelectorAll("[role='dialog'], [class*='modal']"))
+            .filter(d => d.offsetParent !== null)
+            .map(d => d.textContent.trim().substring(0, 150));
+          return { treeItemCount: treeItems.length, dialogTexts: allTexts };
+        });
+        console.log(`${LOG} After Connect to MOTOR: tree=${postConnect.treeItemCount} items, dialogs=${postConnect.dialogTexts.length}`);
+
+        if (postConnect.treeItemCount > 0) {
+          motorTabFound = true;
+        } else {
+          // Try clicking MOTOR Primary tab again after connection
+          const retryTab = await page.evaluate(() => {
+            const all = Array.from(document.querySelectorAll("*"));
+            for (const el of all) {
+              if (!el.offsetParent && el.offsetWidth === 0) continue;
+              const text = (el.innerText || el.textContent || "").trim();
+              if (text === "MOTOR Primary" || (text.includes("MOTOR Primary") && text.length < 30)) {
+                const clickEl = el.closest("li, a, [role='tab'], button") || el;
+                const rect = clickEl.getBoundingClientRect();
+                if (rect.width > 5 && rect.x < 1280) {
+                  return { found: true, rect: { x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 } };
+                }
+              }
+            }
+            return { found: false };
+          });
+          if (retryTab.found) {
+            await page.mouse.click(retryTab.rect.x, retryTab.rect.y);
+            await sleep(3000);
+            const treeCheck = await page.evaluate(() => {
+              const items = Array.from(document.querySelectorAll(
+                "div[role='button'], li[role='treeitem'], [class*='category-item'], [class*='tree-node']"
+              )).filter(el => el.offsetParent !== null);
+              return items.length;
+            });
+            if (treeCheck > 0) motorTabFound = true;
+          }
+        }
+      } else {
+        console.log(`${LOG} "Connect to MOTOR" still off-screen after scroll`);
+      }
+    } else {
+      console.log(`${LOG} "Connect to MOTOR" button not found`);
     }
   }
 
