@@ -179,21 +179,28 @@ async function runPlaybook({ customer, vehicle, diagnosis, parts, progressCallba
 
         if (clearResult.cleared) {
           await sleep(2000);
-          // Now search for the customer by name
+          // Now search for the customer by phone or name
           const custInput = await page.$("#estimate-customer");
           if (custInput) {
+            // Phone digits are more unique than first name — search phone first
+            const phoneDigits = (customer.phone || "").replace(/\D/g, "");
+            const lastName = (customer.name || "").split(/\s+/).slice(1).join(" ") || "";
             const firstName = (customer.name || "").split(/\s+/)[0] || "";
-            console.log(`${LOG}   Searching for customer "${firstName}"...`);
+            // Pick search term: last 4+ phone digits > last name > first name
+            const searchTerm = phoneDigits.length >= 4
+              ? phoneDigits.slice(-4)
+              : (lastName || firstName);
+            console.log(`${LOG}   Searching for customer "${searchTerm}" (phone: ${phoneDigits || "none"}, name: "${customer.name}")...`);
             await custInput.click();
             await sleep(300);
-            await custInput.type(firstName, { delay: 100 });
+            await custInput.type(searchTerm, { delay: 100 });
             await sleep(3000);
 
             await page.screenshot({ path: "/tmp/debug-customer-autocomplete.png" });
 
             // Check for dropdown results (not sidebar)
             const NAV_TEXTS = ["Dashboard", "Work Board", "Calendar", "Customers", "Catalog", "Inventory", "CRM", "Reviews", "Reports", "User Center"];
-            const custDropdown = await page.evaluate((name, phone, navTexts) => {
+            const custDropdown = await page.evaluate((fullName, phoneDigitsStr, navTexts) => {
               const items = Array.from(document.querySelectorAll(
                 ".p-autocomplete-panel li, .p-autocomplete-items li, " +
                 "[class*='autocomplete'] [class*='list'] li, [role='option']"
@@ -207,25 +214,92 @@ async function runPlaybook({ customer, vehicle, diagnosis, parts, progressCallba
               });
               const texts = items.map(li => li.textContent.trim().substring(0, 80));
 
-              // Find best match
+              // Strip all non-digits from text for phone comparison
+              const stripDigits = (s) => (s || "").replace(/\D/g, "");
+
+              // Find best match — phone digits is the most reliable
               let best = null;
+              let matchType = "";
               for (const item of items) {
-                const t = item.textContent.toLowerCase();
-                if (name && t.includes(name.toLowerCase())) { best = item; break; }
-                if (phone && t.includes(phone)) { best = item; break; }
+                const t = item.textContent;
+                const tDigits = stripDigits(t);
+                const tLower = t.toLowerCase();
+
+                // 1. Phone match: compare digits-only (last 7+ digits to avoid country code issues)
+                if (phoneDigitsStr && phoneDigitsStr.length >= 4) {
+                  const phoneEnd = phoneDigitsStr.slice(-7);
+                  if (tDigits.includes(phoneEnd) || phoneEnd.includes(tDigits.slice(-7))) {
+                    best = item; matchType = "phone"; break;
+                  }
+                }
+
+                // 2. Full name match (both first AND last name in text)
+                if (fullName) {
+                  const nameParts = fullName.toLowerCase().split(/\s+/).filter(p => p.length > 1);
+                  const allMatch = nameParts.length >= 2 && nameParts.every(p => tLower.includes(p));
+                  if (allMatch) { best = item; matchType = "fullName"; break; }
+                }
               }
-              if (!best && items.length > 0) best = items[0];
+
+              // 3. Last resort: first name match (but only if single result)
+              if (!best && items.length === 1) {
+                best = items[0];
+                matchType = "onlyResult";
+              }
+
+              // Do NOT fall back to items[0] when multiple results — wrong customer is worse than no customer
               if (best) {
                 best.click();
-                return { selected: true, text: best.textContent.trim().substring(0, 80), count: items.length, all: texts };
+                return { selected: true, matchType, text: best.textContent.trim().substring(0, 80), count: items.length, all: texts };
               }
               return { selected: false, count: items.length, all: texts };
-            }, customer.name, customer.phone, NAV_TEXTS);
+            }, customer.name, phoneDigits, NAV_TEXTS);
 
             console.log(`${LOG}   Customer search result: ${JSON.stringify(custDropdown)}`);
             if (custDropdown.selected) {
-              console.log(`${LOG}   Customer re-selected: "${custDropdown.text}"`);
+              console.log(`${LOG}   Customer re-selected (${custDropdown.matchType}): "${custDropdown.text}"`);
               await sleep(5000); // Wait for Angular to load customer data + vehicles
+            } else if (custDropdown.count > 0) {
+              // Had results but no confident match — try searching with last name instead
+              console.log(`${LOG}   No confident match among ${custDropdown.count} results — trying last name...`);
+              await custInput.click({ clickCount: 3 });
+              await sleep(200);
+              const fallbackTerm = lastName || firstName;
+              if (fallbackTerm && fallbackTerm !== searchTerm) {
+                await custInput.type(fallbackTerm, { delay: 100 });
+                await sleep(3000);
+                // Re-check dropdown with full name match
+                const retry = await page.evaluate((fullName, phoneDigitsStr, navTexts) => {
+                  const items = Array.from(document.querySelectorAll(
+                    ".p-autocomplete-panel li, .p-autocomplete-items li, " +
+                    "[class*='autocomplete'] [class*='list'] li, [role='option']"
+                  )).filter(li => {
+                    if (!li.offsetParent) return false;
+                    const t = li.textContent.trim();
+                    return t.length >= 3 && !navTexts.includes(t) &&
+                      !li.closest("nav, [class*='sidebar-nav'], [class*='nav-menu']");
+                  });
+                  const stripDigits = (s) => (s || "").replace(/\D/g, "");
+                  let best = null;
+                  for (const item of items) {
+                    const tDigits = stripDigits(item.textContent);
+                    if (phoneDigitsStr.length >= 4 && tDigits.includes(phoneDigitsStr.slice(-7))) {
+                      best = item; break;
+                    }
+                    if (fullName) {
+                      const parts = fullName.toLowerCase().split(/\s+/).filter(p => p.length > 1);
+                      if (parts.length >= 2 && parts.every(p => item.textContent.toLowerCase().includes(p))) {
+                        best = item; break;
+                      }
+                    }
+                  }
+                  if (!best && items.length === 1) best = items[0];
+                  if (best) { best.click(); return { selected: true, text: best.textContent.trim().substring(0, 80) }; }
+                  return { selected: false, count: items.length };
+                }, customer.name, phoneDigits, NAV_TEXTS);
+                console.log(`${LOG}   Retry result: ${JSON.stringify(retry)}`);
+                if (retry.selected) await sleep(5000);
+              }
             }
           }
         } else {
