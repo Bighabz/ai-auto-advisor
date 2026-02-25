@@ -375,24 +375,23 @@ async function createEstimateWithCustomerVehicle(page, customer, vehicle) {
   }
 
   // Step 2d: Navigate browser to the estimate page
-  // AutoLeap estimate URLs use: /#/workboard/estimate/{objectId}
-  const estUrl = `${AUTOLEAP_APP_URL}/#/workboard/estimate/${estimateId}`;
+  // AutoLeap uses: /#/estimates/{objectId} (NOT /#/workboard/estimate/{id})
+  const estUrl = `${AUTOLEAP_APP_URL}/#/estimates/${estimateId}`;
   console.log(`${LOG} Navigating to estimate page: ${estUrl}`);
   await page.goto(estUrl, { waitUntil: "domcontentloaded", timeout: 30000 });
   await sleep(5000);
 
-  // Verify we're on the estimate page
+  // Verify we're on the estimate page (not a 404)
   let currentUrl = page.url();
   console.log(`${LOG} Current URL: ${currentUrl}`);
 
-  // If URL didn't work, try alternate pattern
-  if (!currentUrl.includes("/estimate/") && !currentUrl.includes("/estimates/")) {
-    const altUrl = `${AUTOLEAP_APP_URL}/#/estimates/${estimateId}`;
-    console.log(`${LOG} Trying alternate URL: ${altUrl}`);
-    await page.goto(altUrl, { waitUntil: "domcontentloaded", timeout: 30000 });
-    await sleep(5000);
-    currentUrl = page.url();
-    console.log(`${LOG} Current URL: ${currentUrl}`);
+  // Check for 404
+  const is404 = await page.evaluate(() => {
+    return document.body.innerText.includes("404") || document.body.innerText.includes("not found");
+  });
+  if (is404) {
+    console.log(`${LOG} Got 404 — estimate page URL is wrong`);
+    return { success: false, error: "Estimate page 404" };
   }
 
   await page.screenshot({ path: "/tmp/debug-estimate-page.png" });
