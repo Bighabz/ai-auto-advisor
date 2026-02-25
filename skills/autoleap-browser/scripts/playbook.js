@@ -310,11 +310,12 @@ async function ensureLoggedIn(page) {
 // ═══════════════════════════════════════════════════════════════════════════════
 
 async function createEstimateWithCustomerVehicle(page, customer, vehicle) {
-  // Step 2: Open "Add Customer" via global "+" dropdown
-  // The "+" in the header opens a dropdown with cards: Customer, Appointment, Estimate, etc.
-  // We need to click "+" first, then click the "Customer" card.
+  // AutoLeap workflow:
+  // 1. Create blank estimate on workboard → click on card → opens estimate detail page
+  // 2. Inside estimate: assign customer + add vehicle
+  // (Customer form does NOT have vehicle fields — vehicle is added within estimate)
 
-  // Navigate to workboard first (dropdown works from any page)
+  // Step 2a: Navigate to workboard
   if (!page.url().includes("/workboard")) {
     await page.goto(`${AUTOLEAP_APP_URL}/#/workboard`, {
       waitUntil: "domcontentloaded",
@@ -323,409 +324,157 @@ async function createEstimateWithCustomerVehicle(page, customer, vehicle) {
     await sleep(3000);
   }
 
-  // Step 2a: Click the global "+" button to open dropdown
-  console.log(`${LOG} Clicking "+" button to open dropdown...`);
-  const plusClicked = await page.evaluate(() => {
-    const allClickable = Array.from(document.querySelectorAll("button, a, [role='button'], span, i"));
-    for (const el of allClickable) {
-      const cls = (el.className || "").toLowerCase();
-      if ((cls.includes("plus-circle") || cls.includes("fa-plus")) && el.offsetParent !== null) {
-        // Click the button/link ancestor, not the icon itself
-        const clickTarget = el.closest("button, a, [role='button']") || el;
-        clickTarget.click();
-        return "plus-icon";
-      }
-    }
-    return null;
-  });
-
-  if (!plusClicked) {
-    return { success: false, error: 'Could not find "+" button in header' };
-  }
-  console.log(`${LOG} Dropdown opened ✓`);
-  await sleep(2000);
-
-  // Step 2b: Click the "Customer" card from the dropdown
-  // Each card has: icon + heading ("Customer") + subheading ("Add a new customer")
-  console.log(`${LOG} Clicking "Customer" card from dropdown...`);
-  const customerClicked = await page.evaluate(() => {
-    // Strategy 1: Find all visible elements, look for one whose own text content starts with "Customer"
-    // but not "Customers" (nav link). The dropdown card heading should be "Customer" exactly.
-    const candidates = Array.from(document.querySelectorAll("*")).filter(el => {
-      if (!el.offsetParent) return false;
-      // Check direct text nodes only (not nested children)
-      const directText = Array.from(el.childNodes)
-        .filter(n => n.nodeType === 3)
-        .map(n => n.textContent.trim())
-        .join(" ");
-      return directText === "Customer";
-    });
-
-    if (candidates.length > 0) {
-      // Click the closest clickable parent (the card container)
-      const card = candidates[0].closest("a, button, [role='button'], div[class*='item'], div[class*='card'], div[class*='menu']") || candidates[0];
-      card.click();
-      return `card:${card.tagName}`;
-    }
-
-    // Strategy 2: Find links/buttons containing "Add a new customer"
-    const links = Array.from(document.querySelectorAll("a, button, div, li"))
-      .filter(el => el.offsetParent !== null);
-    for (const el of links) {
-      const text = (el.textContent || "").trim();
-      if (text === "Customer Add a new customer" || text.startsWith("Customer\n")) {
-        el.click();
-        return `container:${el.tagName}`;
-      }
-    }
-
-    // Strategy 3: Look for href containing "customer" in visible links
-    const allLinks = Array.from(document.querySelectorAll("a[href]"))
-      .filter(a => a.offsetParent !== null);
-    for (const a of allLinks) {
-      const href = a.getAttribute("href") || "";
-      if (href.includes("customer") && !href.includes("customers")) {
-        a.click();
-        return `href:${href}`;
-      }
-    }
-
-    return null;
-  });
-
-  if (!customerClicked) {
-    await page.screenshot({ path: "/tmp/debug-dropdown-open.png", fullPage: true });
-    // Dump dropdown items for debugging
-    const dropdownItems = await page.evaluate(() => {
-      return Array.from(document.querySelectorAll("*"))
-        .filter(el => el.offsetParent !== null && el.textContent.includes("Add a new"))
-        .slice(0, 5)
-        .map(el => ({
-          tag: el.tagName,
-          class: (el.className || "").substring(0, 60),
-          text: el.textContent.trim().substring(0, 80),
-          href: el.getAttribute?.("href") || null,
-        }));
-    });
-    console.log(`${LOG} Dropdown items with "Add a new": ${JSON.stringify(dropdownItems)}`);
-    return { success: false, error: 'Could not click "Customer" card from dropdown' };
-  }
-  console.log(`${LOG} Clicked Customer card: ${customerClicked}`);
-  await sleep(3000);
-
-  // Wait for the customer form to appear (drawer/modal with personal-card-fname)
-  console.log(`${LOG} Waiting for customer form...`);
-  let formVisible = false;
-  for (let attempt = 0; attempt < 8; attempt++) {
-    formVisible = await page.evaluate(() => {
-      const fname = document.querySelector('#personal-card-fname');
-      if (fname && fname.offsetParent !== null) return true;
-      // Also check for any First Name input that's visible
-      const inputs = Array.from(document.querySelectorAll("input"));
-      for (const inp of inputs) {
-        if (inp.offsetParent !== null &&
-            (inp.placeholder?.includes("First") || inp.id?.includes("fname"))) {
-          return true;
-        }
-      }
-      return false;
-    });
-    if (formVisible) break;
-    await sleep(1500);
-  }
-
-  if (!formVisible) {
-    await page.screenshot({ path: "/tmp/debug-no-customer-form.png", fullPage: true });
-    const debugInfo = await page.evaluate(() => {
-      const url = window.location.href;
-      const visibleInputs = Array.from(document.querySelectorAll("input"))
-        .filter(i => i.offsetParent !== null)
-        .slice(0, 10)
-        .map(i => ({ id: i.id, placeholder: i.placeholder, type: i.type }));
-      const visibleButtons = Array.from(document.querySelectorAll("button"))
-        .filter(b => b.offsetParent !== null)
-        .map(b => b.textContent.trim().substring(0, 40))
-        .filter(t => t.length > 0)
-        .slice(0, 10);
-      return { url, visibleInputs, visibleButtons };
-    });
-    console.log(`${LOG} Form NOT visible. URL: ${debugInfo.url}`);
-    console.log(`${LOG} Visible inputs: ${JSON.stringify(debugInfo.visibleInputs)}`);
-    console.log(`${LOG} Buttons: ${JSON.stringify(debugInfo.visibleButtons)}`);
-    return { success: false, error: 'Customer form did not appear' };
-  }
-  console.log(`${LOG} Customer form visible ✓`);
-
-  // Step 3: Fill customer info using AutoLeap's actual IDs
-  const nameParts = (customer.name || "Customer").trim().split(/\s+/);
-  const firstName = nameParts[0] || "";
-  const lastName = nameParts.length > 1 ? nameParts.slice(1).join(" ") : "";
-
-  console.log(`${LOG} Filling customer: ${firstName} ${lastName}`);
-
-  // AutoLeap uses id-based selectors, not name/formcontrolname
-  await fillField(page, '#personal-card-fname, input[placeholder="First Name*"]', firstName);
-  await fillField(page, '#personal-card-lname, input[placeholder="Last Name*"]', lastName);
-  if (customer.phone) {
-    await fillField(page, '#personal-card-mobile, input[placeholder="Mobile*"]', customer.phone);
-  }
-
-  // Step 4: Investigate and fill vehicle section
-  // The form may need scrolling to reveal vehicle fields
-  console.log(`${LOG} Scrolling form to reveal vehicle section...`);
-  await page.evaluate(() => {
-    // Scroll the form panel/drawer to bottom to reveal vehicle section
-    const panels = document.querySelectorAll('[class*="drawer"], [class*="sidebar"], [class*="panel"], [class*="dialog"], [class*="modal"], [class*="overlay"]');
-    for (const panel of panels) {
-      if (panel.scrollHeight > panel.clientHeight) {
-        panel.scrollTop = panel.scrollHeight;
-      }
-    }
-    // Also try scrolling main content
-    window.scrollTo(0, document.body.scrollHeight);
-  });
-  await sleep(1500);
-
-  // Screenshot after scroll to see full form
-  await page.screenshot({ path: "/tmp/debug-customer-form-full.png", fullPage: true });
-
-  // Comprehensive form dump: ALL inputs, buttons, dropdowns, labels
-  const formDump = await page.evaluate(() => {
-    // All inputs (visible or in DOM)
-    const allInputs = Array.from(document.querySelectorAll("input"))
-      .map(i => ({
-        id: i.id, name: i.name, placeholder: i.placeholder, type: i.type,
-        visible: i.offsetParent !== null, value: i.value,
-        class: (i.className || "").substring(0, 40),
-      }))
-      .filter(i => i.id || i.placeholder || i.name);
-    // All visible buttons
-    const allButtons = Array.from(document.querySelectorAll("button"))
-      .filter(b => b.offsetParent !== null)
-      .map(b => ({
-        text: b.textContent.trim().substring(0, 60),
-        class: (b.className || "").substring(0, 40),
-        disabled: b.disabled,
-      }))
-      .filter(b => b.text.length > 0);
-    // Custom dropdowns (ng-select, mat-select, etc.)
-    const customSelects = Array.from(document.querySelectorAll(
-      'ng-select, mat-select, [class*="ng-select"], [class*="mat-select"], [class*="custom-select"], [role="listbox"], [role="combobox"]'
-    )).map(s => ({
-      tag: s.tagName,
-      class: (s.className || "").substring(0, 60),
-      placeholder: s.getAttribute("placeholder") || "",
-      text: s.textContent.trim().substring(0, 40),
-      visible: s.offsetParent !== null,
-    }));
-    // Labels
-    const labels = Array.from(document.querySelectorAll("label"))
-      .filter(l => l.offsetParent !== null)
-      .map(l => l.textContent.trim().substring(0, 40))
-      .filter(t => t.length > 0);
-    return { allInputs: allInputs.slice(0, 25), allButtons: allButtons.slice(0, 15), customSelects: customSelects.slice(0, 10), labels: labels.slice(0, 20) };
-  });
-  console.log(`${LOG} === FORM DUMP ===`);
-  console.log(`${LOG} Inputs (${formDump.allInputs.length}):`);
-  for (const inp of formDump.allInputs) {
-    console.log(`${LOG}   ${inp.visible ? "✓" : "✗"} id="${inp.id}" name="${inp.name}" placeholder="${inp.placeholder}" type="${inp.type}" val="${inp.value}"`);
-  }
-  console.log(`${LOG} Buttons (${formDump.allButtons.length}):`);
-  for (const btn of formDump.allButtons) {
-    console.log(`${LOG}   ${btn.disabled ? "⊘" : "●"} "${btn.text}"`);
-  }
-  console.log(`${LOG} Custom selects (${formDump.customSelects.length}):`);
-  for (const sel of formDump.customSelects) {
-    console.log(`${LOG}   ${sel.visible ? "✓" : "✗"} <${sel.tag}> placeholder="${sel.placeholder}" text="${sel.text}"`);
-  }
-  console.log(`${LOG} Labels: ${JSON.stringify(formDump.labels)}`);
-  console.log(`${LOG} === END FORM DUMP ===`);
-
-  // Look for VIN input specifically (not State/Province)
-  const vinField = formDump.allInputs.find(i =>
-    (i.placeholder?.toLowerCase().includes("vin") || i.id?.toLowerCase() === "vin") &&
-    !i.placeholder?.toLowerCase().includes("state") &&
-    !i.placeholder?.toLowerCase().includes("province")
-  );
-
-  if (vehicle.vin && vinField) {
-    console.log(`${LOG} Entering VIN: ${vehicle.vin}`);
-    const vinSel = vinField.id ? `#${vinField.id}` : `input[placeholder="${vinField.placeholder}"]`;
-    await fillField(page, vinSel, vehicle.vin);
-    await sleep(1000);
-    // Click Decode button
-    await page.evaluate(() => {
-      const btns = Array.from(document.querySelectorAll("button")).filter(b => b.offsetParent !== null);
-      for (const btn of btns) {
-        if (btn.textContent.trim().toLowerCase().includes("decode")) {
-          btn.click();
-          return true;
-        }
-      }
-      return false;
-    });
-    await sleep(5000);
-  } else {
-    // Try to fill Year/Make/Model using whatever fields are available
-    // Look for ng-select or custom dropdowns for year/make/model
-    console.log(`${LOG} No VIN field — looking for YMME dropdowns...`);
-
-    // For custom Angular dropdowns, we need to click to open, then type to search
-    for (const field of ["year", "make", "model"]) {
-      const value = field === "year" ? String(vehicle.year) : field === "make" ? vehicle.make : vehicle.model;
-      if (!value) continue;
-
-      // Find dropdown by label, placeholder, or class
-      const filled = await page.evaluate((fieldName, fieldValue) => {
-        // Look for ng-select or similar with matching placeholder/label
-        const dropdowns = Array.from(document.querySelectorAll(
-          'ng-select, mat-select, [class*="ng-select"], [role="combobox"]'
-        )).filter(d => d.offsetParent !== null);
-
-        for (const dd of dropdowns) {
-          const placeholder = (dd.getAttribute("placeholder") || "").toLowerCase();
-          const label = dd.closest("div, label")?.textContent?.toLowerCase() || "";
-          if (placeholder.includes(fieldName) || label.includes(fieldName)) {
-            dd.click();
-            return { found: true, tag: dd.tagName, class: (dd.className || "").substring(0, 40) };
-          }
-        }
-
-        // Also check regular inputs
-        const inputs = Array.from(document.querySelectorAll("input"))
-          .filter(i => i.offsetParent !== null);
-        for (const inp of inputs) {
-          const ph = (inp.placeholder || "").toLowerCase();
-          const id = (inp.id || "").toLowerCase();
-          if (ph.includes(fieldName) || id.includes(fieldName)) {
-            return { found: true, isInput: true, id: inp.id, placeholder: inp.placeholder };
-          }
-        }
-
-        return { found: false };
-      }, field, value);
-
-      if (filled.found) {
-        if (filled.isInput) {
-          const sel = filled.id ? `#${filled.id}` : `input[placeholder="${filled.placeholder}"]`;
-          await fillField(page, sel, value);
-        } else {
-          // Custom dropdown — type the value to search
-          await sleep(500);
-          await page.keyboard.type(value, { delay: 50 });
-          await sleep(1000);
-          // Press Enter or click first option
-          await page.keyboard.press("Enter");
-        }
-        console.log(`${LOG}   ${field}: "${value}" ✓`);
-        await sleep(500);
-      } else {
-        console.log(`${LOG}   ${field}: dropdown not found`);
-      }
-    }
-  }
-
-  // Step 5: Click "Save & Create Estimate" (preferred) or "Save"
-  console.log(`${LOG} Looking for Save / Create Estimate button...`);
-
-  // First screenshot before clicking
-  await page.screenshot({ path: "/tmp/debug-before-save.png" });
-
-  let saveClicked = false;
-  saveClicked = await page.evaluate(() => {
-    const btns = Array.from(document.querySelectorAll("button")).filter(b => b.offsetParent !== null && !b.disabled);
-    // Priority order — "Save & Create Estimate" is the ideal button
-    const priorities = ["Save & Create Estimate", "Save & Create", "Create Estimate"];
-    for (const text of priorities) {
-      for (const btn of btns) {
-        if (btn.textContent.trim().includes(text)) {
-          btn.click();
-          return text;
-        }
-      }
-    }
-    // Fallback to "Save" — we'll create estimate separately
+  // Step 2b: Click "Estimate" button to create blank estimate
+  console.log(`${LOG} Creating blank estimate on workboard...`);
+  const estClicked = await page.evaluate(() => {
+    const btns = Array.from(document.querySelectorAll("button"))
+      .filter(b => b.offsetParent !== null);
     for (const btn of btns) {
-      if (btn.textContent.trim() === "Save" || btn.textContent.trim().startsWith("Save")) {
+      if (btn.textContent.trim() === "Estimate") {
         btn.click();
-        return "Save";
+        return true;
       }
     }
-    return null;
+    return false;
   });
 
-  if (saveClicked) {
-    console.log(`${LOG} Clicked: "${saveClicked}"`);
-  } else {
-    await page.screenshot({ path: "/tmp/debug-no-save-btn.png", fullPage: true });
-    return { success: false, error: '"Save" button not found' };
+  if (!estClicked) {
+    return { success: false, error: '"Estimate" button not found on workboard' };
   }
+  await sleep(3000);
+  console.log(`${LOG} Blank estimate created ✓`);
 
-  await sleep(5000);
-  await page.screenshot({ path: "/tmp/debug-after-save.png" });
+  // Step 2c: Click on the newly created estimate card to open it
+  // The new blank estimate should be the first card in the "Estimate" column
+  // It has no customer name (shows "-") and $0.00
+  console.log(`${LOG} Opening the new estimate card...`);
+  const cardClicked = await page.evaluate(() => {
+    // Find estimate cards — look for cards with $0.00 or no customer name
+    const cards = Array.from(document.querySelectorAll('[class*="card"], [class*="kanban"], a, div'))
+      .filter(el => el.offsetParent !== null);
 
-  // If we clicked "Save" (not "Save & Create Estimate"), we need to create estimate from customer page
-  if (saveClicked === "Save") {
-    console.log(`${LOG} Customer saved — now looking for "Create Estimate" option...`);
-
-    // After saving customer, AutoLeap may redirect to customer detail page
-    // Look for a "Create Estimate" button/link on that page
-    const createEstClicked = await page.evaluate(() => {
-      const allEls = Array.from(document.querySelectorAll("button, a, [role='button']"))
-        .filter(el => el.offsetParent !== null);
-      for (const el of allEls) {
-        const text = (el.textContent || "").trim();
-        if (text.includes("Create Estimate") || text.includes("New Estimate") || text.includes("Estimate")) {
-          el.click();
-          return text;
+    // Strategy 1: Find the newest card (highest estimate number) with $0.00
+    // Look for elements containing estimate numbers
+    let highestNum = 0;
+    let bestCard = null;
+    for (const card of cards) {
+      const text = card.textContent || "";
+      // Match estimate numbers like "16299" (5-digit numbers at start of card)
+      const numMatch = text.match(/\b(1\d{4})\b/);
+      if (numMatch) {
+        const num = parseInt(numMatch[1]);
+        if (num > highestNum && text.includes("$0.00")) {
+          highestNum = num;
+          bestCard = card;
         }
+      }
+    }
+
+    if (bestCard) {
+      // Look for a clickable link/element within the card
+      const link = bestCard.querySelector("a[href]") || bestCard;
+      link.click();
+      return { clicked: true, number: highestNum, tag: link.tagName };
+    }
+
+    // Strategy 2: Find any card with "$0.00" and "Today"
+    for (const card of cards) {
+      const text = card.textContent || "";
+      if (text.includes("$0.00") && text.includes("Today") && card.querySelector && card.querySelector("a")) {
+        const link = card.querySelector("a");
+        link.click();
+        return { clicked: true, text: text.substring(0, 40), tag: "a" };
+      }
+    }
+
+    return { clicked: false };
+  });
+
+  if (!cardClicked.clicked) {
+    await page.screenshot({ path: "/tmp/debug-no-card.png", fullPage: true });
+    console.log(`${LOG} Could not find blank estimate card to click`);
+    return { success: false, error: "Could not find blank estimate card on workboard" };
+  }
+  console.log(`${LOG} Clicked estimate card: ${JSON.stringify(cardClicked)}`);
+  await sleep(5000);
+
+  // Check if we navigated to the estimate page
+  const estUrl = page.url();
+  console.log(`${LOG} URL after card click: ${estUrl}`);
+  await page.screenshot({ path: "/tmp/debug-estimate-opened.png" });
+
+  // If still on workboard, try navigating directly to the estimate
+  if (estUrl.includes("/workboard") && !estUrl.includes("/estimate")) {
+    console.log(`${LOG} Still on workboard — trying direct URL navigation...`);
+    // The estimate URL is likely /#/workboard/estimate/{mongoId}
+    // We need to find the ID. Let's look for links in the workboard
+    const estLink = await page.evaluate(() => {
+      const links = Array.from(document.querySelectorAll("a[href*='estimate']"));
+      // Get the newest one (highest number or most recent)
+      if (links.length > 0) {
+        const href = links[links.length - 1].getAttribute("href");
+        return href;
       }
       return null;
     });
 
-    if (createEstClicked) {
-      console.log(`${LOG} Clicked: "${createEstClicked}"`);
-      await sleep(5000);
-    } else {
-      console.log(`${LOG} No "Create Estimate" button found — navigating to workboard to create estimate...`);
-      // Navigate back to workboard and create estimate via "Estimate" button
-      await page.goto(`${AUTOLEAP_APP_URL}/#/workboard`, { waitUntil: "domcontentloaded", timeout: 30000 });
-      await sleep(3000);
-      await page.evaluate(() => {
-        const btns = Array.from(document.querySelectorAll("button")).filter(b => b.offsetParent !== null);
-        for (const btn of btns) {
-          if (btn.textContent.trim() === "Estimate") {
-            btn.click();
-            return;
-          }
-        }
+    if (estLink) {
+      console.log(`${LOG} Found estimate link: ${estLink}`);
+      await page.goto(`${AUTOLEAP_APP_URL}/${estLink.startsWith("#") ? estLink : "#" + estLink}`, {
+        waitUntil: "domcontentloaded",
+        timeout: 30000,
       });
-      await sleep(3000);
+      await sleep(5000);
     }
   }
 
-  // Wait for navigation to estimate page
-  console.log(`${LOG} Waiting for estimate page...`);
-  await sleep(3000);
+  // Dump the estimate page to see what's available
+  const estPageDump = await page.evaluate(() => {
+    const url = window.location.href;
+    const visibleInputs = Array.from(document.querySelectorAll("input"))
+      .filter(i => i.offsetParent !== null)
+      .slice(0, 15)
+      .map(i => ({ id: i.id, placeholder: i.placeholder, type: i.type }));
+    const visibleButtons = Array.from(document.querySelectorAll("button"))
+      .filter(b => b.offsetParent !== null)
+      .map(b => b.textContent.trim().substring(0, 50))
+      .filter(t => t.length > 0)
+      .slice(0, 20);
+    const tabs = Array.from(document.querySelectorAll('[role="tab"], [class*="tab"]'))
+      .filter(t => t.offsetParent !== null)
+      .map(t => t.textContent.trim().substring(0, 30))
+      .filter(t => t.length > 0);
+    const headings = Array.from(document.querySelectorAll("h1, h2, h3, h4, h5"))
+      .filter(h => h.offsetParent !== null)
+      .map(h => h.textContent.trim().substring(0, 50))
+      .filter(t => t.length > 0)
+      .slice(0, 10);
+    return { url, visibleInputs, visibleButtons, tabs, headings };
+  });
+  console.log(`${LOG} === ESTIMATE PAGE DUMP ===`);
+  console.log(`${LOG} URL: ${estPageDump.url}`);
+  console.log(`${LOG} Inputs: ${JSON.stringify(estPageDump.visibleInputs)}`);
+  console.log(`${LOG} Buttons: ${JSON.stringify(estPageDump.visibleButtons)}`);
+  console.log(`${LOG} Tabs: ${JSON.stringify(estPageDump.tabs)}`);
+  console.log(`${LOG} Headings: ${JSON.stringify(estPageDump.headings)}`);
+  console.log(`${LOG} === END ESTIMATE PAGE DUMP ===`);
 
-  // Extract estimate ID and RO number from URL
+  await page.screenshot({ path: "/tmp/debug-estimate-page.png" });
+
+  // Extract estimate ID from URL
   const currentUrl = page.url();
-  console.log(`${LOG} Current URL after save: ${currentUrl}`);
   const estimateMatch = currentUrl.match(/estimates?\/([a-f0-9-]+)/i);
   const estimateId = estimateMatch?.[1] || null;
 
   // Try to read RO number from page
   const roNumber = await page.evaluate(() => {
-    const el = document.querySelector('[class*="ro-number"], [class*="estimate-code"], [class*="code"]');
-    if (el) return el.textContent.trim();
-    // Look for text pattern like "RO-12345" or "EST-12345" or #XXXXX
-    const body = document.body.innerText;
-    const match = body.match(/(RO-\d+|EST-\d+|#\d{4,}|\d{5})/);
+    // Look for text that matches estimate/RO numbers
+    const body = document.body?.innerText || "";
+    const match = body.match(/(RO-\d+|EST-\d+|#\d{4,})/);
     return match?.[0] || null;
   });
 
-  // Screenshot of estimate page
-  await page.screenshot({ path: "/tmp/debug-estimate-page.png" });
+  console.log(`${LOG} Estimate ID: ${estimateId}, RO: ${roNumber}`);
 
   return {
     success: true,
