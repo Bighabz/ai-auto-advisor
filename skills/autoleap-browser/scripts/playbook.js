@@ -470,44 +470,90 @@ async function createEstimateWithCustomerVehicle(page, customer, vehicle) {
     await fillField(page, '#personal-card-mobile, input[placeholder="Mobile*"]', customer.phone);
   }
 
-  // Step 4: Vehicle — check if there's a vehicle section visible
-  // AutoLeap has no native <select> elements — YMME uses custom dropdowns
-  console.log(`${LOG} Looking for vehicle section...`);
-  const vehicleDebug = await page.evaluate(() => {
-    // Look for VIN field
-    const vinInputs = Array.from(document.querySelectorAll("input")).filter(i =>
-      i.offsetParent !== null && (
-        i.placeholder?.toLowerCase().includes("vin") ||
-        i.id?.toLowerCase().includes("vin") ||
-        i.name?.toLowerCase().includes("vin")
-      )
-    );
-    // Look for Year/Make/Model inputs or dropdowns
-    const ymmeInputs = Array.from(document.querySelectorAll("input")).filter(i =>
-      i.offsetParent !== null && (
-        i.placeholder?.toLowerCase().includes("year") ||
-        i.placeholder?.toLowerCase().includes("make") ||
-        i.placeholder?.toLowerCase().includes("model") ||
-        i.id?.toLowerCase().includes("year") ||
-        i.id?.toLowerCase().includes("make") ||
-        i.id?.toLowerCase().includes("model")
-      )
-    );
-    return {
-      vinFields: vinInputs.map(i => ({ id: i.id, placeholder: i.placeholder, class: i.className.substring(0, 60) })),
-      ymmeFields: ymmeInputs.map(i => ({ id: i.id, placeholder: i.placeholder, class: i.className.substring(0, 60) })),
-    };
+  // Step 4: Investigate and fill vehicle section
+  // The form may need scrolling to reveal vehicle fields
+  console.log(`${LOG} Scrolling form to reveal vehicle section...`);
+  await page.evaluate(() => {
+    // Scroll the form panel/drawer to bottom to reveal vehicle section
+    const panels = document.querySelectorAll('[class*="drawer"], [class*="sidebar"], [class*="panel"], [class*="dialog"], [class*="modal"], [class*="overlay"]');
+    for (const panel of panels) {
+      if (panel.scrollHeight > panel.clientHeight) {
+        panel.scrollTop = panel.scrollHeight;
+      }
+    }
+    // Also try scrolling main content
+    window.scrollTo(0, document.body.scrollHeight);
   });
-  console.log(`${LOG} VIN fields: ${JSON.stringify(vehicleDebug.vinFields)}`);
-  console.log(`${LOG} YMME fields: ${JSON.stringify(vehicleDebug.ymmeFields)}`);
+  await sleep(1500);
 
-  // Try filling vehicle if fields are visible
-  if (vehicle.vin && vehicleDebug.vinFields.length > 0) {
+  // Screenshot after scroll to see full form
+  await page.screenshot({ path: "/tmp/debug-customer-form-full.png", fullPage: true });
+
+  // Comprehensive form dump: ALL inputs, buttons, dropdowns, labels
+  const formDump = await page.evaluate(() => {
+    // All inputs (visible or in DOM)
+    const allInputs = Array.from(document.querySelectorAll("input"))
+      .map(i => ({
+        id: i.id, name: i.name, placeholder: i.placeholder, type: i.type,
+        visible: i.offsetParent !== null, value: i.value,
+        class: (i.className || "").substring(0, 40),
+      }))
+      .filter(i => i.id || i.placeholder || i.name);
+    // All visible buttons
+    const allButtons = Array.from(document.querySelectorAll("button"))
+      .filter(b => b.offsetParent !== null)
+      .map(b => ({
+        text: b.textContent.trim().substring(0, 60),
+        class: (b.className || "").substring(0, 40),
+        disabled: b.disabled,
+      }))
+      .filter(b => b.text.length > 0);
+    // Custom dropdowns (ng-select, mat-select, etc.)
+    const customSelects = Array.from(document.querySelectorAll(
+      'ng-select, mat-select, [class*="ng-select"], [class*="mat-select"], [class*="custom-select"], [role="listbox"], [role="combobox"]'
+    )).map(s => ({
+      tag: s.tagName,
+      class: (s.className || "").substring(0, 60),
+      placeholder: s.getAttribute("placeholder") || "",
+      text: s.textContent.trim().substring(0, 40),
+      visible: s.offsetParent !== null,
+    }));
+    // Labels
+    const labels = Array.from(document.querySelectorAll("label"))
+      .filter(l => l.offsetParent !== null)
+      .map(l => l.textContent.trim().substring(0, 40))
+      .filter(t => t.length > 0);
+    return { allInputs: allInputs.slice(0, 25), allButtons: allButtons.slice(0, 15), customSelects: customSelects.slice(0, 10), labels: labels.slice(0, 20) };
+  });
+  console.log(`${LOG} === FORM DUMP ===`);
+  console.log(`${LOG} Inputs (${formDump.allInputs.length}):`);
+  for (const inp of formDump.allInputs) {
+    console.log(`${LOG}   ${inp.visible ? "✓" : "✗"} id="${inp.id}" name="${inp.name}" placeholder="${inp.placeholder}" type="${inp.type}" val="${inp.value}"`);
+  }
+  console.log(`${LOG} Buttons (${formDump.allButtons.length}):`);
+  for (const btn of formDump.allButtons) {
+    console.log(`${LOG}   ${btn.disabled ? "⊘" : "●"} "${btn.text}"`);
+  }
+  console.log(`${LOG} Custom selects (${formDump.customSelects.length}):`);
+  for (const sel of formDump.customSelects) {
+    console.log(`${LOG}   ${sel.visible ? "✓" : "✗"} <${sel.tag}> placeholder="${sel.placeholder}" text="${sel.text}"`);
+  }
+  console.log(`${LOG} Labels: ${JSON.stringify(formDump.labels)}`);
+  console.log(`${LOG} === END FORM DUMP ===`);
+
+  // Look for VIN input specifically (not State/Province)
+  const vinField = formDump.allInputs.find(i =>
+    (i.placeholder?.toLowerCase().includes("vin") || i.id?.toLowerCase() === "vin") &&
+    !i.placeholder?.toLowerCase().includes("state") &&
+    !i.placeholder?.toLowerCase().includes("province")
+  );
+
+  if (vehicle.vin && vinField) {
     console.log(`${LOG} Entering VIN: ${vehicle.vin}`);
-    const vinSel = vehicleDebug.vinFields[0].id ? `#${vehicleDebug.vinFields[0].id}` : `input[placeholder*="VIN" i]`;
+    const vinSel = vinField.id ? `#${vinField.id}` : `input[placeholder="${vinField.placeholder}"]`;
     await fillField(page, vinSel, vehicle.vin);
     await sleep(1000);
-    // Try to click Decode button
+    // Click Decode button
     await page.evaluate(() => {
       const btns = Array.from(document.querySelectorAll("button")).filter(b => b.offsetParent !== null);
       for (const btn of btns) {
@@ -519,40 +565,90 @@ async function createEstimateWithCustomerVehicle(page, customer, vehicle) {
       return false;
     });
     await sleep(5000);
-  } else if (vehicleDebug.ymmeFields.length > 0) {
-    console.log(`${LOG} YMME fields found — filling year/make/model`);
-    // Fill whatever YMME fields are visible
-    for (const field of vehicleDebug.ymmeFields) {
-      const sel = field.id ? `#${field.id}` : `input[placeholder="${field.placeholder}"]`;
-      const placeholder = (field.placeholder || "").toLowerCase();
-      if (placeholder.includes("year")) {
-        await fillField(page, sel, String(vehicle.year));
-      } else if (placeholder.includes("make")) {
-        await fillField(page, sel, vehicle.make);
-      } else if (placeholder.includes("model")) {
-        await fillField(page, sel, vehicle.model);
-      }
-      await sleep(500);
-    }
   } else {
-    console.log(`${LOG} No vehicle fields visible — will skip vehicle entry`);
+    // Try to fill Year/Make/Model using whatever fields are available
+    // Look for ng-select or custom dropdowns for year/make/model
+    console.log(`${LOG} No VIN field — looking for YMME dropdowns...`);
+
+    // For custom Angular dropdowns, we need to click to open, then type to search
+    for (const field of ["year", "make", "model"]) {
+      const value = field === "year" ? String(vehicle.year) : field === "make" ? vehicle.make : vehicle.model;
+      if (!value) continue;
+
+      // Find dropdown by label, placeholder, or class
+      const filled = await page.evaluate((fieldName, fieldValue) => {
+        // Look for ng-select or similar with matching placeholder/label
+        const dropdowns = Array.from(document.querySelectorAll(
+          'ng-select, mat-select, [class*="ng-select"], [role="combobox"]'
+        )).filter(d => d.offsetParent !== null);
+
+        for (const dd of dropdowns) {
+          const placeholder = (dd.getAttribute("placeholder") || "").toLowerCase();
+          const label = dd.closest("div, label")?.textContent?.toLowerCase() || "";
+          if (placeholder.includes(fieldName) || label.includes(fieldName)) {
+            dd.click();
+            return { found: true, tag: dd.tagName, class: (dd.className || "").substring(0, 40) };
+          }
+        }
+
+        // Also check regular inputs
+        const inputs = Array.from(document.querySelectorAll("input"))
+          .filter(i => i.offsetParent !== null);
+        for (const inp of inputs) {
+          const ph = (inp.placeholder || "").toLowerCase();
+          const id = (inp.id || "").toLowerCase();
+          if (ph.includes(fieldName) || id.includes(fieldName)) {
+            return { found: true, isInput: true, id: inp.id, placeholder: inp.placeholder };
+          }
+        }
+
+        return { found: false };
+      }, field, value);
+
+      if (filled.found) {
+        if (filled.isInput) {
+          const sel = filled.id ? `#${filled.id}` : `input[placeholder="${filled.placeholder}"]`;
+          await fillField(page, sel, value);
+        } else {
+          // Custom dropdown — type the value to search
+          await sleep(500);
+          await page.keyboard.type(value, { delay: 50 });
+          await sleep(1000);
+          // Press Enter or click first option
+          await page.keyboard.press("Enter");
+        }
+        console.log(`${LOG}   ${field}: "${value}" ✓`);
+        await sleep(500);
+      } else {
+        console.log(`${LOG}   ${field}: dropdown not found`);
+      }
+    }
   }
 
-  // Step 5: Click "Save" then create estimate
+  // Step 5: Click "Save & Create Estimate" (preferred) or "Save"
   console.log(`${LOG} Looking for Save / Create Estimate button...`);
-  let saveClicked = false;
 
-  // Try text-based button search (visible buttons only)
+  // First screenshot before clicking
+  await page.screenshot({ path: "/tmp/debug-before-save.png" });
+
+  let saveClicked = false;
   saveClicked = await page.evaluate(() => {
     const btns = Array.from(document.querySelectorAll("button")).filter(b => b.offsetParent !== null && !b.disabled);
-    // Priority order
-    const priorities = ["Save & Create Estimate", "Save & Create", "Create Estimate", "Save"];
+    // Priority order — "Save & Create Estimate" is the ideal button
+    const priorities = ["Save & Create Estimate", "Save & Create", "Create Estimate"];
     for (const text of priorities) {
       for (const btn of btns) {
         if (btn.textContent.trim().includes(text)) {
           btn.click();
           return text;
         }
+      }
+    }
+    // Fallback to "Save" — we'll create estimate separately
+    for (const btn of btns) {
+      if (btn.textContent.trim() === "Save" || btn.textContent.trim().startsWith("Save")) {
+        btn.click();
+        return "Save";
       }
     }
     return null;
@@ -565,32 +661,71 @@ async function createEstimateWithCustomerVehicle(page, customer, vehicle) {
     return { success: false, error: '"Save" button not found' };
   }
 
+  await sleep(5000);
+  await page.screenshot({ path: "/tmp/debug-after-save.png" });
+
+  // If we clicked "Save" (not "Save & Create Estimate"), we need to create estimate from customer page
+  if (saveClicked === "Save") {
+    console.log(`${LOG} Customer saved — now looking for "Create Estimate" option...`);
+
+    // After saving customer, AutoLeap may redirect to customer detail page
+    // Look for a "Create Estimate" button/link on that page
+    const createEstClicked = await page.evaluate(() => {
+      const allEls = Array.from(document.querySelectorAll("button, a, [role='button']"))
+        .filter(el => el.offsetParent !== null);
+      for (const el of allEls) {
+        const text = (el.textContent || "").trim();
+        if (text.includes("Create Estimate") || text.includes("New Estimate") || text.includes("Estimate")) {
+          el.click();
+          return text;
+        }
+      }
+      return null;
+    });
+
+    if (createEstClicked) {
+      console.log(`${LOG} Clicked: "${createEstClicked}"`);
+      await sleep(5000);
+    } else {
+      console.log(`${LOG} No "Create Estimate" button found — navigating to workboard to create estimate...`);
+      // Navigate back to workboard and create estimate via "Estimate" button
+      await page.goto(`${AUTOLEAP_APP_URL}/#/workboard`, { waitUntil: "domcontentloaded", timeout: 30000 });
+      await sleep(3000);
+      await page.evaluate(() => {
+        const btns = Array.from(document.querySelectorAll("button")).filter(b => b.offsetParent !== null);
+        for (const btn of btns) {
+          if (btn.textContent.trim() === "Estimate") {
+            btn.click();
+            return;
+          }
+        }
+      });
+      await sleep(3000);
+    }
+  }
+
   // Wait for navigation to estimate page
   console.log(`${LOG} Waiting for estimate page...`);
-  try {
-    await page.waitForFunction(
-      () => window.location.href.includes("/estimate") || window.location.href.includes("/workboard"),
-      { timeout: 20000 }
-    );
-  } catch {
-    // May already be on estimate page
-  }
   await sleep(3000);
 
   // Extract estimate ID and RO number from URL
   const currentUrl = page.url();
-  const estimateMatch = currentUrl.match(/estimates?\/([a-f0-9]+)/i);
+  console.log(`${LOG} Current URL after save: ${currentUrl}`);
+  const estimateMatch = currentUrl.match(/estimates?\/([a-f0-9-]+)/i);
   const estimateId = estimateMatch?.[1] || null;
 
   // Try to read RO number from page
   const roNumber = await page.evaluate(() => {
     const el = document.querySelector('[class*="ro-number"], [class*="estimate-code"], [class*="code"]');
     if (el) return el.textContent.trim();
-    // Look for text pattern like "RO-12345" or "EST-12345"
+    // Look for text pattern like "RO-12345" or "EST-12345" or #XXXXX
     const body = document.body.innerText;
-    const match = body.match(/(RO-\d+|EST-\d+|#\d{4,})/);
+    const match = body.match(/(RO-\d+|EST-\d+|#\d{4,}|\d{5})/);
     return match?.[0] || null;
   });
+
+  // Screenshot of estimate page
+  await page.screenshot({ path: "/tmp/debug-estimate-page.png" });
 
   return {
     success: true,
