@@ -152,13 +152,23 @@ async function openPartsTechTab(page, browser) {
         }
       }
 
-      // Priority 2: element with fa-plus icon — click the BUTTON ancestor, not the icon
+      // Priority 2: find the BUTTON directly (it contains an <i class="fa-plus"> icon)
+      // The button has class "p-element btn btn-primary"
       for (const el of allEls) {
-        if (el.classList.contains("fa-plus") || el.querySelector(".fa-plus, .pi-plus")) {
-          // Must click the actual <button> ancestor for Angular event binding
-          const clickTarget = el.closest("button") || el.closest("a") || el;
-          clickTarget.setAttribute("data-pt-plus", "true");
-          return { found: true, tag: clickTarget.tagName, text: "+icon", strategy: "fa-plus" };
+        if (el.tagName === "BUTTON" && el.querySelector("i.fa-plus, i[class*='fa-plus'], .pi-plus")) {
+          el.setAttribute("data-pt-plus", "true");
+          return { found: true, tag: "BUTTON", text: "+btn", strategy: "button-with-plus-icon" };
+        }
+      }
+
+      // Priority 2b: if no button found, find the <i> icon and navigate to button ancestor
+      for (const el of allEls) {
+        if (el.tagName === "I" && el.classList.contains("fa-plus")) {
+          const btn = el.closest("button");
+          if (btn) {
+            btn.setAttribute("data-pt-plus", "true");
+            return { found: true, tag: "BUTTON", text: "+icon-ancestor", strategy: "fa-plus-to-button" };
+          }
         }
       }
 

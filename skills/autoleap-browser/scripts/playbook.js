@@ -128,41 +128,67 @@ async function runPlaybook({ customer, vehicle, diagnosis, parts, progressCallba
         await vehInput.type(vehSearch, { delay: 50 });
         await sleep(2000);
 
-        // Check for autocomplete dropdown options
+        // Check for autocomplete dropdown options (scoped to autocomplete panel only)
         const optionResult = await page.evaluate((year, make, model) => {
-          // Look for dropdown/autocomplete options
-          const options = Array.from(document.querySelectorAll(
-            "[class*='autocomplete-option'], [class*='dropdown-item'], [class*='option'], [class*='suggestion'], [role='option'], li[class*='item']"
-          )).filter(o => o.offsetParent !== null);
+          // AutoLeap uses PrimeNG / Angular autocomplete panels
+          // Look for autocomplete panel/overlay that appeared after typing
+          const panels = Array.from(document.querySelectorAll(
+            ".p-autocomplete-panel, [class*='autocomplete-panel'], [class*='autocomplete-items'], " +
+            "[class*='dropdown-panel'], [class*='overlay-panel'], .cdk-overlay-container"
+          )).filter(p => p.offsetParent !== null || p.querySelector("li, [class*='item']"));
 
-          // Also check for generic list items that might be autocomplete results
-          const listItems = Array.from(document.querySelectorAll("li, div[class*='list']"))
-            .filter(o => {
-              if (!o.offsetParent) return false;
-              const text = o.textContent.toLowerCase();
-              // Must contain at least make or year to be a vehicle option
-              return (make && text.includes(make.toLowerCase())) || (year && text.includes(String(year)));
+          // Find options specifically inside autocomplete panels
+          let options = [];
+          for (const panel of panels) {
+            const items = Array.from(panel.querySelectorAll(
+              "li, [class*='autocomplete-item'], [class*='option'], [role='option']"
+            )).filter(o => o.offsetParent !== null && o.textContent.trim().length > 0);
+            options.push(...items);
+          }
+
+          // Fallback: look for overlay items near the vehicle input
+          if (options.length === 0) {
+            const vehicleInput = document.querySelector("#estimate-vehicle");
+            if (vehicleInput) {
+              const parent = vehicleInput.closest("[class*='autocomplete'], [class*='vehicle']") || vehicleInput.parentElement?.parentElement;
+              if (parent) {
+                const items = Array.from(parent.querySelectorAll("li, [class*='item'], [class*='option']"))
+                  .filter(o => o.offsetParent !== null && o.textContent.trim().length > 0);
+                options.push(...items);
+              }
+            }
+          }
+
+          // Last resort: look for any li items that contain vehicle-like text (year/make)
+          if (options.length === 0 && (year || make)) {
+            const allLi = Array.from(document.querySelectorAll("li")).filter(li => {
+              if (!li.offsetParent) return false;
+              const text = li.textContent.trim();
+              // Must look like a vehicle entry, not a nav item
+              if (text.length > 100) return false;
+              if (["Dashboard", "Work Board", "Calendar", "Customers", "Catalog",
+                   "Inventory", "CRM", "Reviews", "Reports", "User Center"].includes(text)) return false;
+              const hasYear = year && text.includes(String(year));
+              const hasMake = make && text.toLowerCase().includes(make.toLowerCase());
+              return hasYear || hasMake;
             });
+            options.push(...allLi);
+          }
 
-          const allOptions = [...options, ...listItems];
-          const uniqueTexts = [...new Set(allOptions.map(o => o.textContent.trim().substring(0, 80)))];
+          const uniqueTexts = [...new Set(options.map(o => o.textContent.trim().substring(0, 80)))].slice(0, 10);
 
-          if (allOptions.length > 0) {
+          if (options.length > 0) {
             // Find best match: contains year + make
             let bestMatch = null;
-            for (const opt of allOptions) {
+            for (const opt of options) {
               const text = opt.textContent.toLowerCase();
               const hasYear = !year || text.includes(String(year));
               const hasMake = !make || text.includes(make.toLowerCase());
-              if (hasYear && hasMake) {
-                bestMatch = opt;
-                break;
-              }
+              if (hasYear && hasMake) { bestMatch = opt; break; }
             }
-            // Fallback: click first option
-            const target = bestMatch || allOptions[0];
+            const target = bestMatch || options[0];
             target.click();
-            return { selected: true, text: target.textContent.trim().substring(0, 60), count: allOptions.length, all: uniqueTexts };
+            return { selected: true, text: target.textContent.trim().substring(0, 60), count: options.length, all: uniqueTexts };
           }
 
           return { selected: false, count: 0, all: uniqueTexts };
