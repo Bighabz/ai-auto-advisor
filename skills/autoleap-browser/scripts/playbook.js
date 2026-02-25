@@ -310,63 +310,107 @@ async function ensureLoggedIn(page) {
 // ═══════════════════════════════════════════════════════════════════════════════
 
 async function createEstimateWithCustomerVehicle(page, customer, vehicle) {
-  // Step 2: Navigate to Customers page and open "Add Customer" form
-  console.log(`${LOG} Navigating to Customers page...`);
-  await page.goto(`${AUTOLEAP_APP_URL}/#/customers`, {
-    waitUntil: "domcontentloaded",
-    timeout: 30000,
-  });
-  await sleep(3000);
+  // Step 2: Open "Add Customer" via global "+" dropdown
+  // The "+" in the header opens a dropdown with cards: Customer, Appointment, Estimate, etc.
+  // We need to click "+" first, then click the "Customer" card.
 
-  // Screenshot to see the Customers page
-  await page.screenshot({ path: "/tmp/debug-customers-page.png" });
-
-  // Look for "Add Customer" or "+" button on the Customers page
-  console.log(`${LOG} Looking for Add Customer button...`);
-  const addClicked = await page.evaluate(() => {
-    const btns = Array.from(document.querySelectorAll("button, a, [role='button']"))
-      .filter(b => b.offsetParent !== null);
-    // Try: "Add Customer", "Add", "New Customer", "Create Customer"
-    const targets = ["Add Customer", "New Customer", "Create Customer", "Add New"];
-    for (const target of targets) {
-      for (const btn of btns) {
-        if ((btn.textContent || "").trim().includes(target)) {
-          btn.click();
-          return target;
-        }
-      }
-    }
-    // Try "+" button or icon
-    for (const btn of btns) {
-      const text = (btn.textContent || "").trim();
-      if (text === "+" || text === "Add") {
-        btn.click();
-        return `"${text}"`;
-      }
-    }
-    // Try icon-based buttons (fa-plus, fa-plus-circle)
-    for (const btn of btns) {
-      const icons = btn.querySelectorAll("i.fa-plus, i.fa-plus-circle, i.fas.fa-plus");
-      if (icons.length > 0) {
-        btn.click();
-        return "icon:fa-plus";
-      }
-    }
-    // Log what buttons exist
-    const allBtnTexts = btns.map(b => b.textContent.trim().substring(0, 40)).filter(t => t.length > 0);
-    return { buttons: allBtnTexts.slice(0, 15) };
-  });
-
-  console.log(`${LOG} Add Customer result: ${JSON.stringify(addClicked)}`);
-
-  if (typeof addClicked === "object") {
-    // Failed — log the available buttons for debugging
-    console.log(`${LOG} Available buttons: ${JSON.stringify(addClicked.buttons)}`);
-    await page.screenshot({ path: "/tmp/debug-no-add-customer.png", fullPage: true });
-    return { success: false, error: `Could not find "Add Customer" button. Available: ${(addClicked.buttons || []).join(", ")}` };
+  // Navigate to workboard first (dropdown works from any page)
+  if (!page.url().includes("/workboard")) {
+    await page.goto(`${AUTOLEAP_APP_URL}/#/workboard`, {
+      waitUntil: "domcontentloaded",
+      timeout: 30000,
+    });
+    await sleep(3000);
   }
 
-  console.log(`${LOG} Clicked: "${addClicked}"`);
+  // Step 2a: Click the global "+" button to open dropdown
+  console.log(`${LOG} Clicking "+" button to open dropdown...`);
+  const plusClicked = await page.evaluate(() => {
+    const allClickable = Array.from(document.querySelectorAll("button, a, [role='button'], span, i"));
+    for (const el of allClickable) {
+      const cls = (el.className || "").toLowerCase();
+      if ((cls.includes("plus-circle") || cls.includes("fa-plus")) && el.offsetParent !== null) {
+        // Click the button/link ancestor, not the icon itself
+        const clickTarget = el.closest("button, a, [role='button']") || el;
+        clickTarget.click();
+        return "plus-icon";
+      }
+    }
+    return null;
+  });
+
+  if (!plusClicked) {
+    return { success: false, error: 'Could not find "+" button in header' };
+  }
+  console.log(`${LOG} Dropdown opened ✓`);
+  await sleep(2000);
+
+  // Step 2b: Click the "Customer" card from the dropdown
+  // Each card has: icon + heading ("Customer") + subheading ("Add a new customer")
+  console.log(`${LOG} Clicking "Customer" card from dropdown...`);
+  const customerClicked = await page.evaluate(() => {
+    // Strategy 1: Find all visible elements, look for one whose own text content starts with "Customer"
+    // but not "Customers" (nav link). The dropdown card heading should be "Customer" exactly.
+    const candidates = Array.from(document.querySelectorAll("*")).filter(el => {
+      if (!el.offsetParent) return false;
+      // Check direct text nodes only (not nested children)
+      const directText = Array.from(el.childNodes)
+        .filter(n => n.nodeType === 3)
+        .map(n => n.textContent.trim())
+        .join(" ");
+      return directText === "Customer";
+    });
+
+    if (candidates.length > 0) {
+      // Click the closest clickable parent (the card container)
+      const card = candidates[0].closest("a, button, [role='button'], div[class*='item'], div[class*='card'], div[class*='menu']") || candidates[0];
+      card.click();
+      return `card:${card.tagName}`;
+    }
+
+    // Strategy 2: Find links/buttons containing "Add a new customer"
+    const links = Array.from(document.querySelectorAll("a, button, div, li"))
+      .filter(el => el.offsetParent !== null);
+    for (const el of links) {
+      const text = (el.textContent || "").trim();
+      if (text === "Customer Add a new customer" || text.startsWith("Customer\n")) {
+        el.click();
+        return `container:${el.tagName}`;
+      }
+    }
+
+    // Strategy 3: Look for href containing "customer" in visible links
+    const allLinks = Array.from(document.querySelectorAll("a[href]"))
+      .filter(a => a.offsetParent !== null);
+    for (const a of allLinks) {
+      const href = a.getAttribute("href") || "";
+      if (href.includes("customer") && !href.includes("customers")) {
+        a.click();
+        return `href:${href}`;
+      }
+    }
+
+    return null;
+  });
+
+  if (!customerClicked) {
+    await page.screenshot({ path: "/tmp/debug-dropdown-open.png", fullPage: true });
+    // Dump dropdown items for debugging
+    const dropdownItems = await page.evaluate(() => {
+      return Array.from(document.querySelectorAll("*"))
+        .filter(el => el.offsetParent !== null && el.textContent.includes("Add a new"))
+        .slice(0, 5)
+        .map(el => ({
+          tag: el.tagName,
+          class: (el.className || "").substring(0, 60),
+          text: el.textContent.trim().substring(0, 80),
+          href: el.getAttribute?.("href") || null,
+        }));
+    });
+    console.log(`${LOG} Dropdown items with "Add a new": ${JSON.stringify(dropdownItems)}`);
+    return { success: false, error: 'Could not click "Customer" card from dropdown' };
+  }
+  console.log(`${LOG} Clicked Customer card: ${customerClicked}`);
   await sleep(3000);
 
   // Wait for the customer form to appear (drawer/modal with personal-card-fname)
