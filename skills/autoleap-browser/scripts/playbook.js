@@ -102,21 +102,23 @@ async function runPlaybook({ customer, vehicle, diagnosis, parts, progressCallba
     // ═══════════════════════════════════════════════════════════════════════════
     // PHASE 2b: Add vehicle to estimate (if not linked via API)
     // ═══════════════════════════════════════════════════════════════════════════
-    // Check if "Select vehicle" placeholder is still visible — means no vehicle linked
-    const needsVehicle = await page.evaluate(() => {
-      // Check the vehicle input specifically
-      const vehInput = document.querySelector("#estimate-vehicle");
-      if (vehInput) {
-        // If input has placeholder "Select vehicle" AND value is empty → needs vehicle
-        const placeholder = vehInput.placeholder || vehInput.getAttribute("placeholder") || "";
-        return placeholder.includes("Select vehicle") && !vehInput.value;
-      }
-      // Fallback: check page text
-      const pageText = document.body?.innerText || "";
-      return pageText.includes("Select vehicle");
-    });
+    let needsVehicle = false;
+    try {
+      needsVehicle = await page.evaluate(() => {
+        const vehInput = document.querySelector("#estimate-vehicle");
+        if (vehInput) {
+          const placeholder = vehInput.placeholder || vehInput.getAttribute("placeholder") || "";
+          return placeholder.includes("Select vehicle") && !vehInput.value;
+        }
+        const pageText = document.body?.innerText || "";
+        return pageText.includes("Select vehicle");
+      });
+    } catch (vehDetectErr) {
+      console.log(`${LOG} Vehicle detection error: ${vehDetectErr.message} — continuing`);
+    }
 
     if (needsVehicle && (vehicle.year || vehicle.make || vehicle.vin)) {
+      try {
       console.log(`${LOG} Phase 2b: Adding vehicle via autocomplete (#estimate-vehicle)...`);
 
       // The vehicle field is an autocomplete input: #estimate-vehicle
@@ -246,12 +248,16 @@ async function runPlaybook({ customer, vehicle, diagnosis, parts, progressCallba
       // Verify vehicle is now linked
       const stillNeedsVehicle = await page.evaluate(() => {
         return (document.body?.innerText || "").includes("Select vehicle");
-      });
+      }).catch(() => false);
       if (stillNeedsVehicle) {
         console.log(`${LOG}   WARNING: Vehicle still not linked after browser attempt`);
         result.warnings.push({ code: "NO_VEHICLE", msg: "Vehicle not linked to estimate" });
       } else {
         console.log(`${LOG}   Vehicle linked ✓`);
+      }
+      } catch (vehErr) {
+        console.log(`${LOG} Phase 2b vehicle error: ${vehErr.message} — continuing without vehicle`);
+        result.warnings.push({ code: "VEHICLE_ERROR", msg: vehErr.message });
       }
     } else if (!needsVehicle) {
       console.log(`${LOG} Vehicle already linked ✓`);
