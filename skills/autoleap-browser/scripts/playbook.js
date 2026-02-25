@@ -217,11 +217,11 @@ async function runPlaybook({ customer, vehicle, diagnosis, parts, progressCallba
               // Strip all non-digits from text for phone comparison
               const stripDigits = (s) => (s || "").replace(/\D/g, "");
 
-              // Find best match — phone digits is the most reliable
-              let best = null;
+              // Find best match index — phone digits is the most reliable
+              let bestIdx = -1;
               let matchType = "";
-              for (const item of items) {
-                const t = item.textContent;
+              for (let i = 0; i < items.length; i++) {
+                const t = items[i].textContent;
                 const tDigits = stripDigits(t);
                 const tLower = t.toLowerCase();
 
@@ -229,7 +229,7 @@ async function runPlaybook({ customer, vehicle, diagnosis, parts, progressCallba
                 if (phoneDigitsStr && phoneDigitsStr.length >= 4) {
                   const phoneEnd = phoneDigitsStr.slice(-7);
                   if (tDigits.includes(phoneEnd) || phoneEnd.includes(tDigits.slice(-7))) {
-                    best = item; matchType = "phone"; break;
+                    bestIdx = i; matchType = "phone"; break;
                   }
                 }
 
@@ -237,23 +237,33 @@ async function runPlaybook({ customer, vehicle, diagnosis, parts, progressCallba
                 if (fullName) {
                   const nameParts = fullName.toLowerCase().split(/\s+/).filter(p => p.length > 1);
                   const allMatch = nameParts.length >= 2 && nameParts.every(p => tLower.includes(p));
-                  if (allMatch) { best = item; matchType = "fullName"; break; }
+                  if (allMatch) { bestIdx = i; matchType = "fullName"; break; }
                 }
               }
 
-              // 3. Last resort: first name match (but only if single result)
-              if (!best && items.length === 1) {
-                best = items[0];
+              // 3. Last resort: only result
+              if (bestIdx === -1 && items.length === 1) {
+                bestIdx = 0;
                 matchType = "onlyResult";
               }
 
-              // Do NOT fall back to items[0] when multiple results — wrong customer is worse than no customer
-              if (best) {
-                best.click();
-                return { selected: true, matchType, text: best.textContent.trim().substring(0, 80), count: items.length, all: texts };
+              // Return index + rect for puppeteer-native click (NOT DOM click)
+              if (bestIdx >= 0) {
+                const rect = items[bestIdx].getBoundingClientRect();
+                return {
+                  selected: true, matchType, bestIdx,
+                  rect: { x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 },
+                  text: items[bestIdx].textContent.trim().substring(0, 80),
+                  count: items.length, all: texts,
+                };
               }
               return { selected: false, count: items.length, all: texts };
             }, customer.name, phoneDigits, NAV_TEXTS);
+
+            // Use puppeteer-native click (dispatches proper mouse events for Angular)
+            if (custDropdown.selected && custDropdown.rect) {
+              await page.mouse.click(custDropdown.rect.x, custDropdown.rect.y);
+            }
 
             console.log(`${LOG}   Customer search result: ${JSON.stringify(custDropdown)}`);
             if (custDropdown.selected) {
@@ -268,7 +278,7 @@ async function runPlaybook({ customer, vehicle, diagnosis, parts, progressCallba
               if (fallbackTerm && fallbackTerm !== searchTerm) {
                 await custInput.type(fallbackTerm, { delay: 100 });
                 await sleep(3000);
-                // Re-check dropdown with full name match
+                // Re-check dropdown with full name match — return rect for native click
                 const retry = await page.evaluate((fullName, phoneDigitsStr, navTexts) => {
                   const items = Array.from(document.querySelectorAll(
                     ".p-autocomplete-panel li, .p-autocomplete-items li, " +
@@ -294,9 +304,15 @@ async function runPlaybook({ customer, vehicle, diagnosis, parts, progressCallba
                     }
                   }
                   if (!best && items.length === 1) best = items[0];
-                  if (best) { best.click(); return { selected: true, text: best.textContent.trim().substring(0, 80) }; }
+                  if (best) {
+                    const rect = best.getBoundingClientRect();
+                    return { selected: true, text: best.textContent.trim().substring(0, 80), rect: { x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 } };
+                  }
                   return { selected: false, count: items.length };
                 }, customer.name, phoneDigits, NAV_TEXTS);
+                if (retry.selected && retry.rect) {
+                  await page.mouse.click(retry.rect.x, retry.rect.y);
+                }
                 console.log(`${LOG}   Retry result: ${JSON.stringify(retry)}`);
                 if (retry.selected) await sleep(5000);
               }
@@ -325,45 +341,22 @@ async function runPlaybook({ customer, vehicle, diagnosis, parts, progressCallba
 
         await page.screenshot({ path: "/tmp/debug-before-vehicle-select.png" });
 
-        // ── Step B: Select VEHICLE from autocomplete ──
+        // ── Step B: Select VEHICLE from autocomplete (puppeteer-native clicks) ──
         // After customer data is loaded, the vehicle autocomplete should have options
         console.log(`${LOG}   Step B: Selecting vehicle "${vehicleStr}"...`);
-
-        // Check the current state of the vehicle field
-        const vehState = await page.evaluate(() => {
-          const v = document.querySelector("#estimate-vehicle");
-          if (!v) return { exists: false };
-          const wrapper = v.closest("[class*='vehicle']") || v.parentElement?.parentElement;
-          const wrapperText = wrapper?.textContent?.trim()?.substring(0, 80) || "";
-          return {
-            exists: true,
-            value: (v.value || "").substring(0, 60),
-            placeholder: (v.placeholder || "").substring(0, 40),
-            wrapperText,
-            // Check if PT button is still disabled
-            ptDisabled: !!document.querySelector('.ro-partstech-new button.if-disabled'),
-          };
-        });
-        console.log(`${LOG}   Vehicle state: ${JSON.stringify(vehState)}`);
-
-        // If vehicle already appears in the wrapper text (not just the input), it may be selected
-        if (vehState.wrapperText.includes(String(vehicle.year)) && vehState.wrapperText.includes(vehicle.make || "")) {
-          console.log(`${LOG}   Vehicle appears in wrapper text — may be auto-selected ✓`);
-        }
 
         const vehInput = await page.$("#estimate-vehicle");
         let vehicleSelected = false;
 
-        if (vehInput && (!vehState.value || vehState.value.includes("Select") || vehState.placeholder.includes("Select"))) {
-          // Try clicking the vehicle input to see if a dropdown appears
+        if (vehInput) {
+          // Click vehicle input to open dropdown
           await vehInput.click();
           await sleep(2000);
 
-          // Check for dropdown
           const NAV_TEXTS = ["Dashboard", "Work Board", "Calendar", "Customers", "Catalog", "Inventory", "CRM", "Reviews", "Reports", "User Center"];
 
-          // First check what appeared after clicking
-          const afterClick = await page.evaluate((navTexts) => {
+          // Get dropdown items with coordinates for puppeteer-native click
+          const vehDropdown = await page.evaluate((yr, mk, navTexts) => {
             const items = Array.from(document.querySelectorAll(
               ".p-autocomplete-panel li, .p-autocomplete-items li, " +
               "[class*='autocomplete'] [class*='list'] li, [role='option']"
@@ -373,51 +366,46 @@ async function runPlaybook({ customer, vehicle, diagnosis, parts, progressCallba
               return t.length > 0 && !navTexts.includes(t) &&
                 !li.closest("nav, [class*='sidebar-nav'], [class*='nav-menu']");
             });
-            return {
-              count: items.length,
-              items: items.map(li => li.textContent.trim().substring(0, 60)).slice(0, 10),
-            };
-          }, NAV_TEXTS);
-          console.log(`${LOG}   After vehicle click: ${afterClick.count} dropdown items`);
+            const texts = items.map(li => li.textContent.trim().substring(0, 60));
 
-          if (afterClick.count > 0) {
-            // Dropdown appeared on click! Select matching vehicle
-            const selectResult = await page.evaluate((yr, mk, navTexts) => {
-              const items = Array.from(document.querySelectorAll(
-                ".p-autocomplete-panel li, .p-autocomplete-items li, " +
-                "[class*='autocomplete'] [class*='list'] li, [role='option']"
-              )).filter(li => {
-                if (!li.offsetParent) return false;
-                const t = li.textContent.trim();
-                return t.length > 0 && !navTexts.includes(t) &&
-                  !li.closest("nav, [class*='sidebar-nav'], [class*='nav-menu']");
-              });
-              let best = null;
-              for (const item of items) {
-                const t = item.textContent.toLowerCase();
-                if ((yr && t.includes(String(yr))) && (mk && t.includes(mk.toLowerCase()))) {
-                  best = item; break;
-                }
+            let bestIdx = -1;
+            for (let i = 0; i < items.length; i++) {
+              const t = items[i].textContent.toLowerCase();
+              if ((yr && t.includes(String(yr))) && (mk && t.includes(mk.toLowerCase()))) {
+                bestIdx = i; break;
               }
-              if (!best && items.length > 0) best = items[0];
-              if (best) { best.click(); return { selected: true, text: best.textContent.trim().substring(0, 60) }; }
-              return { selected: false };
-            }, vehicle.year, vehicle.make, NAV_TEXTS);
-            if (selectResult.selected) {
-              vehicleSelected = true;
-              console.log(`${LOG}   Vehicle selected from dropdown: "${selectResult.text}"`);
-              await sleep(2000);
             }
-          }
+            // Fall back to first item only if 1-2 results (safe)
+            if (bestIdx === -1 && items.length > 0 && items.length <= 2) bestIdx = 0;
 
-          if (!vehicleSelected) {
-            // Type to search
+            if (bestIdx >= 0) {
+              const rect = items[bestIdx].getBoundingClientRect();
+              return {
+                found: true, bestIdx,
+                rect: { x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 },
+                text: items[bestIdx].textContent.trim().substring(0, 60),
+                count: items.length, all: texts,
+              };
+            }
+            return { found: false, count: items.length, all: texts };
+          }, vehicle.year, vehicle.make, NAV_TEXTS);
+          console.log(`${LOG}   Vehicle dropdown: ${JSON.stringify(vehDropdown)}`);
+
+          if (vehDropdown.found && vehDropdown.rect) {
+            // Use puppeteer-native click for proper Angular event dispatch
+            await page.mouse.click(vehDropdown.rect.x, vehDropdown.rect.y);
+            vehicleSelected = true;
+            console.log(`${LOG}   Vehicle selected (native click): "${vehDropdown.text}"`);
+            await sleep(3000);
+          } else if (vehDropdown.count === 0) {
+            // No items from clicking — try typing to search
+            console.log(`${LOG}   No dropdown items — typing "${vehicle.year}" to search...`);
             await vehInput.click({ clickCount: 3 });
             await sleep(200);
             await vehInput.type(String(vehicle.year || ""), { delay: 80 });
             await sleep(3000);
 
-            const typed = await page.evaluate((yr, mk, navTexts) => {
+            const typedVeh = await page.evaluate((yr, mk, navTexts) => {
               const items = Array.from(document.querySelectorAll(
                 ".p-autocomplete-panel li, .p-autocomplete-items li, " +
                 "[class*='autocomplete'] [class*='list'] li, [role='option']"
@@ -427,33 +415,69 @@ async function runPlaybook({ customer, vehicle, diagnosis, parts, progressCallba
                 return t.length > 0 && !navTexts.includes(t) &&
                   !li.closest("nav, [class*='sidebar-nav'], [class*='nav-menu']");
               });
-              if (items.length === 0) return { count: 0 };
-              let best = null;
-              for (const item of items) {
-                const t = item.textContent.toLowerCase();
+              let bestIdx = -1;
+              for (let i = 0; i < items.length; i++) {
+                const t = items[i].textContent.toLowerCase();
                 if ((yr && t.includes(String(yr))) && (mk && t.includes(mk.toLowerCase()))) {
-                  best = item; break;
+                  bestIdx = i; break;
                 }
               }
-              if (!best && items.length > 0) best = items[0];
-              if (best) { best.click(); return { selected: true, text: best.textContent.trim().substring(0, 60), count: items.length }; }
-              return { selected: false, count: items.length };
+              if (bestIdx === -1 && items.length > 0 && items.length <= 2) bestIdx = 0;
+              if (bestIdx >= 0) {
+                const rect = items[bestIdx].getBoundingClientRect();
+                return { found: true, rect: { x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 }, text: items[bestIdx].textContent.trim().substring(0, 60), count: items.length };
+              }
+              return { found: false, count: items.length };
             }, vehicle.year, vehicle.make, NAV_TEXTS);
-            console.log(`${LOG}   Vehicle type search: ${JSON.stringify(typed)}`);
-            if (typed.selected) {
+            console.log(`${LOG}   Vehicle type search: ${JSON.stringify(typedVeh)}`);
+            if (typedVeh.found && typedVeh.rect) {
+              await page.mouse.click(typedVeh.rect.x, typedVeh.rect.y);
               vehicleSelected = true;
-              await sleep(2000);
+              await sleep(3000);
             }
           }
 
           if (!vehicleSelected) {
-            // Try ArrowDown + Enter
+            // Last resort: ArrowDown + Enter (PrimeNG keyboard selection)
+            console.log(`${LOG}   Trying keyboard selection (ArrowDown + Enter)...`);
+            await vehInput.click();
+            await sleep(1000);
             await page.keyboard.press("ArrowDown");
             await sleep(500);
             await page.keyboard.press("Enter");
-            await sleep(2000);
+            await sleep(3000);
           }
         }
+
+        // ── Step C: SAVE estimate to commit vehicle selection to Angular state ──
+        console.log(`${LOG}   Step C: Saving estimate to commit vehicle selection...`);
+        const saveBtn = await page.evaluate(() => {
+          const btns = Array.from(document.querySelectorAll("button"));
+          const save = btns.find(b =>
+            b.textContent.trim() === "Save" &&
+            b.classList.contains("btn-primary") &&
+            !b.disabled
+          );
+          if (save) {
+            const rect = save.getBoundingClientRect();
+            return { found: true, rect: { x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 } };
+          }
+          return { found: false };
+        });
+        if (saveBtn.found) {
+          await page.mouse.click(saveBtn.rect.x, saveBtn.rect.y);
+          console.log(`${LOG}   Save clicked — waiting for save to complete...`);
+          await sleep(5000);
+        } else {
+          console.log(`${LOG}   Save button not found/disabled — trying keyboard shortcut...`);
+        }
+
+        // ── Step D: Reload estimate page to get fresh Angular state ──
+        // This forces Angular to re-fetch estimate data (with vehicle now saved)
+        console.log(`${LOG}   Step D: Reloading estimate page for fresh state...`);
+        const estUrl = `${AUTOLEAP_APP_URL}/#/estimate/${result.estimateId}`;
+        await page.goto(estUrl, { waitUntil: "domcontentloaded", timeout: 30000 });
+        await sleep(6000);
 
         // ── Verify we're still on the estimate page ──
         if (!page.url().includes("/estimate/")) {
@@ -464,29 +488,42 @@ async function runPlaybook({ customer, vehicle, diagnosis, parts, progressCallba
 
         // ── Final verification using PT button disabled state (most reliable indicator) ──
         await page.screenshot({ path: "/tmp/debug-after-vehicle.png" });
-        const finalCheck = await page.evaluate((yr, mk, mdl) => {
+        const finalCheck = await page.evaluate((yr, mk) => {
           const vInput = document.querySelector("#estimate-vehicle");
-          const val = vInput?.value || "";
-          // Check wrapper text (PrimeNG might show value in span, not input)
           const wrapper = vInput?.closest("[class*='vehicle']") || vInput?.parentElement?.parentElement;
           const wrapperText = wrapper?.textContent?.trim() || "";
-          const vStr = `${yr} ${mk} ${mdl}`.trim();
-          // Check if PT button lost its disabled class
           const ptDisabled = !!document.querySelector(".ro-partstech-new button.if-disabled");
+          const ptButton = document.querySelector('.ro-partstech-new button');
           return {
-            vehicleInWrapper: vStr ? wrapperText.includes(yr) && wrapperText.includes(mk) : false,
-            inputValue: val.substring(0, 60),
+            vehicleInWrapper: wrapperText.includes(yr) && wrapperText.includes(mk),
             ptDisabled,
+            ptButtonClass: ptButton?.className?.substring(0, 80) || "not found",
             wrapperText: wrapperText.substring(0, 80),
           };
-        }, String(vehicle.year || ""), vehicle.make || "", vehicle.model || "");
+        }, String(vehicle.year || ""), vehicle.make || "");
         console.log(`${LOG}   Final check: ${JSON.stringify(finalCheck)}`);
 
-        if (finalCheck.vehicleInWrapper && !finalCheck.ptDisabled) {
-          console.log(`${LOG}   Vehicle selected AND PT enabled ✓`);
+        if (!finalCheck.ptDisabled) {
+          console.log(`${LOG}   PT button ENABLED ✓ — vehicle properly linked`);
         } else if (finalCheck.vehicleInWrapper) {
-          console.log(`${LOG}   Vehicle text visible but PT still disabled — may be typed text only`);
-          result.warnings.push({ code: "VEHICLE_TEXT_ONLY", msg: "Vehicle shows in UI but may not be properly selected" });
+          console.log(`${LOG}   Vehicle in wrapper but PT disabled — trying page.reload()...`);
+          // One more attempt: hard reload to force everything fresh
+          try {
+            await page.reload({ waitUntil: "domcontentloaded", timeout: 30000 });
+            await sleep(6000);
+            const recheck = await page.evaluate(() => ({
+              ptDisabled: !!document.querySelector(".ro-partstech-new button.if-disabled"),
+            }));
+            if (!recheck.ptDisabled) {
+              console.log(`${LOG}   PT enabled after reload ✓`);
+            } else {
+              console.log(`${LOG}   PT still disabled after reload — vehicle may need MOTOR connection`);
+              result.warnings.push({ code: "VEHICLE_TEXT_ONLY", msg: "Vehicle shows in UI but PT still disabled" });
+            }
+          } catch (reloadErr) {
+            console.log(`${LOG}   Reload failed: ${reloadErr.message}`);
+            result.warnings.push({ code: "VEHICLE_TEXT_ONLY", msg: "Vehicle shows in UI but could not verify PT state" });
+          }
         } else {
           console.log(`${LOG}   WARNING: Vehicle not linked in UI`);
           result.warnings.push({ code: "NO_VEHICLE_UI", msg: "Vehicle not selected in AutoLeap UI — PartsTech SSO may fail" });
