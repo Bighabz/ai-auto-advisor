@@ -96,20 +96,26 @@ async function runPlaybook({ customer, vehicle, diagnosis, parts, progressCallba
     result.roNumber = createResult.roNumber;
     console.log(`${LOG} Phase 2: "Save & Create Estimate" → ${result.roNumber || result.estimateId}`);
 
-    // Wait for estimate page to settle
-    await sleep(3000);
+    // Wait for estimate page to settle, then reload to force Angular to render API data
+    await sleep(2000);
+    console.log(`${LOG} Reloading estimate page to sync API data...`);
+    await page.reload({ waitUntil: "domcontentloaded", timeout: 30000 });
+    await sleep(5000);
 
     // ═══════════════════════════════════════════════════════════════════════════
     // PHASE 2b: Add vehicle to estimate (if not linked via API)
     // ═══════════════════════════════════════════════════════════════════════════
-    // Check if "Select vehicle" is visible — means no vehicle linked
+    // Check if "Select vehicle" placeholder is still visible — means no vehicle linked
     const needsVehicle = await page.evaluate(() => {
-      // Check page's visible text for "Select vehicle"
+      // Check the vehicle input specifically
+      const vehInput = document.querySelector("#estimate-vehicle");
+      if (vehInput) {
+        // If input has placeholder "Select vehicle" AND value is empty → needs vehicle
+        return vehInput.placeholder.includes("Select vehicle") && !vehInput.value;
+      }
+      // Fallback: check page text
       const pageText = document.body?.innerText || "";
-      if (pageText.includes("Select vehicle")) return true;
-      // Also check placeholder attributes (may be inside an input)
-      const inputs = Array.from(document.querySelectorAll("input, [placeholder]"));
-      return inputs.some(i => (i.placeholder || "").includes("Select vehicle"));
+      return pageText.includes("Select vehicle");
     });
 
     if (needsVehicle && (vehicle.year || vehicle.make || vehicle.vin)) {
@@ -201,61 +207,98 @@ async function runPlaybook({ customer, vehicle, diagnosis, parts, progressCallba
           console.log(`${LOG}   Selected vehicle: ${optionResult.text}`);
           await sleep(2000);
         } else {
-          console.log(`${LOG}   No matching vehicle in autocomplete — trying "Add new vehicle"...`);
+          console.log(`${LOG}   No matching vehicle in autocomplete — trying direct input or "Add vehicle" button...`);
 
-          // Check if there's an "Add new vehicle" or "Create" option
-          const addNew = await page.evaluate(() => {
-            const els = Array.from(document.querySelectorAll("a, button, div, span"))
-              .filter(el => el.offsetParent !== null);
-            for (const el of els) {
-              const t = el.textContent.trim().toLowerCase();
-              if (t.includes("add new") || t.includes("add vehicle") || t.includes("create vehicle") || t === "add") {
-                el.click();
-                return { clicked: true, text: el.textContent.trim().substring(0, 40) };
-              }
+          // Close autocomplete by pressing Escape
+          await page.keyboard.press("Escape");
+          await sleep(500);
+
+          // Look for "Vehicle" or "Add vehicle" button on the page (from customer sidebar)
+          const addVehResult = await page.evaluate(() => {
+            const btns = Array.from(document.querySelectorAll("button"))
+              .filter(b => b.offsetParent !== null);
+            // Find "Vehicle" button (btn-add-vehicle class from customer sidebar)
+            const addVeh = btns.find(b =>
+              b.classList.contains("btn-add-vehicle") ||
+              b.textContent.trim() === "Vehicle" ||
+              b.textContent.trim().toLowerCase().includes("add vehicle")
+            );
+            if (addVeh) {
+              addVeh.click();
+              return { clicked: true, text: addVeh.textContent.trim().substring(0, 40) };
             }
             return { clicked: false };
           });
-          if (addNew.clicked) {
-            console.log(`${LOG}   Clicked: ${addNew.text}`);
-            await sleep(3000);
+
+          if (addVehResult.clicked) {
+            console.log(`${LOG}   Clicked: ${addVehResult.text}`);
+            await sleep(2000);
           }
 
-          await page.screenshot({ path: "/tmp/debug-vehicle-add.png" });
-          // Dump visible form for new vehicle
-          const formDump = await page.evaluate(() => {
-            const inputs = Array.from(document.querySelectorAll("input, select")).filter(i => i.offsetParent !== null)
-              .map(i => ({ id: i.id, placeholder: i.placeholder, name: i.name, tag: i.tagName })).slice(0, 15);
-            const buttons = Array.from(document.querySelectorAll("button")).filter(b => b.offsetParent !== null)
-              .map(b => b.textContent.trim().substring(0, 40)).filter(t => t.length > 0).slice(0, 10);
-            return { inputs, buttons };
-          });
-          console.log(`${LOG}   New vehicle form inputs: ${JSON.stringify(formDump.inputs)}`);
-          console.log(`${LOG}   New vehicle form buttons: ${JSON.stringify(formDump.buttons)}`);
+          // Look for vehicle form fields in the sidebar
+          // IDs: vehicle-update-year0, vehicle-update-make0, vehicle-update-model0
+          const yearFilled = await fillField(page, '#vehicle-update-year0, input[placeholder="Year *"]', String(vehicle.year || ""));
+          const makeFilled = await fillField(page, '#vehicle-update-make0, input[placeholder="Make"]', vehicle.make || "");
+          const modelFilled = await fillField(page, '#vehicle-update-model0, input[placeholder="Model"]', vehicle.model || "");
+          const nameFilled = await fillField(page, '#vehicle-fleet-name0, input[placeholder*="Vehicle name"]',
+            `${vehicle.year || ""} ${vehicle.make || ""} ${vehicle.model || ""}`.trim());
 
-          // Try filling VIN or YMME
-          if (vehicle.vin) {
-            const vinFilled = await fillField(page, 'input[name="vin"], input[placeholder*="VIN" i], input[formcontrolname="vin"]', vehicle.vin);
-            if (vinFilled) {
-              console.log(`${LOG}   VIN filled, clicking Decode...`);
-              await page.evaluate(() => {
-                const btns = Array.from(document.querySelectorAll("button")).filter(b => b.offsetParent !== null && b.textContent.trim().toLowerCase().includes("decode"));
-                if (btns.length > 0) btns[0].click();
-              });
-              await sleep(5000);
+          console.log(`${LOG}   Vehicle form fill: year=${yearFilled}, make=${makeFilled}, model=${modelFilled}, name=${nameFilled}`);
+
+          if (yearFilled || makeFilled) {
+            // Click Save button in the sidebar
+            const saved = await page.evaluate(() => {
+              // Find save buttons — there may be multiple, pick the one in the sidebar area
+              const btns = Array.from(document.querySelectorAll("button"))
+                .filter(b => b.offsetParent !== null && !b.disabled && b.textContent.trim() === "Save");
+              // The sidebar save button is typically in a sidebar-wrapper or customer panel
+              for (const btn of btns) {
+                const inSidebar = btn.closest('[class*="sidebar"], [class*="customer-panel"], [class*="drawer"]');
+                if (inSidebar) { btn.click(); return { clicked: true, context: "sidebar" }; }
+              }
+              // Fallback: click the first Save button
+              if (btns.length > 0) { btns[0].click(); return { clicked: true, context: "first" }; }
+              return { clicked: false };
+            });
+            console.log(`${LOG}   Save result: ${JSON.stringify(saved)}`);
+            await sleep(3000);
+
+            // Reload to pick up the new vehicle
+            console.log(`${LOG}   Reloading estimate to sync vehicle...`);
+            await page.reload({ waitUntil: "domcontentloaded", timeout: 30000 });
+            await sleep(4000);
+
+            // Now try the vehicle autocomplete again
+            const vehInput2 = await page.$("#estimate-vehicle");
+            if (vehInput2) {
+              const vehSearch2 = [vehicle.year, vehicle.make].filter(Boolean).join(" ");
+              await vehInput2.click({ clickCount: 3 });
+              await sleep(300);
+              await vehInput2.type(vehSearch2, { delay: 50 });
+              await sleep(2000);
+
+              // Try to select from autocomplete dropdown
+              await page.evaluate((year, make) => {
+                const panels = Array.from(document.querySelectorAll(
+                  ".p-autocomplete-panel, [class*='autocomplete-panel'], [class*='autocomplete-items'], .cdk-overlay-container"
+                ));
+                for (const panel of panels) {
+                  const items = Array.from(panel.querySelectorAll("li, [role='option']"))
+                    .filter(o => o.offsetParent !== null);
+                  for (const item of items) {
+                    const text = item.textContent.toLowerCase();
+                    if ((year && text.includes(String(year))) || (make && text.includes(make.toLowerCase()))) {
+                      item.click();
+                      return;
+                    }
+                  }
+                  // Click first option if any
+                  if (items.length > 0) items[0].click();
+                }
+              }, vehicle.year, vehicle.make);
+              await sleep(2000);
             }
           }
-
-          // Save vehicle if form appeared
-          await page.evaluate(() => {
-            const btns = Array.from(document.querySelectorAll("button")).filter(b => b.offsetParent !== null && !b.disabled);
-            const saveBtn = btns.find(b => {
-              const t = b.textContent.trim().toLowerCase();
-              return t === "save" || t.includes("add vehicle") || t.includes("save vehicle");
-            });
-            if (saveBtn) saveBtn.click();
-          });
-          await sleep(2000);
         }
       } else {
         console.log(`${LOG}   #estimate-vehicle input not found — vehicle selection unavailable`);
@@ -284,9 +327,27 @@ async function runPlaybook({ customer, vehicle, diagnosis, parts, progressCallba
       await progress(progressCallback, "adding_parts");
       console.log(`${LOG} Phase 3: Opening PartsTech tab...`);
 
-      const { ptPage } = await openPartsTechTab(page, browser);
+      const { ptPage, isIframe } = await openPartsTechTab(page, browser);
 
-      if (ptPage) {
+      // Get the working page for PartsTech (either new tab or iframe content)
+      let ptWorkPage = ptPage;
+      if (!ptWorkPage && isIframe) {
+        console.log(`${LOG} Phase 3: PartsTech opened as iframe — getting frame content...`);
+        try {
+          const iframeEl = await page.$('iframe[src*="partstech"]');
+          if (iframeEl) {
+            ptWorkPage = await iframeEl.contentFrame();
+            if (ptWorkPage) {
+              console.log(`${LOG} Phase 3: Got iframe frame, URL: ${ptWorkPage.url().substring(0, 80)}`);
+              await sleep(3000); // Let iframe content load
+            }
+          }
+        } catch (iframeErr) {
+          console.log(`${LOG} Phase 3: Iframe access failed: ${iframeErr.message}`);
+        }
+      }
+
+      if (ptWorkPage) {
         for (const partItem of partsToAdd) {
           const searchTerm = partItem.requested?.searchTerms?.[0] ||
             partItem.requested?.partType ||
@@ -299,7 +360,7 @@ async function runPlaybook({ customer, vehicle, diagnosis, parts, progressCallba
           }
 
           console.log(`${LOG} Phase 3: Searching "${searchTerm}"...`);
-          const searchResult = await searchAndAddToCart(ptPage, searchTerm);
+          const searchResult = await searchAndAddToCart(ptWorkPage, searchTerm);
 
           if (searchResult.success) {
             console.log(`${LOG} Phase 3: Cheapest in-stock: ${searchResult.partDetails?.brand} $${searchResult.partDetails?.price}`);
@@ -313,7 +374,7 @@ async function runPlaybook({ customer, vehicle, diagnosis, parts, progressCallba
         // Submit cart to AutoLeap
         if (result.partsAdded.length > 0) {
           console.log(`${LOG} Phase 3: Added ${result.partsAdded.length} to cart, submitting quote...`);
-          const submitResult = await submitCartToAutoLeap(ptPage, page);
+          const submitResult = await submitCartToAutoLeap(ptWorkPage, page);
           if (submitResult.success) {
             console.log(`${LOG} Phase 3: Parts synced to AutoLeap`);
           } else {
@@ -322,15 +383,16 @@ async function runPlaybook({ customer, vehicle, diagnosis, parts, progressCallba
           }
         }
 
-        // Close PartsTech tab if still open
-        try {
-          if (!ptPage.isClosed()) await ptPage.close();
-        } catch { /* already closed */ }
-
-        await page.bringToFront();
+        // Close PartsTech tab if still open (only for new tab mode)
+        if (ptPage && !isIframe) {
+          try {
+            if (!ptPage.isClosed()) await ptPage.close();
+          } catch { /* already closed */ }
+          await page.bringToFront();
+        }
       } else {
-        console.log(`${LOG} Phase 3: PartsTech tab did not open — skipping parts`);
-        result.warnings.push({ code: "PT_NO_TAB", msg: "PartsTech tab did not open" });
+        console.log(`${LOG} Phase 3: PartsTech did not open (no tab, no iframe) — skipping parts`);
+        result.warnings.push({ code: "PT_NO_TAB", msg: "PartsTech did not open" });
       }
     } else {
       console.log(`${LOG} Phase 3: No parts to add — skipping PartsTech`);

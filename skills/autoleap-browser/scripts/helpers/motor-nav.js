@@ -483,8 +483,31 @@ async function findElement(page, selectorStr) {
     try {
       const el = await page.$(sel);
       if (el) return el;
-    } catch { /* try next */ }
+    } catch { /* try next — :has-text() not supported natively */ }
   }
+
+  // Text-based fallback for :has-text() selectors
+  for (const sel of selectorStr.split(", ")) {
+    const match = sel.match(/:has-text\("([^"]+)"\)/);
+    if (match) {
+      const text = match[1];
+      // Extract tag hint from selector (e.g., "button" from 'button:has-text("X")')
+      const tagHint = sel.split(":")[0].split("[")[0].split(".")[0].toLowerCase();
+      const el = await page.evaluateHandle((text, tagHint) => {
+        const candidates = tagHint
+          ? Array.from(document.querySelectorAll(`${tagHint}, [role="button"], [role="tab"]`))
+          : Array.from(document.querySelectorAll("button, a, [role='button'], [role='tab'], div"));
+        for (const el of candidates) {
+          if (el.textContent.trim().includes(text) && el.offsetParent !== null) return el;
+        }
+        return null;
+      }, text, tagHint);
+      // Check if the handle is a valid element
+      const isElement = await el.evaluate(n => n !== null).catch(() => false);
+      if (isElement) return el.asElement();
+    }
+  }
+
   return null;
 }
 
