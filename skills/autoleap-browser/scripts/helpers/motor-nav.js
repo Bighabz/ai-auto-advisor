@@ -57,12 +57,55 @@ async function navigateMotorTree(page, diagnosis, vehicle) {
   if (connectBtn) {
     console.log(`${LOG} Clicking "Connect to MOTOR"...`);
     await connectBtn.click();
-    await sleep(3000);
+    await sleep(5000); // MOTOR connection takes time
+
+    // Take debug screenshot to see the modal state
+    await page.screenshot({ path: "/tmp/debug-motor-after-connect.png" });
+
+    // Log modal state after connect
+    const modalState = await page.evaluate(() => {
+      const modal = document.querySelector("[role='dialog'], [class*='modal']");
+      if (!modal) return { modal: false };
+      const tabs = Array.from(modal.querySelectorAll("[role='tab'], [class*='tab'] a, [class*='tab'] button, li a"))
+        .filter(el => el.offsetParent !== null)
+        .map(el => el.textContent.trim())
+        .filter(t => t.length > 0);
+      const buttons = Array.from(modal.querySelectorAll("button"))
+        .filter(el => el.offsetParent !== null)
+        .map(el => el.textContent.trim())
+        .filter(t => t.length > 0);
+      return { modal: true, tabs, buttons: buttons.slice(0, 10), text: modal.textContent.trim().substring(0, 200) };
+    });
+    console.log(`${LOG} Modal after Connect: ${JSON.stringify(modalState)}`);
   }
 
-  // Click MOTOR Primary tab
-  const motorTab = await findElement(page, SERVICES.MOTOR_TAB);
+  // Click MOTOR Primary tab — retry up to 3 times (connection may be slow)
+  let motorTab = null;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    motorTab = await findElement(page, SERVICES.MOTOR_TAB);
+    if (motorTab) break;
+    if (attempt < 2) {
+      console.log(`${LOG} MOTOR Primary tab not found — waiting (attempt ${attempt + 1}/3)...`);
+      // Try scrolling modal tabs again
+      await page.evaluate((sel) => {
+        const container = document.querySelector(sel);
+        if (container) container.scrollLeft += 500;
+      }, SERVICES.MODAL_TABS.split(", ")[0]);
+      await sleep(5000);
+    }
+  }
   if (!motorTab) {
+    // Dump all visible tabs/buttons in the modal for debugging
+    const debugInfo = await page.evaluate(() => {
+      const modal = document.querySelector("[role='dialog'], [class*='modal']");
+      if (!modal) return "no modal found";
+      const allClickable = Array.from(modal.querySelectorAll("button, a, [role='tab'], [role='button'], li"))
+        .filter(el => el.offsetParent !== null)
+        .map(el => ({ tag: el.tagName, text: el.textContent.trim().substring(0, 40), cls: (el.className || "").substring(0, 40) }))
+        .slice(0, 20);
+      return JSON.stringify(allClickable);
+    });
+    console.log(`${LOG} Available modal elements: ${debugInfo}`);
     return { success: false, error: "MOTOR Primary tab not found — MOTOR may not be connected" };
   }
   await motorTab.click();

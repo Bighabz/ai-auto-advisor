@@ -505,106 +505,22 @@ async function runPlaybook({ customer, vehicle, diagnosis, parts, progressCallba
           result.warnings.push({ code: "NO_VEHICLE_UI", msg: "Vehicle not visible after confirm" });
         }
 
-        // ── Step E: Connect vehicle to MOTOR/VCDb (enables PartsTech button) ──
-        // The PT button stays `if-disabled` until the vehicle is "MOTOR connected".
-        // The red wrench ✗ icon next to vehicle opens MOTOR connection dialog.
-        console.log(`${LOG}   Step E: Checking MOTOR connection icon...`);
-        const motorIcon = await page.evaluate(() => {
-          // Look for the wrench/settings icons near the vehicle field
-          const vInput = document.querySelector("#estimate-vehicle");
-          if (!vInput) return { found: false, reason: "no vehicle input" };
-
-          // Walk up to the vehicle row container
-          let container = vInput;
-          for (let i = 0; i < 5; i++) {
-            container = container.parentElement;
-            if (!container) break;
-          }
-          if (!container) return { found: false, reason: "no container" };
-
-          // Find all clickable icons near the vehicle
-          const icons = Array.from(container.querySelectorAll("i, svg, img, span[class*='icon'], a"))
-            .filter(el => el.offsetParent !== null || el.offsetWidth > 0);
-          const iconInfo = icons.map(el => ({
-            tag: el.tagName,
-            cls: (el.className || "").substring(0, 60),
-            title: el.title || el.getAttribute("aria-label") || "",
-            cursor: getComputedStyle(el).cursor,
-            text: el.textContent.trim().substring(0, 20),
-            rect: (() => { const r = el.getBoundingClientRect(); return r.width > 0 ? { x: r.x + r.width / 2, y: r.y + r.height / 2 } : null; })(),
-          }));
-
-          // Look for MOTOR connection icon — it's fa-unlink (yellow = not connected)
-          const motorBtn = icons.find(el => {
-            const cls = (el.className || "").toLowerCase();
-            const title = (el.title || el.getAttribute("aria-label") || "").toLowerCase();
-            return cls.includes("unlink") || cls.includes("link") ||
-                   cls.includes("wrench") || cls.includes("motor") || cls.includes("settings") ||
-                   cls.includes("cog") || cls.includes("gear") || cls.includes("tools") ||
-                   title.includes("motor") || title.includes("vehicle") || title.includes("connect");
-          });
-
-          if (motorBtn) {
-            const rect = motorBtn.getBoundingClientRect();
-            return {
-              found: true,
-              cls: (motorBtn.className || "").substring(0, 60),
-              title: motorBtn.title || "",
-              rect: { x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 },
-            };
-          }
-
-          return { found: false, icons: iconInfo.slice(0, 10) };
+        // ── Step E: Ensure clean state for Phase 3/4 ──
+        // Close any sidebars/modals and verify we're on the estimate page
+        await page.keyboard.press("Escape");
+        await sleep(500);
+        // Check we're still on estimate page (not customer sidebar)
+        const currentTabs = await page.evaluate(() => {
+          const tabs = Array.from(document.querySelectorAll("[role='tab'] a, .p-tabview-nav a"));
+          return tabs.map(a => a.textContent.trim()).filter(t => t.length > 0).slice(0, 10);
         });
-        console.log(`${LOG}   MOTOR icon: ${JSON.stringify(motorIcon)}`);
-
-        if (motorIcon.found && motorIcon.rect) {
-          console.log(`${LOG}   Clicking MOTOR connection icon...`);
-          await page.mouse.click(motorIcon.rect.x, motorIcon.rect.y);
-          await sleep(3000);
-          await page.screenshot({ path: "/tmp/debug-motor-connect.png" });
-
-          // Check if a modal/dialog appeared for MOTOR vehicle identification
-          const motorModal = await page.evaluate(() => {
-            const modal = document.querySelector("[role='dialog'], [class*='modal']:not([style*='display: none'])");
-            if (modal && modal.offsetParent !== null) {
-              return {
-                found: true,
-                text: modal.textContent.trim().substring(0, 200),
-                buttons: Array.from(modal.querySelectorAll("button")).map(b => b.textContent.trim()).slice(0, 10),
-              };
-            }
-            return { found: false };
-          });
-          console.log(`${LOG}   MOTOR modal: ${JSON.stringify(motorModal)}`);
-
-          // If a confirmation/connection modal appeared, try to confirm it
-          if (motorModal.found) {
-            const confirmBtn = await page.evaluate(() => {
-              const btns = Array.from(document.querySelectorAll("[role='dialog'] button, [class*='modal'] button"));
-              const confirm = btns.find(b => {
-                const t = b.textContent.trim().toLowerCase();
-                return (t === "confirm" || t === "connect" || t === "ok" || t === "yes" || t === "save") && b.offsetParent !== null;
-              });
-              if (confirm) {
-                const rect = confirm.getBoundingClientRect();
-                return { found: true, text: confirm.textContent.trim(), rect: { x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 } };
-              }
-              return { found: false };
-            });
-            if (confirmBtn.found) {
-              await page.mouse.click(confirmBtn.rect.x, confirmBtn.rect.y);
-              console.log(`${LOG}   Clicked "${confirmBtn.text}" on MOTOR connection modal`);
-              await sleep(5000);
-            }
-          }
-
-          // Check if PT button is now enabled
-          const ptAfterMotor = await page.evaluate(() => {
-            const btns = Array.from(document.querySelectorAll(".ro-partstech-new button"));
-            return btns.map(b => ({ cls: b.className.substring(0, 60), disabled: b.classList.contains("if-disabled") }));
-          });
-          console.log(`${LOG}   PT buttons after MOTOR: ${JSON.stringify(ptAfterMotor)}`);
+        console.log(`${LOG}   Current tabs: ${JSON.stringify(currentTabs)}`);
+        const isEstimateTabs = currentTabs.some(t => t === "Parts ordering" || t === "Services");
+        if (!isEstimateTabs) {
+          // We might be on customer sidebar — navigate back to estimate
+          console.log(`${LOG}   Not on estimate tabs — navigating back...`);
+          await page.evaluate((id) => { window.location.hash = `/estimate/${id}`; }, result.estimateId);
+          await sleep(5000);
         }
       } catch (vehErr) {
         console.log(`${LOG} Phase 2b error: ${vehErr.message} — continuing`);
@@ -617,21 +533,40 @@ async function runPlaybook({ customer, vehicle, diagnosis, parts, progressCallba
     }
 
     // ═══════════════════════════════════════════════════════════════════════════
-    // PHASE 3: Parts via PartsTech (Steps 6-9)
+    // PHASE 3 (formerly 4): Labor via MOTOR (Steps 10-11)
+    // Run MOTOR BEFORE PartsTech — MOTOR connection enables the PT button
+    // ═══════════════════════════════════════════════════════════════════════════
+    await progress(progressCallback, "adding_labor");
+    console.log(`${LOG} Phase 3: Opening MOTOR catalog (runs before PartsTech to connect vehicle)...`);
+
+    const motorResult = await navigateMotorTree(page, diagnosis, vehicle);
+
+    if (motorResult.success) {
+      result.laborResult = motorResult;
+      result.laborHours = motorResult.hours || 0;
+      const addOnStr = motorResult.addOns?.length > 0 ? `, add-ons: ${motorResult.addOns.join(", ")}` : "";
+      console.log(`${LOG} Phase 3: MOTOR labor added: ${motorResult.hours}h (NEVER modifying Qty/Hrs)${addOnStr}`);
+    } else {
+      console.log(`${LOG} Phase 3: MOTOR navigation failed: ${motorResult.error}`);
+      result.warnings.push({ code: "MOTOR_FAILED", msg: motorResult.error });
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // PHASE 4 (formerly 3): Parts via PartsTech (Steps 6-9)
+    // Runs after MOTOR so vehicle is MOTOR-connected → PT button enabled
     // ═══════════════════════════════════════════════════════════════════════════
     const partsToAdd = (parts || []).filter((p) => p.selected || p.requested);
     if (partsToAdd.length > 0) {
       await progress(progressCallback, "adding_parts");
-      console.log(`${LOG} Phase 3: Opening PartsTech tab...`);
+      console.log(`${LOG} Phase 4: Opening PartsTech tab...`);
 
       const { ptPage, isIframe } = await openPartsTechTab(page, browser);
 
       // Get the working page for PartsTech (either new tab or iframe content)
       let ptWorkPage = ptPage;
       if (!ptWorkPage && isIframe) {
-        console.log(`${LOG} Phase 3: PartsTech opened as iframe — getting frame content...`);
+        console.log(`${LOG} Phase 4: PartsTech opened as iframe — getting frame content...`);
         try {
-          // Check ALL iframes (the src might not contain "partstech" if SSO redirects)
           const iframeSrcs = await page.evaluate(() => {
             return Array.from(document.querySelectorAll("iframe")).map(f => ({
               src: (f.src || "").substring(0, 120),
@@ -639,30 +574,27 @@ async function runPlaybook({ customer, vehicle, diagnosis, parts, progressCallba
               cls: (f.className || "").substring(0, 40),
             }));
           });
-          console.log(`${LOG} Phase 3: All iframes: ${JSON.stringify(iframeSrcs)}`);
+          console.log(`${LOG} Phase 4: All iframes: ${JSON.stringify(iframeSrcs)}`);
 
           const iframeEl = await page.$('iframe[src*="partstech"]') || await page.$('iframe:not([src=""])');
           if (iframeEl) {
-            // Also log the src attribute before accessing contentFrame
             const iframeSrc = await page.evaluate(el => el.src || el.getAttribute("src") || "no-src", iframeEl);
-            console.log(`${LOG} Phase 3: iframe src attribute: ${iframeSrc.substring(0, 120)}`);
+            console.log(`${LOG} Phase 4: iframe src: ${iframeSrc.substring(0, 120)}`);
 
             ptWorkPage = await iframeEl.contentFrame();
             if (ptWorkPage) {
               const iframeUrl = ptWorkPage.url() || "";
-              console.log(`${LOG} Phase 3: Got iframe frame, URL: ${iframeUrl.substring(0, 120)}`);
-              // Check if SSO failed (chrome-error page means PartsTech couldn't load)
+              console.log(`${LOG} Phase 4: iframe URL: ${iframeUrl.substring(0, 120)}`);
               if (iframeUrl.includes("chrome-error") || iframeUrl === "about:blank") {
-                console.log(`${LOG} Phase 3: PartsTech SSO failed (iframe shows error page)`);
-                console.log(`${LOG}   iframe src was: ${iframeSrc.substring(0, 120)}`);
+                console.log(`${LOG} Phase 4: PartsTech SSO failed (iframe error page)`);
                 ptWorkPage = null;
               } else {
-                await sleep(3000); // Let iframe content load
+                await sleep(3000);
               }
             }
           }
         } catch (iframeErr) {
-          console.log(`${LOG} Phase 3: Iframe access failed: ${iframeErr.message}`);
+          console.log(`${LOG} Phase 4: Iframe access failed: ${iframeErr.message}`);
         }
       }
 
@@ -678,26 +610,26 @@ async function runPlaybook({ customer, vehicle, diagnosis, parts, progressCallba
             continue;
           }
 
-          console.log(`${LOG} Phase 3: Searching "${searchTerm}"...`);
+          console.log(`${LOG} Phase 4: Searching "${searchTerm}"...`);
           const searchResult = await searchAndAddToCart(ptWorkPage, searchTerm);
 
           if (searchResult.success) {
-            console.log(`${LOG} Phase 3: Cheapest in-stock: ${searchResult.partDetails?.brand} $${searchResult.partDetails?.price}`);
+            console.log(`${LOG} Phase 4: Cheapest in-stock: ${searchResult.partDetails?.brand} $${searchResult.partDetails?.price}`);
             result.partsAdded.push(searchResult.partDetails);
           } else {
-            console.log(`${LOG} Phase 3: Part search failed: ${searchResult.error}`);
+            console.log(`${LOG} Phase 4: Part search failed: ${searchResult.error}`);
             result.warnings.push({ code: "PT_PART_FAILED", msg: searchResult.error });
           }
         }
 
         // Submit cart to AutoLeap
         if (result.partsAdded.length > 0) {
-          console.log(`${LOG} Phase 3: Added ${result.partsAdded.length} to cart, submitting quote...`);
+          console.log(`${LOG} Phase 4: Added ${result.partsAdded.length} to cart, submitting quote...`);
           const submitResult = await submitCartToAutoLeap(ptWorkPage, page);
           if (submitResult.success) {
-            console.log(`${LOG} Phase 3: Parts synced to AutoLeap`);
+            console.log(`${LOG} Phase 4: Parts synced to AutoLeap`);
           } else {
-            console.log(`${LOG} Phase 3: Cart submit issue: ${submitResult.error}`);
+            console.log(`${LOG} Phase 4: Cart submit issue: ${submitResult.error}`);
             result.warnings.push({ code: "PT_SUBMIT_FAILED", msg: submitResult.error });
           }
         }
@@ -710,29 +642,11 @@ async function runPlaybook({ customer, vehicle, diagnosis, parts, progressCallba
           await page.bringToFront();
         }
       } else {
-        console.log(`${LOG} Phase 3: PartsTech did not open (no tab, no iframe) — skipping parts`);
+        console.log(`${LOG} Phase 4: PartsTech did not open (no tab, no iframe) — skipping parts`);
         result.warnings.push({ code: "PT_NO_TAB", msg: "PartsTech did not open" });
       }
     } else {
-      console.log(`${LOG} Phase 3: No parts to add — skipping PartsTech`);
-    }
-
-    // ═══════════════════════════════════════════════════════════════════════════
-    // PHASE 4: Labor via MOTOR (Steps 10-11)
-    // ═══════════════════════════════════════════════════════════════════════════
-    await progress(progressCallback, "adding_labor");
-    console.log(`${LOG} Phase 4: Opening MOTOR catalog...`);
-
-    const motorResult = await navigateMotorTree(page, diagnosis, vehicle);
-
-    if (motorResult.success) {
-      result.laborResult = motorResult;
-      result.laborHours = motorResult.hours || 0;
-      const addOnStr = motorResult.addOns?.length > 0 ? `, add-ons: ${motorResult.addOns.join(", ")}` : "";
-      console.log(`${LOG} Phase 4: MOTOR labor added: ${motorResult.hours}h (NEVER modifying Qty/Hrs)${addOnStr}`);
-    } else {
-      console.log(`${LOG} Phase 4: MOTOR navigation failed: ${motorResult.error}`);
-      result.warnings.push({ code: "MOTOR_FAILED", msg: motorResult.error });
+      console.log(`${LOG} Phase 4: No parts to add — skipping PartsTech`);
     }
 
     // ═══════════════════════════════════════════════════════════════════════════
