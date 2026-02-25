@@ -319,79 +319,61 @@ async function createEstimateWithCustomerVehicle(page, customer, vehicle) {
     await sleep(3000);
   }
 
-  // Step 2: Click green "Estimate" button (top right of workboard)
-  console.log(`${LOG} Clicking "Estimate" button...`);
-  const estClicked = await page.evaluate(() => {
-    const btns = Array.from(document.querySelectorAll("button, a, [role='button']"));
-    for (const btn of btns) {
-      const text = btn.textContent.trim();
-      if (text === "Estimate") {
-        btn.click();
-        return "Estimate";
+  // Step 2: Click green "+" circle button in header (opens customer/vehicle drawer)
+  // NOTE: "Estimate" button creates a blank estimate — we need "+" which opens the form
+  console.log(`${LOG} Clicking "+" button to open customer form...`);
+  const plusClicked = await page.evaluate(() => {
+    // Look for the round "+" button in the header area
+    const allClickable = Array.from(document.querySelectorAll("button, a, [role='button'], span, i"));
+    // First: look for element with + text or plus icon in header
+    for (const el of allClickable) {
+      const text = el.textContent.trim();
+      // The "+" in AutoLeap header is typically a round button with just "+"
+      if (text === "+" && el.offsetParent !== null) {
+        el.click();
+        return "+";
       }
     }
-    // Fallback: green + button in header
-    for (const btn of btns) {
-      const text = btn.textContent.trim();
-      if (text === "+" || text === "New") {
-        btn.click();
-        return text;
+    // Second: look for add/create button by class
+    for (const el of allClickable) {
+      const cls = (el.className || "").toLowerCase();
+      if ((cls.includes("add") || cls.includes("create") || cls.includes("plus") || cls.includes("fab")) && el.offsetParent !== null) {
+        el.click();
+        return `class:${cls.substring(0, 40)}`;
       }
     }
     return null;
   });
 
-  if (!estClicked) {
-    await page.screenshot({ path: "/tmp/debug-no-est-btn.png", fullPage: true });
-    return { success: false, error: 'Could not find "Estimate" button on workboard' };
+  if (!plusClicked) {
+    await page.screenshot({ path: "/tmp/debug-no-plus-btn.png", fullPage: true });
+    return { success: false, error: 'Could not find "+" button in header' };
   }
-  console.log(`${LOG} Clicked: "${estClicked}"`);
+  console.log(`${LOG} Clicked: "${plusClicked}"`);
   await sleep(3000);
 
-  // Screenshot after clicking Estimate
-  await page.screenshot({ path: "/tmp/debug-after-estimate-click.png", fullPage: true });
-  console.log(`${LOG} Screenshot: /tmp/debug-after-estimate-click.png`);
+  // Screenshot after clicking +
+  await page.screenshot({ path: "/tmp/debug-after-plus-click.png", fullPage: true });
+  console.log(`${LOG} Screenshot: /tmp/debug-after-plus-click.png`);
 
-  // Debug: check what's visible now
-  const formDebug = await page.evaluate(() => {
-    const url = window.location.href;
-    // Find visible inputs (offsetParent !== null)
-    const visibleInputs = Array.from(document.querySelectorAll("input")).filter(i => i.offsetParent !== null).map(i => ({
-      id: i.id, type: i.type, placeholder: i.placeholder,
-      name: i.name, className: i.className.substring(0, 80),
-    }));
-    // Find visible buttons
-    const visibleButtons = Array.from(document.querySelectorAll("button")).filter(b => b.offsetParent !== null).map(b => ({
-      text: b.textContent.trim().substring(0, 50), disabled: b.disabled,
-      className: b.className.substring(0, 80),
-    }));
-    // Find visible selects
-    const visibleSelects = Array.from(document.querySelectorAll("select")).filter(s => s.offsetParent !== null).map(s => ({
-      id: s.id, name: s.name, options: s.options?.length || 0,
-    }));
-    // Check for drawers/modals/dialogs
-    const dialogs = Array.from(document.querySelectorAll('[role="dialog"], [class*="drawer"], [class*="modal"], [class*="sidebar"]'))
-      .filter(d => d.offsetParent !== null)
-      .map(d => ({ tag: d.tagName, class: d.className.substring(0, 80) }));
-    return { url, visibleInputs, visibleButtons, visibleSelects, dialogs };
+  // Debug: check key form elements
+  const hasForm = await page.evaluate(() => {
+    const fname = document.querySelector('#personal-card-fname');
+    const lname = document.querySelector('#personal-card-lname');
+    const mobile = document.querySelector('#personal-card-mobile');
+    const fnameVisible = fname && fname.offsetParent !== null;
+    const lnameVisible = lname && lname.offsetParent !== null;
+    const mobileVisible = mobile && mobile.offsetParent !== null;
+    // Find save-type buttons
+    const saveBtns = Array.from(document.querySelectorAll("button"))
+      .filter(b => b.offsetParent !== null)
+      .map(b => b.textContent.trim().substring(0, 40))
+      .filter(t => t.toLowerCase().includes("save") || t.toLowerCase().includes("create") || t.toLowerCase().includes("estimate"));
+    return { fnameVisible, lnameVisible, mobileVisible, saveBtns, url: window.location.href };
   });
-  console.log(`${LOG} URL: ${formDebug.url}`);
-  console.log(`${LOG} Visible inputs (${formDebug.visibleInputs.length}):`);
-  for (const i of formDebug.visibleInputs) {
-    console.log(`${LOG}   id="${i.id}" placeholder="${i.placeholder}" type="${i.type}" class="${i.className}"`);
-  }
-  console.log(`${LOG} Visible selects (${formDebug.visibleSelects.length}):`);
-  for (const s of formDebug.visibleSelects) {
-    console.log(`${LOG}   id="${s.id}" name="${s.name}" options=${s.options}`);
-  }
-  console.log(`${LOG} Visible buttons (${formDebug.visibleButtons.length}):`);
-  for (const b of formDebug.visibleButtons) {
-    console.log(`${LOG}   "${b.text}" disabled=${b.disabled}`);
-  }
-  console.log(`${LOG} Dialogs/drawers (${formDebug.dialogs.length}):`);
-  for (const d of formDebug.dialogs) {
-    console.log(`${LOG}   ${d.tag} class="${d.class}"`);
-  }
+  console.log(`${LOG} Form check — fname:${hasForm.fnameVisible} lname:${hasForm.lnameVisible} mobile:${hasForm.mobileVisible}`);
+  console.log(`${LOG} Save/Create buttons: ${JSON.stringify(hasForm.saveBtns)}`);
+  console.log(`${LOG} URL: ${hasForm.url}`);
 
   // Step 3: Fill customer info using AutoLeap's actual IDs
   const nameParts = (customer.name || "Customer").trim().split(/\s+/);
