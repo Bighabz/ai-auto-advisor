@@ -287,6 +287,60 @@ async function createCustomer(token, { firstName, lastName, phone, email }) {
   throw new Error(`Failed to create customer: ${JSON.stringify(res.data?.error || res.raw)}`);
 }
 
+/**
+ * Create a vehicle under a customer. Returns the vehicle object with { _id, vehicleId }.
+ * Tries multiple endpoint patterns since AutoLeap API docs are sparse.
+ */
+async function createVehicle(token, { customerId, year, make, model, vin }) {
+  const body = { customerId, year: Number(year) || 0, make, model };
+  if (vin) body.vin = vin;
+
+  // Try POST /vehicles first
+  try {
+    const res = await apiCall("POST", "/vehicles", body, token);
+    if (res.data?.response?._id || res.data?.response?.vehicleId) {
+      const v = res.data.response;
+      console.log(`${LOG} Vehicle created via /vehicles: ${v._id || v.vehicleId}`);
+      return v;
+    }
+    // If we got a response but no _id, check for alternate shapes
+    if (res.data?.id || res.data?.vehicleId) {
+      console.log(`${LOG} Vehicle created via /vehicles: ${res.data.id || res.data.vehicleId}`);
+      return res.data;
+    }
+  } catch (e1) {
+    console.log(`${LOG} POST /vehicles failed: ${e1.message} — trying alternate endpoint`);
+  }
+
+  // Try POST /customers/{id}/vehicles
+  try {
+    const res = await apiCall("POST", `/customers/${customerId}/vehicles`, body, token);
+    if (res.data?.response?._id || res.data?.response?.vehicleId) {
+      const v = res.data.response;
+      console.log(`${LOG} Vehicle created via /customers/{id}/vehicles: ${v._id || v.vehicleId}`);
+      return v;
+    }
+  } catch (e2) {
+    console.log(`${LOG} POST /customers/{id}/vehicles failed: ${e2.message}`);
+  }
+
+  // Try PATCH /customers/{id} with vehicle in body (some APIs embed vehicles in customer)
+  try {
+    const res = await apiCall("PATCH", `/customers/${customerId}`, {
+      vehicles: [{ year: Number(year) || 0, make, model, vin: vin || undefined }],
+    }, token);
+    if (res.data?.response?.vehicles?.length > 0) {
+      const v = res.data.response.vehicles[res.data.response.vehicles.length - 1];
+      console.log(`${LOG} Vehicle added via PATCH /customers/{id}: ${v.vehicleId || v._id}`);
+      return v;
+    }
+  } catch (e3) {
+    console.log(`${LOG} PATCH /customers/{id} with vehicle failed: ${e3.message}`);
+  }
+
+  throw new Error(`Could not create vehicle via REST API for customer ${customerId}`);
+}
+
 // ─── Estimate operations ──────────────────────────────────────────────────────
 
 /**
@@ -956,6 +1010,7 @@ module.exports = {
   getToken,
   searchCustomer,
   createCustomer,
+  createVehicle,
   createEstimate,
   getEstimate,
   buildServices,

@@ -19,7 +19,7 @@ const path = require("path");
 const { LOGIN, CUSTOMER, ESTIMATE, PARTS_TAB, SERVICES } = require("./helpers/selectors");
 const { openPartsTechTab, searchAndAddToCart, submitCartToAutoLeap } = require("./helpers/pt-tab");
 const { navigateMotorTree } = require("./helpers/motor-nav");
-const { getToken, searchCustomer, createCustomer, createEstimate } = require("./autoleap-api");
+const { getToken, searchCustomer, createCustomer, createVehicle, createEstimate } = require("./autoleap-api");
 
 const LOG = "[playbook]";
 const CHROME_CDP_URL = "http://127.0.0.1:18800";
@@ -102,43 +102,125 @@ async function runPlaybook({ customer, vehicle, diagnosis, parts, progressCallba
     // ═══════════════════════════════════════════════════════════════════════════
     // PHASE 2b: Add vehicle to estimate (if not linked via API)
     // ═══════════════════════════════════════════════════════════════════════════
-    // Check if "Select vehicle" is visible — means no vehicle linked
+    // Check if "Select vehicle" text is visible — means no vehicle linked
     const needsVehicle = await page.evaluate(() => {
-      const els = Array.from(document.querySelectorAll("*"))
-        .filter(el => el.offsetParent !== null);
-      return els.some(el => el.textContent.trim() === "Select vehicle");
+      // Look for elements whose own direct text (not children) includes "Select vehicle"
+      const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT, null, false);
+      let node;
+      while (node = walker.nextNode()) {
+        if (node.textContent.includes("Select vehicle") && node.parentElement?.offsetParent !== null) {
+          return true;
+        }
+      }
+      return false;
     });
 
     if (needsVehicle && (vehicle.year || vehicle.make || vehicle.vin)) {
-      console.log(`${LOG} Phase 2b: Adding vehicle to estimate...`);
-      // Click "Select vehicle"
-      await page.evaluate(() => {
-        const els = Array.from(document.querySelectorAll("*"))
-          .filter(el => el.offsetParent !== null && el.textContent.trim() === "Select vehicle");
-        if (els.length > 0) els[0].click();
+      console.log(`${LOG} Phase 2b: Adding vehicle to estimate via browser...`);
+
+      // Click "Select vehicle" link/button
+      const clicked = await page.evaluate(() => {
+        // Find the most specific element with "Select vehicle" text
+        const candidates = Array.from(document.querySelectorAll("a, button, span, div, p, [role='button']"))
+          .filter(el => el.offsetParent !== null);
+        for (const el of candidates) {
+          // Check direct text content (not deeply nested)
+          const directText = Array.from(el.childNodes)
+            .filter(n => n.nodeType === Node.TEXT_NODE)
+            .map(n => n.textContent.trim())
+            .join(" ");
+          if (directText.includes("Select vehicle")) {
+            el.click();
+            return { clicked: true, tag: el.tagName, text: directText.substring(0, 40) };
+          }
+        }
+        // Broader fallback: any element with "Select vehicle"
+        for (const el of candidates) {
+          if (el.textContent.trim().includes("Select vehicle") && el.children.length <= 2) {
+            el.click();
+            return { clicked: true, tag: el.tagName, text: el.textContent.trim().substring(0, 40) };
+          }
+        }
+        return { clicked: false };
       });
-      await sleep(2000);
+      console.log(`${LOG}   Click result: ${JSON.stringify(clicked)}`);
+      await sleep(3000);
       await page.screenshot({ path: "/tmp/debug-select-vehicle.png" });
 
-      // Dump what appeared (drawer, modal, or dropdown)
+      // Dump what appeared (drawer, modal, dropdown, or inline form)
       const vehicleDump = await page.evaluate(() => {
-        const visibleInputs = Array.from(document.querySelectorAll("input"))
+        const visibleInputs = Array.from(document.querySelectorAll("input, select, ng-select, mat-select"))
           .filter(i => i.offsetParent !== null)
-          .slice(0, 10)
-          .map(i => ({ id: i.id, placeholder: i.placeholder, type: i.type }));
-        const visibleButtons = Array.from(document.querySelectorAll("button"))
+          .slice(0, 15)
+          .map(i => ({
+            tag: i.tagName, id: i.id, name: i.name || "",
+            placeholder: i.placeholder || "", type: i.type || "",
+            class: (i.className || "").substring(0, 50),
+          }));
+        const visibleButtons = Array.from(document.querySelectorAll("button, a[class*='btn']"))
           .filter(b => b.offsetParent !== null)
-          .map(b => b.textContent.trim().substring(0, 40))
+          .map(b => b.textContent.trim().substring(0, 50))
           .filter(t => t.length > 0)
-          .slice(0, 15);
-        return { visibleInputs, visibleButtons };
+          .slice(0, 20);
+        // Check for drawers/modals
+        const modals = Array.from(document.querySelectorAll("[class*='modal'], [class*='drawer'], [class*='dialog'], [class*='overlay'], [class*='sidebar']"))
+          .filter(m => m.offsetParent !== null)
+          .map(m => ({
+            tag: m.tagName, class: (m.className || "").substring(0, 60),
+            text: m.textContent.trim().substring(0, 100),
+          }))
+          .slice(0, 5);
+        // Check for dropdown/select options
+        const options = Array.from(document.querySelectorAll("[class*='option'], [class*='dropdown-item'], [class*='list-item'], [role='option'], [role='listbox']"))
+          .filter(o => o.offsetParent !== null)
+          .map(o => o.textContent.trim().substring(0, 60))
+          .slice(0, 10);
+        return { visibleInputs, visibleButtons, modals, options };
       });
       console.log(`${LOG}   Vehicle inputs: ${JSON.stringify(vehicleDump.visibleInputs)}`);
       console.log(`${LOG}   Vehicle buttons: ${JSON.stringify(vehicleDump.visibleButtons)}`);
+      console.log(`${LOG}   Modals/drawers: ${JSON.stringify(vehicleDump.modals)}`);
+      console.log(`${LOG}   Options/dropdown: ${JSON.stringify(vehicleDump.options)}`);
 
-      // TODO: Fill vehicle fields based on what appeared
-      // For now, log and continue — vehicle will be added in a follow-up fix
-      console.log(`${LOG}   Vehicle selection not yet automated — continuing without vehicle`);
+      // Try to find and fill vehicle form fields
+      // Look for VIN input first (preferred)
+      if (vehicle.vin) {
+        const vinFilled = await fillField(page, 'input[name="vin"], input[placeholder*="VIN" i], input[formcontrolname="vin"]', vehicle.vin);
+        if (vinFilled) {
+          console.log(`${LOG}   VIN filled: ${vehicle.vin}`);
+          // Look for "Decode" button
+          await sleep(500);
+          await page.evaluate(() => {
+            const btns = Array.from(document.querySelectorAll("button")).filter(b => b.offsetParent !== null && b.textContent.trim().toLowerCase().includes("decode"));
+            if (btns.length > 0) btns[0].click();
+          });
+          await sleep(5000);
+        }
+      }
+
+      // Try YMME fields if no VIN or VIN decode didn't work
+      const yearFilled = await fillField(page, 'input[name="year"], input[placeholder*="Year" i], input[formcontrolname="year"], select[name="year"]', String(vehicle.year || ""));
+      const makeFilled = await fillField(page, 'input[name="make"], input[placeholder*="Make" i], input[formcontrolname="make"], select[name="make"]', vehicle.make || "");
+      const modelFilled = await fillField(page, 'input[name="model"], input[placeholder*="Model" i], input[formcontrolname="model"], select[name="model"]', vehicle.model || "");
+      console.log(`${LOG}   YMME filled: year=${yearFilled}, make=${makeFilled}, model=${modelFilled}`);
+
+      // Try clicking Save/Add/Done button
+      const saved = await page.evaluate(() => {
+        const btns = Array.from(document.querySelectorAll("button"))
+          .filter(b => b.offsetParent !== null && !b.disabled);
+        const saveBtn = btns.find(b => {
+          const t = b.textContent.trim().toLowerCase();
+          return t === "save" || t === "add" || t === "done" || t.includes("add vehicle") || t.includes("save vehicle");
+        });
+        if (saveBtn) { saveBtn.click(); return true; }
+        return false;
+      });
+      if (saved) {
+        console.log(`${LOG}   Vehicle save button clicked`);
+        await sleep(3000);
+      }
+
+      await page.screenshot({ path: "/tmp/debug-after-vehicle.png" });
     } else if (!needsVehicle) {
       console.log(`${LOG} Vehicle already linked ✓`);
     }
@@ -429,6 +511,26 @@ async function createEstimateWithCustomerVehicle(page, customer, vehicle) {
     if (vehicleId) {
       const veh = vehicles.find(v => v.vehicleId === vehicleId);
       console.log(`${LOG} Using vehicle: ${veh?.name || vehicleId}`);
+    }
+  }
+
+  // Step 2c2: Create vehicle via API if no match found
+  if (!vehicleId && (vehicle.year || vehicle.make || vehicle.vin)) {
+    console.log(`${LOG} No vehicle matched — creating via API...`);
+    try {
+      const newVeh = await createVehicle(token, {
+        customerId,
+        year: vehicle.year,
+        make: vehicle.make,
+        model: vehicle.model,
+        vin: vehicle.vin,
+      });
+      vehicleId = newVeh.vehicleId || newVeh._id || null;
+      if (vehicleId) {
+        console.log(`${LOG} Vehicle created: ${vehicleId} (${vehicle.year} ${vehicle.make} ${vehicle.model})`);
+      }
+    } catch (vehErr) {
+      console.log(`${LOG} Vehicle API creation failed: ${vehErr.message} — will try browser`);
     }
   }
 
