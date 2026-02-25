@@ -100,10 +100,52 @@ async function openPartsTechTab(page, browser) {
     });
   });
 
-  // Click the + button
-  await clickByTextFallback(page, [
-    PARTS_TAB.PT_ADD_BTN,
-  ], "+");
+  // Click the PartsTech "+" button — it's inside a card with "partstech" class and "Connected" text
+  const ptBtnClicked = await page.evaluate(() => {
+    // Find PartsTech card containers
+    const ptCards = Array.from(document.querySelectorAll('[class*="partstech" i]'))
+      .filter(el => el.offsetParent !== null);
+
+    for (const card of ptCards) {
+      const text = card.textContent || "";
+      // Find the card that has "PartsTech" text and "Connected"
+      if (text.includes("PartsTech") && text.includes("Connected")) {
+        // Find the + button inside this card
+        const btns = card.querySelectorAll("button, a, [role='button']");
+        for (const btn of btns) {
+          const btnText = btn.textContent.trim();
+          if (btnText === "+" || btnText === "Add" || btn.querySelector("i.fa-plus, i.fas.fa-plus")) {
+            btn.click();
+            return { clicked: true, btnText };
+          }
+        }
+        // If no text "+" button, just click the last button in the card
+        if (btns.length > 0) {
+          btns[btns.length - 1].click();
+          return { clicked: true, btnText: "last-btn" };
+        }
+        // Try clicking the card itself
+        card.click();
+        return { clicked: true, btnText: "card-click" };
+      }
+    }
+
+    // Broader fallback: find any button with "+" next to PartsTech image
+    const allBtns = Array.from(document.querySelectorAll("button"))
+      .filter(b => b.offsetParent !== null && b.textContent.trim() === "+");
+    // Filter to ones near partstech text
+    for (const btn of allBtns) {
+      const parent = btn.closest('[class*="partstech" i], [class*="ro-partstech" i]');
+      if (parent) {
+        btn.click();
+        return { clicked: true, btnText: "+:near-partstech" };
+      }
+    }
+
+    return { clicked: false };
+  });
+
+  console.log(`${LOG} PartsTech button click: ${JSON.stringify(ptBtnClicked)}`);
 
   const ptPage = await newTabPromise;
 

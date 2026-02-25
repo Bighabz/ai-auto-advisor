@@ -100,6 +100,50 @@ async function runPlaybook({ customer, vehicle, diagnosis, parts, progressCallba
     await sleep(3000);
 
     // ═══════════════════════════════════════════════════════════════════════════
+    // PHASE 2b: Add vehicle to estimate (if not linked via API)
+    // ═══════════════════════════════════════════════════════════════════════════
+    // Check if "Select vehicle" is visible — means no vehicle linked
+    const needsVehicle = await page.evaluate(() => {
+      const els = Array.from(document.querySelectorAll("*"))
+        .filter(el => el.offsetParent !== null);
+      return els.some(el => el.textContent.trim() === "Select vehicle");
+    });
+
+    if (needsVehicle && (vehicle.year || vehicle.make || vehicle.vin)) {
+      console.log(`${LOG} Phase 2b: Adding vehicle to estimate...`);
+      // Click "Select vehicle"
+      await page.evaluate(() => {
+        const els = Array.from(document.querySelectorAll("*"))
+          .filter(el => el.offsetParent !== null && el.textContent.trim() === "Select vehicle");
+        if (els.length > 0) els[0].click();
+      });
+      await sleep(2000);
+      await page.screenshot({ path: "/tmp/debug-select-vehicle.png" });
+
+      // Dump what appeared (drawer, modal, or dropdown)
+      const vehicleDump = await page.evaluate(() => {
+        const visibleInputs = Array.from(document.querySelectorAll("input"))
+          .filter(i => i.offsetParent !== null)
+          .slice(0, 10)
+          .map(i => ({ id: i.id, placeholder: i.placeholder, type: i.type }));
+        const visibleButtons = Array.from(document.querySelectorAll("button"))
+          .filter(b => b.offsetParent !== null)
+          .map(b => b.textContent.trim().substring(0, 40))
+          .filter(t => t.length > 0)
+          .slice(0, 15);
+        return { visibleInputs, visibleButtons };
+      });
+      console.log(`${LOG}   Vehicle inputs: ${JSON.stringify(vehicleDump.visibleInputs)}`);
+      console.log(`${LOG}   Vehicle buttons: ${JSON.stringify(vehicleDump.visibleButtons)}`);
+
+      // TODO: Fill vehicle fields based on what appeared
+      // For now, log and continue — vehicle will be added in a follow-up fix
+      console.log(`${LOG}   Vehicle selection not yet automated — continuing without vehicle`);
+    } else if (!needsVehicle) {
+      console.log(`${LOG} Vehicle already linked ✓`);
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════
     // PHASE 3: Parts via PartsTech (Steps 6-9)
     // ═══════════════════════════════════════════════════════════════════════════
     const partsToAdd = (parts || []).filter((p) => p.selected || p.requested);
