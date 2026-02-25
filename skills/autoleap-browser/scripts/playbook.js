@@ -19,6 +19,7 @@ const path = require("path");
 const { LOGIN, CUSTOMER, ESTIMATE, PARTS_TAB, SERVICES } = require("./helpers/selectors");
 const { openPartsTechTab, searchAndAddToCart, submitCartToAutoLeap } = require("./helpers/pt-tab");
 const { navigateMotorTree } = require("./helpers/motor-nav");
+const { getToken, searchCustomer, createCustomer, createEstimate } = require("./autoleap-api");
 
 const LOG = "[playbook]";
 const CHROME_CDP_URL = "http://127.0.0.1:18800";
@@ -310,215 +311,109 @@ async function ensureLoggedIn(page) {
 // ═══════════════════════════════════════════════════════════════════════════════
 
 async function createEstimateWithCustomerVehicle(page, customer, vehicle) {
-  // AutoLeap workflow:
-  // 1. Create blank estimate on workboard → click on card → opens estimate detail page
-  // 2. Inside estimate: assign customer + add vehicle
-  // (Customer form does NOT have vehicle fields — vehicle is added within estimate)
+  // Hybrid approach: REST API for customer/estimate creation (reliable, gives ObjectId),
+  // then navigate browser to estimate page for PartsTech/MOTOR (native pricing).
+  // The markup matrix is only bypassed when PARTS are added via API — creating the
+  // estimate shell via API is fine.
 
-  // Step 2a: Navigate to workboard
-  if (!page.url().includes("/workboard")) {
-    await page.goto(`${AUTOLEAP_APP_URL}/#/workboard`, {
-      waitUntil: "domcontentloaded",
-      timeout: 30000,
-    });
-    await sleep(3000);
+  // Step 2a: Get token (should be cached from login or pre-warm)
+  console.log(`${LOG} Getting AutoLeap API token...`);
+  const token = await getToken();
+  if (!token) {
+    return { success: false, error: "Could not get AutoLeap API token" };
+  }
+  console.log(`${LOG} Token acquired ✓`);
+
+  // Step 2b: Search for existing customer or create new one
+  const nameParts = (customer.name || "Customer").trim().split(/\s+/);
+  const firstName = nameParts[0] || "";
+  const lastName = nameParts.length > 1 ? nameParts.slice(1).join(" ") : "";
+
+  let customerId = null;
+  let customerName = `${firstName} ${lastName}`.trim();
+
+  // Search for existing customer by phone or name
+  if (customer.phone) {
+    console.log(`${LOG} Searching for existing customer: ${customer.phone}...`);
+    const existing = await searchCustomer(token, customer.phone);
+    if (existing?._id) {
+      customerId = existing._id;
+      customerName = `${existing.firstName || ""} ${existing.lastName || ""}`.trim() || customerName;
+      console.log(`${LOG} Found existing customer: ${customerName} (${customerId})`);
+    }
   }
 
-  // Step 2b: Click "Estimate" button to create blank estimate
-  console.log(`${LOG} Creating blank estimate on workboard...`);
-  const estClicked = await page.evaluate(() => {
-    const btns = Array.from(document.querySelectorAll("button"))
-      .filter(b => b.offsetParent !== null);
-    for (const btn of btns) {
-      if (btn.textContent.trim() === "Estimate") {
-        btn.click();
-        return true;
-      }
+  if (!customerId) {
+    console.log(`${LOG} Creating new customer: ${firstName} ${lastName}...`);
+    try {
+      const newCust = await createCustomer(token, {
+        firstName,
+        lastName,
+        phone: customer.phone || "",
+      });
+      customerId = newCust._id;
+      console.log(`${LOG} Customer created: ${customerId}`);
+    } catch (err) {
+      console.log(`${LOG} Customer creation failed: ${err.message}`);
+      return { success: false, error: `Customer creation failed: ${err.message}` };
     }
-    return false;
-  });
-
-  if (!estClicked) {
-    return { success: false, error: '"Estimate" button not found on workboard' };
   }
-  await sleep(3000);
-  console.log(`${LOG} Blank estimate created ✓`);
 
-  // Step 2c: Switch to List view to get clickable estimate links
-  // Kanban cards don't have <a> links — List view should show clickable rows
-  console.log(`${LOG} Switching to List view...`);
-  const listClicked = await page.evaluate(() => {
-    // Click the "List" tab (next to "Kanban" and "Items")
-    const tabs = Array.from(document.querySelectorAll("button, a, span, div, label"))
-      .filter(el => el.offsetParent !== null);
-    for (const tab of tabs) {
-      const text = (tab.textContent || "").trim();
-      if (text === "List") {
-        tab.click();
-        return true;
-      }
-    }
-    return false;
-  });
+  // Step 2c: Create estimate via REST API (links customer, no vehicle yet)
+  console.log(`${LOG} Creating estimate via API...`);
+  let estimateId = null;
+  let roNumber = null;
 
-  if (listClicked) {
-    console.log(`${LOG} Switched to List view ✓`);
-  } else {
-    console.log(`${LOG} Could not find List tab`);
+  try {
+    const est = await createEstimate(token, { customerId });
+    estimateId = est._id;
+    roNumber = est.code || est.estimateNumber || null;
+    console.log(`${LOG} Estimate created: ${estimateId} (RO: ${roNumber})`);
+  } catch (err) {
+    console.log(`${LOG} Estimate creation failed: ${err.message}`);
+    return { success: false, error: `Estimate creation failed: ${err.message}` };
   }
-  await sleep(3000);
-  await page.screenshot({ path: "/tmp/debug-list-view.png" });
 
-  // Now find the newest estimate (highest number, $0.00) and click it
-  console.log(`${LOG} Looking for clickable estimate links...`);
-  const estLink = await page.evaluate(() => {
-    // Look for ALL <a> elements with href containing estimate IDs
-    const allLinks = Array.from(document.querySelectorAll("a[href]"))
-      .filter(a => a.offsetParent !== null);
+  // Step 2d: Navigate browser to the estimate page
+  // AutoLeap estimate URLs use: /#/workboard/estimate/{objectId}
+  const estUrl = `${AUTOLEAP_APP_URL}/#/workboard/estimate/${estimateId}`;
+  console.log(`${LOG} Navigating to estimate page: ${estUrl}`);
+  await page.goto(estUrl, { waitUntil: "domcontentloaded", timeout: 30000 });
+  await sleep(5000);
 
-    // Find estimate links (href pattern: /workboard/estimate/... or /estimates/...)
-    const estLinks = allLinks.filter(a => {
-      const href = a.getAttribute("href") || "";
-      return href.includes("estimate") && !href.includes("estimates/list");
-    });
+  // Verify we're on the estimate page
+  let currentUrl = page.url();
+  console.log(`${LOG} Current URL: ${currentUrl}`);
 
-    if (estLinks.length > 0) {
-      // Find the one with highest estimate number
-      let best = null;
-      let bestNum = 0;
-      for (const link of estLinks) {
-        const text = link.textContent || "";
-        const numMatch = text.match(/\b(1\d{4})\b/);
-        if (numMatch) {
-          const num = parseInt(numMatch[1]);
-          if (num > bestNum) {
-            bestNum = num;
-            best = link;
-          }
-        }
-      }
-      if (best) {
-        const href = best.getAttribute("href");
-        best.click();
-        return { clicked: true, href, number: bestNum };
-      }
-      // Just click the last one (most recent)
-      const last = estLinks[estLinks.length - 1];
-      last.click();
-      return { clicked: true, href: last.getAttribute("href"), number: null };
-    }
-
-    // No estimate links found — dump all links for debugging
-    const linkDump = allLinks.map(a => ({
-      href: (a.getAttribute("href") || "").substring(0, 60),
-      text: a.textContent.trim().substring(0, 40),
-    })).slice(0, 20);
-    return { clicked: false, links: linkDump };
-  });
-
-  console.log(`${LOG} Estimate link result: ${JSON.stringify(estLink)}`);
-
-  if (!estLink.clicked) {
-    // Fallback: try clicking directly on text elements on the kanban board
-    console.log(`${LOG} No links found — trying to click estimate number text directly...`);
-
-    // Switch back to Kanban view and try clicking the estimate number
-    await page.evaluate(() => {
-      const tabs = Array.from(document.querySelectorAll("button, a, span, div"))
-        .filter(el => el.offsetParent !== null);
-      for (const tab of tabs) {
-        if ((tab.textContent || "").trim() === "Kanban") {
-          tab.click();
-          return;
-        }
-      }
-    });
-    await sleep(2000);
-
-    // Try: find elements containing JUST the estimate number, click them
-    const numClicked = await page.evaluate(() => {
-      // Find the text node with the highest 5-digit number (newest estimate)
-      const allEls = Array.from(document.querySelectorAll("span, a, div, p, strong, b"));
-      let best = null;
-      let bestNum = 0;
-      for (const el of allEls) {
-        // Only match elements with short text (just the number)
-        const text = el.textContent.trim();
-        if (/^\d{5}$/.test(text)) {
-          const num = parseInt(text);
-          if (num > bestNum && el.offsetParent !== null) {
-            bestNum = num;
-            best = el;
-          }
-        }
-      }
-      if (best) {
-        best.click();
-        return { clicked: true, number: bestNum, tag: best.tagName };
-      }
-      return { clicked: false };
-    });
-
-    console.log(`${LOG} Number click result: ${JSON.stringify(numClicked)}`);
-    if (numClicked.clicked) {
-      await sleep(5000);
-    }
-  } else {
+  // If URL didn't work, try alternate pattern
+  if (!currentUrl.includes("/estimate/") && !currentUrl.includes("/estimates/")) {
+    const altUrl = `${AUTOLEAP_APP_URL}/#/estimates/${estimateId}`;
+    console.log(`${LOG} Trying alternate URL: ${altUrl}`);
+    await page.goto(altUrl, { waitUntil: "domcontentloaded", timeout: 30000 });
     await sleep(5000);
+    currentUrl = page.url();
+    console.log(`${LOG} Current URL: ${currentUrl}`);
   }
 
-  // Check URL
-  const estUrl = page.url();
-  console.log(`${LOG} URL after click: ${estUrl}`);
-  await page.screenshot({ path: "/tmp/debug-estimate-opened.png" });
+  await page.screenshot({ path: "/tmp/debug-estimate-page.png" });
 
-  // Dump the estimate page to see what's available
-  const estPageDump = await page.evaluate(() => {
+  // Dump the page to see what's available
+  const pageDump = await page.evaluate(() => {
     const url = window.location.href;
-    const visibleInputs = Array.from(document.querySelectorAll("input"))
-      .filter(i => i.offsetParent !== null)
-      .slice(0, 15)
-      .map(i => ({ id: i.id, placeholder: i.placeholder, type: i.type }));
     const visibleButtons = Array.from(document.querySelectorAll("button"))
       .filter(b => b.offsetParent !== null)
       .map(b => b.textContent.trim().substring(0, 50))
       .filter(t => t.length > 0)
       .slice(0, 20);
-    const tabs = Array.from(document.querySelectorAll('[role="tab"], [class*="tab"]'))
+    const tabs = Array.from(document.querySelectorAll('[role="tab"], button[class*="tab"]'))
       .filter(t => t.offsetParent !== null)
       .map(t => t.textContent.trim().substring(0, 30))
-      .filter(t => t.length > 0);
-    const headings = Array.from(document.querySelectorAll("h1, h2, h3, h4, h5"))
-      .filter(h => h.offsetParent !== null)
-      .map(h => h.textContent.trim().substring(0, 50))
       .filter(t => t.length > 0)
-      .slice(0, 10);
-    return { url, visibleInputs, visibleButtons, tabs, headings };
+      .slice(0, 15);
+    return { url, visibleButtons, tabs };
   });
-  console.log(`${LOG} === ESTIMATE PAGE DUMP ===`);
-  console.log(`${LOG} URL: ${estPageDump.url}`);
-  console.log(`${LOG} Inputs: ${JSON.stringify(estPageDump.visibleInputs)}`);
-  console.log(`${LOG} Buttons: ${JSON.stringify(estPageDump.visibleButtons)}`);
-  console.log(`${LOG} Tabs: ${JSON.stringify(estPageDump.tabs)}`);
-  console.log(`${LOG} Headings: ${JSON.stringify(estPageDump.headings)}`);
-  console.log(`${LOG} === END ESTIMATE PAGE DUMP ===`);
-
-  await page.screenshot({ path: "/tmp/debug-estimate-page.png" });
-
-  // Extract estimate ID from URL
-  const currentUrl = page.url();
-  const estimateMatch = currentUrl.match(/estimates?\/([a-f0-9-]+)/i);
-  const estimateId = estimateMatch?.[1] || null;
-
-  // Try to read RO number from page
-  const roNumber = await page.evaluate(() => {
-    // Look for text that matches estimate/RO numbers
-    const body = document.body?.innerText || "";
-    const match = body.match(/(RO-\d+|EST-\d+|#\d{4,})/);
-    return match?.[0] || null;
-  });
-
-  console.log(`${LOG} Estimate ID: ${estimateId}, RO: ${roNumber}`);
+  console.log(`${LOG} Buttons: ${JSON.stringify(pageDump.visibleButtons)}`);
+  console.log(`${LOG} Tabs: ${JSON.stringify(pageDump.tabs)}`);
 
   return {
     success: true,
