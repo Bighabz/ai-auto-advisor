@@ -152,10 +152,11 @@ async function openPartsTechTab(page, browser) {
         }
       }
 
-      // Priority 2: element with fa-plus icon
+      // Priority 2: element with fa-plus icon — click the BUTTON ancestor, not the icon
       for (const el of allEls) {
         if (el.classList.contains("fa-plus") || el.querySelector(".fa-plus, .pi-plus")) {
-          const clickTarget = el.closest("button, a, div[class*='btn'], div[class*='add']") || el;
+          // Must click the actual <button> ancestor for Angular event binding
+          const clickTarget = el.closest("button") || el.closest("a") || el;
           clickTarget.setAttribute("data-pt-plus", "true");
           return { found: true, tag: clickTarget.tagName, text: "+icon", strategy: "fa-plus" };
         }
