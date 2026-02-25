@@ -2,6 +2,26 @@
  * Direct playbook test — run on Pi via: node scripts/test-playbook.js
  * No Telegram, no orchestrator, no Claude diagnosis. Just the browser flow.
  */
+
+// Load env vars from config/.env (same as systemd EnvironmentFile)
+const fs = require("fs");
+const path = require("path");
+const envPath = path.join(__dirname, "..", "config", ".env");
+if (fs.existsSync(envPath)) {
+  for (const line of fs.readFileSync(envPath, "utf8").split("\n")) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith("#")) continue;
+    const eq = trimmed.indexOf("=");
+    if (eq > 0) {
+      const key = trimmed.substring(0, eq).trim();
+      const val = trimmed.substring(eq + 1).trim();
+      if (!process.env[key]) process.env[key] = val;
+    }
+  }
+  console.log(`[test] Loaded env from ${envPath}`);
+  console.log(`[test] ANTHROPIC_API_KEY: ${process.env.ANTHROPIC_API_KEY ? "set (" + process.env.ANTHROPIC_API_KEY.substring(0, 12) + "...)" : "NOT SET"}`);
+}
+
 const { runPlaybook } = require("../skills/autoleap-browser/scripts/playbook");
 
 const testData = {

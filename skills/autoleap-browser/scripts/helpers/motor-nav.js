@@ -966,29 +966,45 @@ async function callClaude(userMessage) {
 
 /**
  * Read category options visible in the MOTOR tree.
- * Searches both inside and outside dialogs (MOTOR catalog IS a dialog).
+ * Filters noise: skips containers (long text), headers ("Categories", "All"),
+ * and decorative elements ("Powered by").
  */
 async function readCategoryOptions(page) {
   return page.evaluate((itemSel, textSel) => {
+    const NOISE = /^(categories|all|powered by|loading|search|add|cancel|close|back|save)$/i;
     const items = [];
+
     for (const sel of itemSel.split(", ")) {
       const els = Array.from(document.querySelectorAll(sel)).filter(el =>
         el.offsetParent !== null
       );
-      if (els.length > 0) {
-        els.forEach((el) => {
-          let text = "";
-          for (const ts of textSel.split(", ")) {
-            const child = el.querySelector(ts);
-            if (child) { text = child.textContent.trim(); break; }
+      if (els.length === 0) continue;
+
+      els.forEach((el) => {
+        // Prefer a direct child text element (span, .category-name) over the container
+        let text = "";
+        for (const ts of textSel.split(", ")) {
+          const child = el.querySelector(ts);
+          if (child) {
+            text = child.textContent.trim();
+            break;
           }
-          if (!text) text = el.textContent.trim();
-          if (text && text.length > 1 && !text.match(/^(add|cancel|close|back)$/i)) {
-            items.push(text);
-          }
-        });
-        break;
-      }
+        }
+        if (!text) text = el.textContent.trim();
+
+        // Skip noise: too long (container text), headers, buttons
+        if (!text || text.length <= 1) return;
+        if (text.length > 60) return;              // container with concatenated children
+        if (text.includes("  ")) return;            // multiple items joined (container)
+        if (NOISE.test(text)) return;
+        if (text.includes("Powered by")) return;
+        // Skip if text contains newlines (multi-line container)
+        if (text.includes("\n")) return;
+
+        items.push(text);
+      });
+
+      if (items.length > 0) break;
     }
     return [...new Set(items)];
   }, SERVICES.CATEGORY_ITEM, SERVICES.CATEGORY_TEXT);
@@ -1063,23 +1079,49 @@ async function readMotorHours(page) {
 
 /**
  * Click a category option by text. Uses native mouse click.
+ * Prefers exact text match on leaf elements, then partial match.
  */
 async function clickCategoryOption(page, optionText) {
   const result = await page.evaluate(
-    (text, itemSel) => {
+    (text, itemSel, textSel) => {
+      // Strategy 1: Find via CATEGORY_ITEM selectors, prefer child text match
+      for (const sel of itemSel.split(", ")) {
+        const els = Array.from(document.querySelectorAll(sel)).filter(el =>
+          el.offsetParent !== null
+        );
+        for (const el of els) {
+          // Check child text elements first (more precise)
+          for (const ts of textSel.split(", ")) {
+            const child = el.querySelector(ts);
+            if (child && child.textContent.trim() === text) {
+              const rect = el.getBoundingClientRect();
+              return { found: true, rect: { x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 } };
+            }
+          }
+          // Then check element's own text (but must be short = leaf)
+          const elText = el.textContent.trim();
+          if (elText === text && elText.length < 60) {
+            const rect = el.getBoundingClientRect();
+            return { found: true, rect: { x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 } };
+          }
+        }
+      }
+
+      // Strategy 2: Partial match on CATEGORY_ITEM selectors
       for (const sel of itemSel.split(", ")) {
         const els = Array.from(document.querySelectorAll(sel)).filter(el =>
           el.offsetParent !== null
         );
         for (const el of els) {
           const elText = el.textContent.trim();
-          if (elText.includes(text) || text.includes(elText)) {
+          if (elText.length < 60 && (elText.includes(text) || text.includes(elText))) {
             const rect = el.getBoundingClientRect();
             return { found: true, rect: { x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 } };
           }
         }
       }
-      // Broader fallback
+
+      // Strategy 3: Broader fallback — any leaf-ish element with exact text
       const all = Array.from(document.querySelectorAll("div, li, span, button, a")).filter(el =>
         el.offsetParent !== null
       );
@@ -1092,7 +1134,8 @@ async function clickCategoryOption(page, optionText) {
       return { found: false };
     },
     optionText,
-    SERVICES.CATEGORY_ITEM
+    SERVICES.CATEGORY_ITEM,
+    SERVICES.CATEGORY_TEXT
   );
 
   if (result.found && result.rect) {
