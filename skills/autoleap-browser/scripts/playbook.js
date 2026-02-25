@@ -499,10 +499,111 @@ async function runPlaybook({ customer, vehicle, diagnosis, parts, progressCallba
         console.log(`${LOG}   Final check: ${JSON.stringify(finalCheck)}`);
 
         if (finalCheck.vehicleInField) {
-          console.log(`${LOG}   Vehicle confirmed in UI ✓ — proceeding to Parts ordering`);
+          console.log(`${LOG}   Vehicle confirmed in UI ✓`);
         } else {
           console.log(`${LOG}   Vehicle not visible in UI — may need manual linking`);
           result.warnings.push({ code: "NO_VEHICLE_UI", msg: "Vehicle not visible after confirm" });
+        }
+
+        // ── Step E: Connect vehicle to MOTOR/VCDb (enables PartsTech button) ──
+        // The PT button stays `if-disabled` until the vehicle is "MOTOR connected".
+        // The red wrench ✗ icon next to vehicle opens MOTOR connection dialog.
+        console.log(`${LOG}   Step E: Checking MOTOR connection icon...`);
+        const motorIcon = await page.evaluate(() => {
+          // Look for the wrench/settings icons near the vehicle field
+          const vInput = document.querySelector("#estimate-vehicle");
+          if (!vInput) return { found: false, reason: "no vehicle input" };
+
+          // Walk up to the vehicle row container
+          let container = vInput;
+          for (let i = 0; i < 5; i++) {
+            container = container.parentElement;
+            if (!container) break;
+          }
+          if (!container) return { found: false, reason: "no container" };
+
+          // Find all clickable icons near the vehicle
+          const icons = Array.from(container.querySelectorAll("i, svg, img, span[class*='icon'], a"))
+            .filter(el => el.offsetParent !== null || el.offsetWidth > 0);
+          const iconInfo = icons.map(el => ({
+            tag: el.tagName,
+            cls: (el.className || "").substring(0, 60),
+            title: el.title || el.getAttribute("aria-label") || "",
+            cursor: getComputedStyle(el).cursor,
+            text: el.textContent.trim().substring(0, 20),
+            rect: (() => { const r = el.getBoundingClientRect(); return r.width > 0 ? { x: r.x + r.width / 2, y: r.y + r.height / 2 } : null; })(),
+          }));
+
+          // Look for motor/wrench/settings icons specifically
+          const motorBtn = icons.find(el => {
+            const cls = (el.className || "").toLowerCase();
+            const title = (el.title || el.getAttribute("aria-label") || "").toLowerCase();
+            return cls.includes("wrench") || cls.includes("motor") || cls.includes("settings") ||
+                   cls.includes("cog") || cls.includes("gear") || cls.includes("tools") ||
+                   title.includes("motor") || title.includes("vehicle") || title.includes("connect");
+          });
+
+          if (motorBtn) {
+            const rect = motorBtn.getBoundingClientRect();
+            return {
+              found: true,
+              cls: (motorBtn.className || "").substring(0, 60),
+              title: motorBtn.title || "",
+              rect: { x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 },
+            };
+          }
+
+          return { found: false, icons: iconInfo.slice(0, 10) };
+        });
+        console.log(`${LOG}   MOTOR icon: ${JSON.stringify(motorIcon)}`);
+
+        if (motorIcon.found && motorIcon.rect) {
+          console.log(`${LOG}   Clicking MOTOR connection icon...`);
+          await page.mouse.click(motorIcon.rect.x, motorIcon.rect.y);
+          await sleep(3000);
+          await page.screenshot({ path: "/tmp/debug-motor-connect.png" });
+
+          // Check if a modal/dialog appeared for MOTOR vehicle identification
+          const motorModal = await page.evaluate(() => {
+            const modal = document.querySelector("[role='dialog'], [class*='modal']:not([style*='display: none'])");
+            if (modal && modal.offsetParent !== null) {
+              return {
+                found: true,
+                text: modal.textContent.trim().substring(0, 200),
+                buttons: Array.from(modal.querySelectorAll("button")).map(b => b.textContent.trim()).slice(0, 10),
+              };
+            }
+            return { found: false };
+          });
+          console.log(`${LOG}   MOTOR modal: ${JSON.stringify(motorModal)}`);
+
+          // If a confirmation/connection modal appeared, try to confirm it
+          if (motorModal.found) {
+            const confirmBtn = await page.evaluate(() => {
+              const btns = Array.from(document.querySelectorAll("[role='dialog'] button, [class*='modal'] button"));
+              const confirm = btns.find(b => {
+                const t = b.textContent.trim().toLowerCase();
+                return (t === "confirm" || t === "connect" || t === "ok" || t === "yes" || t === "save") && b.offsetParent !== null;
+              });
+              if (confirm) {
+                const rect = confirm.getBoundingClientRect();
+                return { found: true, text: confirm.textContent.trim(), rect: { x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 } };
+              }
+              return { found: false };
+            });
+            if (confirmBtn.found) {
+              await page.mouse.click(confirmBtn.rect.x, confirmBtn.rect.y);
+              console.log(`${LOG}   Clicked "${confirmBtn.text}" on MOTOR connection modal`);
+              await sleep(5000);
+            }
+          }
+
+          // Check if PT button is now enabled
+          const ptAfterMotor = await page.evaluate(() => {
+            const btns = Array.from(document.querySelectorAll(".ro-partstech-new button"));
+            return btns.map(b => ({ cls: b.className.substring(0, 60), disabled: b.classList.contains("if-disabled") }));
+          });
+          console.log(`${LOG}   PT buttons after MOTOR: ${JSON.stringify(ptAfterMotor)}`);
         }
       } catch (vehErr) {
         console.log(`${LOG} Phase 2b error: ${vehErr.message} — continuing`);
