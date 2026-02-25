@@ -132,62 +132,72 @@ async function runPlaybook({ customer, vehicle, diagnosis, parts, progressCallba
       try {
       console.log(`${LOG} Phase 2b: Adding vehicle via autocomplete (#estimate-vehicle)...`);
 
-      // The vehicle field is an autocomplete input: #estimate-vehicle
+      // The vehicle field is a PrimeNG autocomplete input: #estimate-vehicle
       const vehInput = await page.$("#estimate-vehicle");
       if (vehInput) {
-        // Build search term: "YEAR MAKE MODEL" or just "YEAR MAKE"
-        const vehSearch = [vehicle.year, vehicle.make, vehicle.model].filter(Boolean).join(" ");
-        console.log(`${LOG}   Typing "${vehSearch}" into vehicle autocomplete...`);
+        // Try multiple search terms: short terms more likely to trigger autocomplete
+        const searchTerms = [
+          String(vehicle.year || ""),
+          vehicle.make || "",
+          `${vehicle.year || ""} ${vehicle.make || ""}`.trim(),
+        ].filter(t => t.length > 0);
 
-        // Click to focus, clear, then type
-        await vehInput.click({ clickCount: 3 });
-        await sleep(300);
-        await vehInput.type(vehSearch, { delay: 50 });
-        await sleep(2000);
+        let optionResult = { selected: false, count: 0, all: [] };
 
-        // Check for autocomplete dropdown options — use screenshot for debugging
-        await page.screenshot({ path: "/tmp/debug-vehicle-autocomplete.png" });
+        for (const vehSearch of searchTerms) {
+          if (optionResult.selected) break;
+          console.log(`${LOG}   Trying autocomplete with: "${vehSearch}"...`);
 
-        // Simple approach: look for any newly appeared li/option that has vehicle text
-        const optionResult = await page.evaluate((year, make) => {
-          // Look for PrimeNG autocomplete panel
-          const panel = document.querySelector(".p-autocomplete-panel");
-          if (panel) {
-            const items = Array.from(panel.querySelectorAll("li"))
-              .filter(o => o.offsetParent !== null && o.textContent.trim().length > 0);
-            const texts = items.map(o => o.textContent.trim().substring(0, 80));
-            if (items.length > 0) {
-              // Find best match with year/make
-              let best = items[0]; // default: first
-              for (const item of items) {
-                const t = item.textContent.toLowerCase();
-                if ((year && t.includes(String(year))) || (make && t.includes(make.toLowerCase()))) {
-                  best = item;
-                  break;
+          // Focus and clear the input
+          await vehInput.click();
+          await sleep(300);
+          await page.keyboard.down("Control");
+          await page.keyboard.press("a");
+          await page.keyboard.up("Control");
+          await page.keyboard.press("Backspace");
+          await sleep(300);
+
+          // Type the search term
+          await vehInput.type(vehSearch, { delay: 80 });
+          await sleep(3000); // Wait for autocomplete API call and panel
+
+          // Take screenshot for debugging
+          await page.screenshot({ path: "/tmp/debug-vehicle-autocomplete.png" });
+
+          // Check for PrimeNG autocomplete panel
+          optionResult = await page.evaluate((year, make) => {
+            // PrimeNG autocomplete panels
+            const panels = document.querySelectorAll(".p-autocomplete-panel, .p-autocomplete-overlay, [class*='autocomplete-panel']");
+            for (const panel of panels) {
+              const items = Array.from(panel.querySelectorAll("li, .p-autocomplete-item"))
+                .filter(o => o.offsetParent !== null && o.textContent.trim().length > 0);
+              if (items.length > 0) {
+                const texts = items.map(o => o.textContent.trim().substring(0, 80));
+                // Find best match
+                let best = items[0];
+                for (const item of items) {
+                  const t = item.textContent.toLowerCase();
+                  if ((year && t.includes(String(year))) && (make && t.includes(make.toLowerCase()))) {
+                    best = item; break;
+                  }
                 }
+                best.click();
+                return { selected: true, text: best.textContent.trim().substring(0, 60), count: items.length, all: texts };
               }
-              best.click();
-              return { selected: true, text: best.textContent.trim().substring(0, 60), count: items.length, all: texts };
             }
-          }
 
-          // Fallback: look for any li that appeared with vehicle-like content
-          const navTexts = ["Dashboard","Work Board","Calendar","Customers","Catalog","Inventory","CRM","Reviews","Reports","User Center"];
-          const candidates = Array.from(document.querySelectorAll("li"))
-            .filter(li => {
-              if (!li.offsetParent) return false;
-              const t = li.textContent.trim();
-              if (t.length > 100 || t.length < 3) return false;
-              if (navTexts.includes(t)) return false;
-              return (year && t.includes(String(year))) || (make && t.toLowerCase().includes(make.toLowerCase()));
-            });
-          if (candidates.length > 0) {
-            candidates[0].click();
-            return { selected: true, text: candidates[0].textContent.trim().substring(0, 60), count: candidates.length, all: candidates.map(c => c.textContent.trim().substring(0, 60)) };
-          }
+            // Check if the input itself shows a selected value
+            const vehInput = document.querySelector("#estimate-vehicle");
+            if (vehInput && vehInput.value && !vehInput.value.includes("Select")) {
+              return { selected: true, text: vehInput.value.substring(0, 60), count: 0, all: ["input-has-value"] };
+            }
 
-          return { selected: false, count: 0, all: [] };
-        }, vehicle.year, vehicle.make);
+            return { selected: false, count: 0, all: [] };
+          }, vehicle.year, vehicle.make);
+
+          console.log(`${LOG}   Result: ${optionResult.count} options, selected=${optionResult.selected}`);
+          if (optionResult.all?.length > 0) console.log(`${LOG}   Options: ${JSON.stringify(optionResult.all)}`);
+        }
 
         console.log(`${LOG}   Autocomplete options: ${optionResult.count} found`);
         if (optionResult.all?.length > 0) console.log(`${LOG}   Options: ${JSON.stringify(optionResult.all)}`);
@@ -256,8 +266,15 @@ async function runPlaybook({ customer, vehicle, diagnosis, parts, progressCallba
       }
 
       await page.screenshot({ path: "/tmp/debug-after-vehicle.png" });
-      // Verify vehicle is now linked
+      // Verify vehicle is now linked (check input value, not just placeholder text)
       const stillNeedsVehicle = await page.evaluate(() => {
+        const vehInput = document.querySelector("#estimate-vehicle");
+        if (vehInput) {
+          // If input still has "Select vehicle" placeholder and no value → still needs vehicle
+          const val = vehInput.value || "";
+          const placeholder = vehInput.placeholder || "";
+          return !val || placeholder.includes("Select vehicle");
+        }
         return (document.body?.innerText || "").includes("Select vehicle");
       }).catch(() => false);
       if (stillNeedsVehicle) {
