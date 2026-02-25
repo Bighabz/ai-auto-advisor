@@ -333,12 +333,13 @@ async function createEstimateWithCustomerVehicle(page, customer, vehicle) {
   let customerName = `${firstName} ${lastName}`.trim();
 
   // Search for existing customer by phone or name
+  let existingCustomer = null;
   if (customer.phone) {
     console.log(`${LOG} Searching for existing customer: ${customer.phone}...`);
-    const existing = await searchCustomer(token, customer.phone);
-    if (existing?._id) {
-      customerId = existing._id;
-      customerName = `${existing.firstName || ""} ${existing.lastName || ""}`.trim() || customerName;
+    existingCustomer = await searchCustomer(token, customer.phone);
+    if (existingCustomer?._id) {
+      customerId = existingCustomer._id;
+      customerName = `${existingCustomer.firstName || ""} ${existingCustomer.lastName || ""}`.trim() || customerName;
       console.log(`${LOG} Found existing customer: ${customerName} (${customerId})`);
     }
   }
@@ -359,16 +360,44 @@ async function createEstimateWithCustomerVehicle(page, customer, vehicle) {
     }
   }
 
-  // Step 2c: Create estimate via REST API (links customer, no vehicle yet)
+  // Step 2c: Match vehicle from customer's vehicles (if existing customer)
+  let vehicleId = null;
+  const vehicles = existingCustomer?.vehicles || [];
+  if (vehicles.length > 0 && (vehicle.vin || vehicle.year || vehicle.make)) {
+    // Try VIN match first
+    if (vehicle.vin) {
+      const vinMatch = vehicles.find(v => v.VIN === vehicle.vin || v.vin === vehicle.vin);
+      if (vinMatch) vehicleId = vinMatch.vehicleId;
+    }
+    // Try year/make match
+    if (!vehicleId && (vehicle.year || vehicle.make)) {
+      const ymMatch = vehicles.find(v => {
+        const name = (v.name || "").toLowerCase();
+        const yearOk = !vehicle.year || name.includes(String(vehicle.year));
+        const makeOk = !vehicle.make || name.includes(vehicle.make.toLowerCase());
+        return yearOk && makeOk;
+      });
+      if (ymMatch) vehicleId = ymMatch.vehicleId;
+    }
+    // Fall back to first vehicle
+    if (!vehicleId) vehicleId = vehicles[0]?.vehicleId || null;
+
+    if (vehicleId) {
+      const veh = vehicles.find(v => v.vehicleId === vehicleId);
+      console.log(`${LOG} Using vehicle: ${veh?.name || vehicleId}`);
+    }
+  }
+
+  // Step 2d: Create estimate via REST API (links customer + vehicle)
   console.log(`${LOG} Creating estimate via API...`);
   let estimateId = null;
   let roNumber = null;
 
   try {
-    const est = await createEstimate(token, { customerId });
+    const est = await createEstimate(token, { customerId, vehicleId });
     estimateId = est._id;
     roNumber = est.code || est.estimateNumber || null;
-    console.log(`${LOG} Estimate created: ${estimateId} (RO: ${roNumber})`);
+    console.log(`${LOG} Estimate created: ${estimateId} (RO: ${roNumber})${vehicleId ? " with vehicle" : " (no vehicle)"}`);
   } catch (err) {
     console.log(`${LOG} Estimate creation failed: ${err.message}`);
     return { success: false, error: `Estimate creation failed: ${err.message}` };

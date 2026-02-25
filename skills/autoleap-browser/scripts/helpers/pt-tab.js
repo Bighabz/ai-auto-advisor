@@ -25,20 +25,61 @@ async function openPartsTechTab(page, browser) {
   await clickByTextFallback(page, [
     PARTS_TAB.TAB,
   ], "Parts ordering");
-  await sleep(2000);
+  await sleep(3000);
+
+  // Screenshot the Parts ordering tab content
+  await page.screenshot({ path: "/tmp/debug-parts-ordering-tab.png" });
+
+  // Debug: dump what's visible on the Parts ordering tab
+  const partsTabDump = await page.evaluate(() => {
+    const visibleButtons = Array.from(document.querySelectorAll("button, a, [role='button']"))
+      .filter(b => b.offsetParent !== null)
+      .map(b => ({
+        text: b.textContent.trim().substring(0, 50),
+        class: (b.className || "").substring(0, 50),
+        tag: b.tagName,
+      }))
+      .filter(b => b.text.length > 0)
+      .slice(0, 20);
+    // Look for any PartsTech-related elements
+    const ptElements = Array.from(document.querySelectorAll('[class*="partstech" i], [class*="parts-tech" i], [data-integration*="partstech" i], [class*="integration" i]'))
+      .map(el => ({
+        tag: el.tagName,
+        class: (el.className || "").substring(0, 60),
+        text: el.textContent.trim().substring(0, 50),
+        visible: el.offsetParent !== null,
+      }))
+      .slice(0, 10);
+    // Look for any + or add buttons
+    const addBtns = Array.from(document.querySelectorAll("button, a"))
+      .filter(b => b.offsetParent !== null && (b.textContent.trim() === "+" || b.textContent.trim().includes("Add") || b.textContent.trim().includes("Order")))
+      .map(b => ({
+        text: b.textContent.trim().substring(0, 30),
+        class: (b.className || "").substring(0, 50),
+        tag: b.tagName,
+      }))
+      .slice(0, 10);
+    return { visibleButtons, ptElements, addBtns };
+  });
+  console.log(`${LOG} Parts tab buttons: ${JSON.stringify(partsTabDump.visibleButtons)}`);
+  console.log(`${LOG} PartsTech elements: ${JSON.stringify(partsTabDump.ptElements)}`);
+  console.log(`${LOG} Add/+ buttons: ${JSON.stringify(partsTabDump.addBtns)}`);
 
   // Wait for PartsTech card
+  let ptCardFound = false;
   try {
-    await page.waitForSelector(PARTS_TAB.PT_CARD.split(", ")[0], { timeout: 8000 });
+    await page.waitForSelector(PARTS_TAB.PT_CARD.split(", ")[0], { timeout: 5000 });
+    ptCardFound = true;
   } catch {
     // Try broader selector
-    const found = await page.evaluate(() => {
+    ptCardFound = await page.evaluate(() => {
       return !!document.querySelector('[class*="partstech"], [data-integration*="partstech"]');
     });
-    if (!found) {
-      console.log(`${LOG} PartsTech card not visible — may not be configured`);
-      return { ptPage: null, isIframe: false };
-    }
+  }
+
+  if (!ptCardFound) {
+    // Try finding ANY + button on the parts tab (the PartsTech add button)
+    console.log(`${LOG} PartsTech card not found by selector — trying + buttons directly...`);
   }
 
   console.log(`${LOG} Clicking PartsTech + button to open new tab...`);
