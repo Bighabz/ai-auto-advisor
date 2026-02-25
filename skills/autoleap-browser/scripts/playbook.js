@@ -64,7 +64,7 @@ async function runPlaybook({ customer, vehicle, diagnosis, parts, progressCallba
     browser = await puppeteer.connect({
       browserURL: CHROME_CDP_URL,
       defaultViewport: { width: 1280, height: 900 },
-      protocolTimeout: 60000,
+      protocolTimeout: 120000,
     });
 
     // Find or create AutoLeap page
@@ -96,11 +96,8 @@ async function runPlaybook({ customer, vehicle, diagnosis, parts, progressCallba
     result.roNumber = createResult.roNumber;
     console.log(`${LOG} Phase 2: "Save & Create Estimate" → ${result.roNumber || result.estimateId}`);
 
-    // Wait for estimate page to settle, then reload to force Angular to render API data
-    await sleep(2000);
-    console.log(`${LOG} Reloading estimate page to sync API data...`);
-    await page.reload({ waitUntil: "domcontentloaded", timeout: 30000 });
-    await sleep(5000);
+    // Wait for estimate page to settle
+    await sleep(3000);
 
     // ═══════════════════════════════════════════════════════════════════════════
     // PHASE 2b: Add vehicle to estimate (if not linked via API)
@@ -135,71 +132,49 @@ async function runPlaybook({ customer, vehicle, diagnosis, parts, progressCallba
         await vehInput.type(vehSearch, { delay: 50 });
         await sleep(2000);
 
-        // Check for autocomplete dropdown options (scoped to autocomplete panel only)
-        const optionResult = await page.evaluate((year, make, model) => {
-          // AutoLeap uses PrimeNG / Angular autocomplete panels
-          // Look for autocomplete panel/overlay that appeared after typing
-          const panels = Array.from(document.querySelectorAll(
-            ".p-autocomplete-panel, [class*='autocomplete-panel'], [class*='autocomplete-items'], " +
-            "[class*='dropdown-panel'], [class*='overlay-panel'], .cdk-overlay-container"
-          )).filter(p => p.offsetParent !== null || p.querySelector("li, [class*='item']"));
+        // Check for autocomplete dropdown options — use screenshot for debugging
+        await page.screenshot({ path: "/tmp/debug-vehicle-autocomplete.png" });
 
-          // Find options specifically inside autocomplete panels
-          let options = [];
-          for (const panel of panels) {
-            const items = Array.from(panel.querySelectorAll(
-              "li, [class*='autocomplete-item'], [class*='option'], [role='option']"
-            )).filter(o => o.offsetParent !== null && o.textContent.trim().length > 0);
-            options.push(...items);
-          }
-
-          // Fallback: look for overlay items near the vehicle input
-          if (options.length === 0) {
-            const vehicleInput = document.querySelector("#estimate-vehicle");
-            if (vehicleInput) {
-              const parent = vehicleInput.closest("[class*='autocomplete'], [class*='vehicle']") || vehicleInput.parentElement?.parentElement;
-              if (parent) {
-                const items = Array.from(parent.querySelectorAll("li, [class*='item'], [class*='option']"))
-                  .filter(o => o.offsetParent !== null && o.textContent.trim().length > 0);
-                options.push(...items);
+        // Simple approach: look for any newly appeared li/option that has vehicle text
+        const optionResult = await page.evaluate((year, make) => {
+          // Look for PrimeNG autocomplete panel
+          const panel = document.querySelector(".p-autocomplete-panel");
+          if (panel) {
+            const items = Array.from(panel.querySelectorAll("li"))
+              .filter(o => o.offsetParent !== null && o.textContent.trim().length > 0);
+            const texts = items.map(o => o.textContent.trim().substring(0, 80));
+            if (items.length > 0) {
+              // Find best match with year/make
+              let best = items[0]; // default: first
+              for (const item of items) {
+                const t = item.textContent.toLowerCase();
+                if ((year && t.includes(String(year))) || (make && t.includes(make.toLowerCase()))) {
+                  best = item;
+                  break;
+                }
               }
+              best.click();
+              return { selected: true, text: best.textContent.trim().substring(0, 60), count: items.length, all: texts };
             }
           }
 
-          // Last resort: look for any li items that contain vehicle-like text (year/make)
-          if (options.length === 0 && (year || make)) {
-            const allLi = Array.from(document.querySelectorAll("li")).filter(li => {
+          // Fallback: look for any li that appeared with vehicle-like content
+          const navTexts = ["Dashboard","Work Board","Calendar","Customers","Catalog","Inventory","CRM","Reviews","Reports","User Center"];
+          const candidates = Array.from(document.querySelectorAll("li"))
+            .filter(li => {
               if (!li.offsetParent) return false;
-              const text = li.textContent.trim();
-              // Must look like a vehicle entry, not a nav item
-              if (text.length > 100) return false;
-              if (["Dashboard", "Work Board", "Calendar", "Customers", "Catalog",
-                   "Inventory", "CRM", "Reviews", "Reports", "User Center"].includes(text)) return false;
-              const hasYear = year && text.includes(String(year));
-              const hasMake = make && text.toLowerCase().includes(make.toLowerCase());
-              return hasYear || hasMake;
+              const t = li.textContent.trim();
+              if (t.length > 100 || t.length < 3) return false;
+              if (navTexts.includes(t)) return false;
+              return (year && t.includes(String(year))) || (make && t.toLowerCase().includes(make.toLowerCase()));
             });
-            options.push(...allLi);
+          if (candidates.length > 0) {
+            candidates[0].click();
+            return { selected: true, text: candidates[0].textContent.trim().substring(0, 60), count: candidates.length, all: candidates.map(c => c.textContent.trim().substring(0, 60)) };
           }
 
-          const uniqueTexts = [...new Set(options.map(o => o.textContent.trim().substring(0, 80)))].slice(0, 10);
-
-          if (options.length > 0) {
-            // Find best match: contains year + make
-            let bestMatch = null;
-            for (const opt of options) {
-              const text = opt.textContent.toLowerCase();
-              const hasYear = !year || text.includes(String(year));
-              const hasMake = !make || text.includes(make.toLowerCase());
-              if (hasYear && hasMake) { bestMatch = opt; break; }
-            }
-            const target = bestMatch || options[0];
-            target.click();
-            return { selected: true, text: target.textContent.trim().substring(0, 60), count: options.length, all: uniqueTexts };
-          }
-
-          return { selected: false, count: 0, all: uniqueTexts };
-        }, vehicle.year, vehicle.make, vehicle.model);
+          return { selected: false, count: 0, all: [] };
+        }, vehicle.year, vehicle.make);
 
         console.log(`${LOG}   Autocomplete options: ${optionResult.count} found`);
         if (optionResult.all?.length > 0) console.log(`${LOG}   Options: ${JSON.stringify(optionResult.all)}`);
@@ -249,56 +224,18 @@ async function runPlaybook({ customer, vehicle, diagnosis, parts, progressCallba
           if (yearFilled || makeFilled) {
             // Click Save button in the sidebar
             const saved = await page.evaluate(() => {
-              // Find save buttons — there may be multiple, pick the one in the sidebar area
               const btns = Array.from(document.querySelectorAll("button"))
                 .filter(b => b.offsetParent !== null && !b.disabled && b.textContent.trim() === "Save");
-              // The sidebar save button is typically in a sidebar-wrapper or customer panel
+              // Prefer sidebar save
               for (const btn of btns) {
                 const inSidebar = btn.closest('[class*="sidebar"], [class*="customer-panel"], [class*="drawer"]');
                 if (inSidebar) { btn.click(); return { clicked: true, context: "sidebar" }; }
               }
-              // Fallback: click the first Save button
               if (btns.length > 0) { btns[0].click(); return { clicked: true, context: "first" }; }
               return { clicked: false };
             });
             console.log(`${LOG}   Save result: ${JSON.stringify(saved)}`);
             await sleep(3000);
-
-            // Reload to pick up the new vehicle
-            console.log(`${LOG}   Reloading estimate to sync vehicle...`);
-            await page.reload({ waitUntil: "domcontentloaded", timeout: 30000 });
-            await sleep(4000);
-
-            // Now try the vehicle autocomplete again
-            const vehInput2 = await page.$("#estimate-vehicle");
-            if (vehInput2) {
-              const vehSearch2 = [vehicle.year, vehicle.make].filter(Boolean).join(" ");
-              await vehInput2.click({ clickCount: 3 });
-              await sleep(300);
-              await vehInput2.type(vehSearch2, { delay: 50 });
-              await sleep(2000);
-
-              // Try to select from autocomplete dropdown
-              await page.evaluate((year, make) => {
-                const panels = Array.from(document.querySelectorAll(
-                  ".p-autocomplete-panel, [class*='autocomplete-panel'], [class*='autocomplete-items'], .cdk-overlay-container"
-                ));
-                for (const panel of panels) {
-                  const items = Array.from(panel.querySelectorAll("li, [role='option']"))
-                    .filter(o => o.offsetParent !== null);
-                  for (const item of items) {
-                    const text = item.textContent.toLowerCase();
-                    if ((year && text.includes(String(year))) || (make && text.includes(make.toLowerCase()))) {
-                      item.click();
-                      return;
-                    }
-                  }
-                  // Click first option if any
-                  if (items.length > 0) items[0].click();
-                }
-              }, vehicle.year, vehicle.make);
-              await sleep(2000);
-            }
           }
         }
       } else {
