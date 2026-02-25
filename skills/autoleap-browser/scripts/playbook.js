@@ -506,21 +506,31 @@ async function runPlaybook({ customer, vehicle, diagnosis, parts, progressCallba
         }
 
         // ── Step E: Ensure clean state for Phase 3/4 ──
-        // Close any sidebars/modals and verify we're on the estimate page
-        await page.keyboard.press("Escape");
-        await sleep(500);
-        // Check we're still on estimate page (not customer sidebar)
-        const currentTabs = await page.evaluate(() => {
-          const tabs = Array.from(document.querySelectorAll("[role='tab'] a, .p-tabview-nav a"));
-          return tabs.map(a => a.textContent.trim()).filter(t => t.length > 0).slice(0, 10);
+        // Close customer sidebar if open — it blocks Services panel / MOTOR
+        const sidebarClosed = await page.evaluate(() => {
+          const dialogs = document.querySelectorAll("[role='dialog'], [class*='sidebar-right'], [class*='drawer']");
+          for (const dialog of dialogs) {
+            if (!dialog.offsetParent && dialog.offsetWidth === 0) continue;
+            const closeBtns = dialog.querySelectorAll(
+              "button[class*='close'], [class*='close-btn'], i.fa-times, i.pi-times"
+            );
+            for (const btn of closeBtns) {
+              const target = btn.closest("button") || btn;
+              if (target.offsetParent !== null || target.offsetWidth > 0) {
+                const rect = target.getBoundingClientRect();
+                return { closed: true, rect: { x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 } };
+              }
+            }
+          }
+          return { closed: false };
         });
-        console.log(`${LOG}   Current tabs: ${JSON.stringify(currentTabs)}`);
-        const isEstimateTabs = currentTabs.some(t => t === "Parts ordering" || t === "Services");
-        if (!isEstimateTabs) {
-          // We might be on customer sidebar — navigate back to estimate
-          console.log(`${LOG}   Not on estimate tabs — navigating back...`);
-          await page.evaluate((id) => { window.location.hash = `/estimate/${id}`; }, result.estimateId);
-          await sleep(5000);
+        if (sidebarClosed.closed && sidebarClosed.rect) {
+          await page.mouse.click(sidebarClosed.rect.x, sidebarClosed.rect.y);
+          console.log(`${LOG}   Closed customer sidebar ✓`);
+          await sleep(1500);
+        } else {
+          await page.keyboard.press("Escape");
+          await sleep(500);
         }
       } catch (vehErr) {
         console.log(`${LOG} Phase 2b error: ${vehErr.message} — continuing`);

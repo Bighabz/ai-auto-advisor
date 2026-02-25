@@ -72,10 +72,9 @@ const PARTSTECH = {
 const SERVICES = {
   TAB: 'button[role="tab"]:has-text("Services"), [class*="services-tab"]',
   BROWSE_BTN: 'button.btn-success:has-text("Browse"), button:has-text("Browse")',
-  MODAL: 'div[role="dialog"], [class*="modal"]',
-  MODAL_TABS: '.modal-header-tabs, [class*="modal"] [class*="tabs"]',
-  CONNECT_MOTOR: 'button:has-text("Connect to MOTOR")',
-  MOTOR_TAB: 'button[role="tab"]:has-text("MOTOR Primary")',
+  // MOTOR Primary tab — can be button, a, li, or div depending on AutoLeap version
+  MOTOR_TAB_TEXT: "MOTOR Primary",
+  CONNECT_MOTOR_TEXT: "Connect to MOTOR",
   // Category items in the MOTOR tree (each level)
   CATEGORY_ITEM: 'div[role="button"], li[role="treeitem"], [class*="category-item"], [class*="tree-node"]',
   CATEGORY_TEXT: '.category-name, .item-text, span',
@@ -85,6 +84,8 @@ const SERVICES = {
   ADDON_CHECKBOX: '[class*="addon"] input[type="checkbox"], [class*="add-on"] label',
   // Labor hours field (READ ONLY — NEVER MODIFY)
   HOURS_FIELD: 'input[name="hours"], input[name="qty"], [class*="hours-input"]',
+  // Customer sidebar (must be closed before MOTOR navigation)
+  SIDEBAR_CLOSE: '[class*="sidebar"] button[class*="close"], [class*="drawer"] button[class*="close"]',
 };
 
 module.exports = {

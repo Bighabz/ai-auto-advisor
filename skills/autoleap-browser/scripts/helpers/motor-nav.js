@@ -1,9 +1,13 @@
 /**
  * MOTOR Labor Tree Navigation
  *
- * Navigates AutoLeap's MOTOR catalog using a 7-level category tree.
+ * Navigates AutoLeap's MOTOR catalog using the Services panel category tree.
  * Uses Claude AI (haiku) to pick the correct category at each level
  * based on the vehicle and diagnosis context.
+ *
+ * KEY INSIGHT (from screenshots): MOTOR Primary tab is in the estimate's
+ * Services panel — NOT inside a dialog/modal. The customer sidebar
+ * ([role="dialog"]) must be closed first or it blocks everything.
  */
 
 const https = require("https");
@@ -22,94 +26,76 @@ const LOG = "[playbook:motor]";
 async function navigateMotorTree(page, diagnosis, vehicle) {
   console.log(`${LOG} Opening MOTOR labor catalog...`);
 
-  // Click Services tab
-  await clickFirstAvailable(page, SERVICES.TAB);
-  await sleep(2000);
-
-  // Click Browse button
-  await clickFirstAvailable(page, SERVICES.BROWSE_BTN);
-  await sleep(2000);
-
-  // Wait for modal
-  try {
-    await page.waitForSelector(SERVICES.MODAL.split(", ")[0], { timeout: 8000 });
-  } catch {
-    const hasModal = await page.evaluate(() => {
-      return !!document.querySelector('[role="dialog"], [class*="modal"]');
-    });
-    if (!hasModal) {
-      return { success: false, error: "Browse modal did not open" };
-    }
-  }
-
-  // ── Step 11a: Connect to MOTOR ──
-  console.log(`${LOG} Checking MOTOR connection...`);
-
-  // Scroll modal tabs to reveal MOTOR
-  await page.evaluate((sel) => {
-    const container = document.querySelector(sel);
-    if (container) container.scrollLeft += 500;
-  }, SERVICES.MODAL_TABS.split(", ")[0]);
+  // ── Step 0: Close any customer sidebar / modal that blocks the page ──
+  await closeSidebar(page);
   await sleep(1000);
 
-  // Check if "Connect to MOTOR" button exists
-  const connectBtn = await findElement(page, SERVICES.CONNECT_MOTOR);
-  if (connectBtn) {
-    console.log(`${LOG} Clicking "Connect to MOTOR"...`);
-    await connectBtn.click();
-    await sleep(5000); // MOTOR connection takes time
+  // Take a screenshot to see starting state
+  await page.screenshot({ path: "/tmp/debug-motor-start.png" });
 
-    // Take debug screenshot to see the modal state
-    await page.screenshot({ path: "/tmp/debug-motor-after-connect.png" });
+  // ── Step 1: Click Services tab on the estimate page ──
+  console.log(`${LOG} Clicking Services tab...`);
+  const servicesClicked = await clickByText(page, "Services", ["button", "a", "li", "[role='tab']"]);
+  console.log(`${LOG} Services tab clicked: ${servicesClicked}`);
+  await sleep(2000);
 
-    // Log modal state after connect
-    const modalState = await page.evaluate(() => {
-      const modal = document.querySelector("[role='dialog'], [class*='modal']");
-      if (!modal) return { modal: false };
-      const tabs = Array.from(modal.querySelectorAll("[role='tab'], [class*='tab'] a, [class*='tab'] button, li a"))
-        .filter(el => el.offsetParent !== null)
-        .map(el => el.textContent.trim())
-        .filter(t => t.length > 0);
-      const buttons = Array.from(modal.querySelectorAll("button"))
-        .filter(el => el.offsetParent !== null)
-        .map(el => el.textContent.trim())
-        .filter(t => t.length > 0);
-      return { modal: true, tabs, buttons: buttons.slice(0, 10), text: modal.textContent.trim().substring(0, 200) };
-    });
-    console.log(`${LOG} Modal after Connect: ${JSON.stringify(modalState)}`);
-  }
+  // ── Step 2: Find and click MOTOR Primary tab (in services panel, NOT modal) ──
+  console.log(`${LOG} Looking for MOTOR Primary tab in services panel...`);
+  let motorFound = await clickByText(page, SERVICES.MOTOR_TAB_TEXT, [
+    "button", "a", "li", "[role='tab']", "span", "div",
+  ]);
 
-  // Click MOTOR Primary tab — retry up to 3 times (connection may be slow)
-  let motorTab = null;
-  for (let attempt = 0; attempt < 3; attempt++) {
-    motorTab = await findElement(page, SERVICES.MOTOR_TAB);
-    if (motorTab) break;
-    if (attempt < 2) {
-      console.log(`${LOG} MOTOR Primary tab not found — waiting (attempt ${attempt + 1}/3)...`);
-      // Try scrolling modal tabs again
-      await page.evaluate((sel) => {
-        const container = document.querySelector(sel);
-        if (container) container.scrollLeft += 500;
-      }, SERVICES.MODAL_TABS.split(", ")[0]);
-      await sleep(5000);
+  if (!motorFound) {
+    // MOTOR not connected — try Browse → Connect to MOTOR
+    console.log(`${LOG} MOTOR Primary tab not found — trying Browse → Connect flow...`);
+    await clickByText(page, "Browse", ["button"]);
+    await sleep(3000);
+
+    // Close sidebar again if Browse triggered it
+    await closeSidebar(page);
+    await sleep(1000);
+
+    // Look for "Connect to MOTOR" button
+    const connectClicked = await clickByText(page, SERVICES.CONNECT_MOTOR_TEXT, ["button"]);
+    if (connectClicked) {
+      console.log(`${LOG} Clicked "Connect to MOTOR" — waiting for connection...`);
+      await sleep(6000);
+      // Close sidebar again just in case
+      await closeSidebar(page);
+      await sleep(1000);
     }
+
+    // Retry MOTOR Primary tab
+    motorFound = await clickByText(page, SERVICES.MOTOR_TAB_TEXT, [
+      "button", "a", "li", "[role='tab']", "span", "div",
+    ]);
   }
-  if (!motorTab) {
-    // Dump all visible tabs/buttons in the modal for debugging
-    const debugInfo = await page.evaluate(() => {
-      const modal = document.querySelector("[role='dialog'], [class*='modal']");
-      if (!modal) return "no modal found";
-      const allClickable = Array.from(modal.querySelectorAll("button, a, [role='tab'], [role='button'], li"))
-        .filter(el => el.offsetParent !== null)
-        .map(el => ({ tag: el.tagName, text: el.textContent.trim().substring(0, 40), cls: (el.className || "").substring(0, 40) }))
-        .slice(0, 20);
-      return JSON.stringify(allClickable);
+
+  if (!motorFound) {
+    await page.screenshot({ path: "/tmp/debug-motor-no-tab.png" });
+    // Dump all visible tab-like elements for debugging
+    const debugTabs = await page.evaluate(() => {
+      const els = Array.from(document.querySelectorAll(
+        "button, a, li, [role='tab'], [role='button']"
+      )).filter(el => el.offsetParent !== null);
+      return els
+        .map(el => ({
+          tag: el.tagName,
+          text: el.textContent.trim().substring(0, 50),
+          cls: (el.className || "").substring(0, 50),
+        }))
+        .filter(e => e.text.length > 0 && e.text.length < 40)
+        .slice(0, 30);
     });
-    console.log(`${LOG} Available modal elements: ${debugInfo}`);
+    console.log(`${LOG} Visible clickable elements: ${JSON.stringify(debugTabs)}`);
     return { success: false, error: "MOTOR Primary tab not found — MOTOR may not be connected" };
   }
-  await motorTab.click();
+
+  console.log(`${LOG} MOTOR Primary tab clicked ✓`);
   await sleep(2000);
+
+  // Take screenshot to see MOTOR tree
+  await page.screenshot({ path: "/tmp/debug-motor-after-tab.png" });
 
   // Build repair context for Claude
   const repairContext = buildRepairContext(diagnosis, vehicle);
@@ -117,19 +103,18 @@ async function navigateMotorTree(page, diagnosis, vehicle) {
 
   // ── Navigate levels with Claude AI ──
   const maxLevels = 7;
-  let currentLevel = 0;
   let lastPickedName = "";
 
   for (let level = 0; level < maxLevels; level++) {
-    currentLevel = level + 1;
+    const currentLevel = level + 1;
 
     // Read current category options from DOM
     const options = await readCategoryOptions(page);
 
     if (options.length === 0) {
       // No more categories — check if we have an "Add" button
-      const addBtn = await findElement(page, SERVICES.ADD_BTN);
-      if (addBtn) {
+      const hasAdd = await hasAddButton(page);
+      if (hasAdd) {
         console.log(`${LOG} Found Add button at level ${currentLevel} — adding labor`);
         break;
       }
@@ -137,12 +122,7 @@ async function navigateMotorTree(page, diagnosis, vehicle) {
       break;
     }
 
-    // Check if one of the options is an "Add" action
-    const hasAddAction = options.some(
-      (o) => o.toLowerCase().includes("add") || o.toLowerCase().includes("select")
-    );
-
-    if (options.length === 1 && !hasAddAction) {
+    if (options.length === 1) {
       // Auto-select single option
       console.log(`${LOG} Level ${currentLevel}: Auto-selecting "${options[0]}"`);
       await clickCategoryOption(page, options[0]);
@@ -216,27 +196,11 @@ async function navigateMotorTree(page, diagnosis, vehicle) {
 
   // ── Click "Add" button ──
   console.log(`${LOG} Clicking "Add" to add labor line...`);
-  const addBtn = await findElement(page, SERVICES.ADD_BTN);
-  if (addBtn) {
-    await addBtn.click();
-    await sleep(3000);
-  } else {
-    // Try clicking any visible "Add" button in the modal
-    const clicked = await page.evaluate(() => {
-      const btns = Array.from(document.querySelectorAll('button'));
-      for (const btn of btns) {
-        if (btn.textContent.trim() === "Add" && btn.offsetParent !== null) {
-          btn.click();
-          return true;
-        }
-      }
-      return false;
-    });
-    if (!clicked) {
-      return { success: false, error: "Could not find Add button to confirm labor" };
-    }
-    await sleep(3000);
+  const addClicked = await clickAddButton(page);
+  if (!addClicked) {
+    return { success: false, error: "Could not find Add button to confirm labor" };
   }
+  await sleep(3000);
 
   // ── Read the hours (GOLDEN RULE: NEVER modify) ──
   const hours = await readMotorHours(page);
@@ -248,6 +212,151 @@ async function navigateMotorTree(page, diagnosis, vehicle) {
     hours,
     addOns: selectedAddOns,
   };
+}
+
+// ─── Sidebar Management ──────────────────────────────────────────────────────
+
+/**
+ * Close any customer sidebar or dialog that overlaps the estimate page.
+ * The sidebar has a × close button and matches [role="dialog"].
+ */
+async function closeSidebar(page) {
+  const closed = await page.evaluate(() => {
+    // Look for visible sidebar/dialog with a close button
+    const dialogs = document.querySelectorAll("[role='dialog'], [class*='sidebar-right'], [class*='drawer']");
+    for (const dialog of dialogs) {
+      if (!dialog.offsetParent && dialog.offsetWidth === 0) continue;
+
+      // Try to find the × close button
+      const closeBtns = dialog.querySelectorAll(
+        "button[class*='close'], [class*='close-btn'], i.fa-times, i.pi-times"
+      );
+      for (const btn of closeBtns) {
+        const clickTarget = btn.closest("button") || btn;
+        if (clickTarget.offsetParent !== null || clickTarget.offsetWidth > 0) {
+          const rect = clickTarget.getBoundingClientRect();
+          return { closed: true, rect: { x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 } };
+        }
+      }
+
+      // Try the × text
+      const allEls = dialog.querySelectorAll("*");
+      for (const el of allEls) {
+        if (el.textContent.trim() === "×" && el.children.length === 0 && el.offsetParent !== null) {
+          const rect = el.getBoundingClientRect();
+          return { closed: true, rect: { x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 } };
+        }
+      }
+    }
+    return { closed: false };
+  });
+
+  if (closed.closed && closed.rect) {
+    await page.mouse.click(closed.rect.x, closed.rect.y);
+    console.log(`${LOG} Closed sidebar/dialog ✓`);
+    await sleep(1000);
+    return true;
+  }
+
+  // Fallback: press Escape
+  await page.keyboard.press("Escape");
+  await sleep(500);
+  return false;
+}
+
+// ─── Click Helpers ───────────────────────────────────────────────────────────
+
+/**
+ * Click an element by its visible text content.
+ * Uses native mouse click (not DOM click) to trigger Angular events.
+ * Skips elements inside [role="dialog"] (sidebar) to avoid wrong targets.
+ *
+ * @param {import('puppeteer-core').Page} page
+ * @param {string} text - Text to match
+ * @param {string[]} tagSelectors - CSS selectors for candidate elements
+ * @returns {Promise<boolean>} - true if clicked
+ */
+async function clickByText(page, text, tagSelectors) {
+  const result = await page.evaluate((text, selectors) => {
+    const selectorStr = selectors.join(", ");
+    const candidates = Array.from(document.querySelectorAll(selectorStr))
+      .filter(el => {
+        if (!el.offsetParent && el.offsetWidth === 0) return false;
+        // Skip elements inside customer sidebar [role="dialog"]
+        const inDialog = el.closest("[role='dialog']");
+        if (inDialog) return false;
+        return true;
+      });
+
+    for (const el of candidates) {
+      const elText = el.textContent.trim();
+      if (elText === text || elText.includes(text)) {
+        // Prefer exact match over "includes"
+        const rect = el.getBoundingClientRect();
+        if (rect.width > 0 && rect.height > 0) {
+          return { found: true, rect: { x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 }, text: elText.substring(0, 40) };
+        }
+      }
+    }
+    return { found: false };
+  }, text, tagSelectors);
+
+  if (result.found && result.rect) {
+    await page.mouse.click(result.rect.x, result.rect.y);
+    return true;
+  }
+  return false;
+}
+
+/**
+ * Check if an "Add" button is visible.
+ */
+async function hasAddButton(page) {
+  return page.evaluate(() => {
+    const btns = Array.from(document.querySelectorAll("button"));
+    return btns.some(b =>
+      b.textContent.trim() === "Add" &&
+      b.offsetParent !== null &&
+      !b.closest("[role='dialog']")
+    );
+  });
+}
+
+/**
+ * Click the "Add" button (outside of any dialog).
+ */
+async function clickAddButton(page) {
+  const result = await page.evaluate(() => {
+    const btns = Array.from(document.querySelectorAll("button"));
+    for (const b of btns) {
+      if (
+        b.textContent.trim() === "Add" &&
+        b.offsetParent !== null &&
+        !b.closest("[role='dialog']")
+      ) {
+        const rect = b.getBoundingClientRect();
+        return { found: true, rect: { x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 } };
+      }
+    }
+    // Broader: btn-success with "Add" text
+    for (const b of btns) {
+      if (
+        b.textContent.trim().includes("Add") &&
+        b.classList.contains("btn-success") &&
+        b.offsetParent !== null
+      ) {
+        const rect = b.getBoundingClientRect();
+        return { found: true, rect: { x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 } };
+      }
+    }
+    return { found: false };
+  });
+
+  if (result.found && result.rect) {
+    await page.mouse.click(result.rect.x, result.rect.y);
+    return true;
+  }
+  return false;
 }
 
 // ─── Claude AI Integration ──────────────────────────────────────────────────
@@ -372,13 +481,18 @@ async function callClaude(userMessage) {
 // ─── DOM Readers ────────────────────────────────────────────────────────────
 
 /**
- * Read category options visible in the MOTOR tree modal.
+ * Read category options visible in the MOTOR tree.
+ * Looks in the services panel (NOT inside a dialog).
  */
 async function readCategoryOptions(page) {
   return page.evaluate((itemSel, textSel) => {
     const items = [];
     for (const sel of itemSel.split(", ")) {
-      const els = document.querySelectorAll(sel);
+      const els = Array.from(document.querySelectorAll(sel)).filter(el => {
+        // Skip elements inside customer sidebar
+        if (el.closest("[role='dialog']")) return false;
+        return el.offsetParent !== null;
+      });
       if (els.length > 0) {
         els.forEach((el) => {
           // Try to get text from specific child elements first
@@ -407,7 +521,10 @@ async function readQualifierOptions(page) {
   return page.evaluate((sel) => {
     const items = [];
     for (const s of sel.split(", ")) {
-      const els = document.querySelectorAll(s);
+      const els = Array.from(document.querySelectorAll(s)).filter(el => {
+        if (el.closest("[role='dialog']")) return false;
+        return el.offsetParent !== null;
+      });
       els.forEach((el) => {
         const text = (el.textContent || el.getAttribute("aria-label") || "").trim();
         if (text && text.length > 1) items.push(text);
@@ -425,7 +542,10 @@ async function readAddOnOptions(page) {
   return page.evaluate((sel) => {
     const items = [];
     for (const s of sel.split(", ")) {
-      const els = document.querySelectorAll(s);
+      const els = Array.from(document.querySelectorAll(s)).filter(el => {
+        if (el.closest("[role='dialog']")) return false;
+        return el.offsetParent !== null;
+      });
       els.forEach((el) => {
         const text = (el.textContent || el.getAttribute("aria-label") || "").trim();
         if (text && text.length > 1) items.push(text);
@@ -464,124 +584,83 @@ async function readMotorHours(page) {
 // ─── DOM Clickers ───────────────────────────────────────────────────────────
 
 /**
- * Click a category option by text.
+ * Click a category option by text. Uses native mouse click.
  */
 async function clickCategoryOption(page, optionText) {
-  return page.evaluate(
+  const result = await page.evaluate(
     (text, itemSel) => {
       for (const sel of itemSel.split(", ")) {
-        const els = document.querySelectorAll(sel);
+        const els = Array.from(document.querySelectorAll(sel)).filter(el => {
+          if (el.closest("[role='dialog']")) return false;
+          return el.offsetParent !== null;
+        });
         for (const el of els) {
-          if (el.textContent.trim().includes(text) || text.includes(el.textContent.trim())) {
-            el.click();
-            return true;
+          const elText = el.textContent.trim();
+          if (elText.includes(text) || text.includes(elText)) {
+            const rect = el.getBoundingClientRect();
+            return { found: true, rect: { x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 } };
           }
         }
       }
-      // Broader fallback
-      const all = document.querySelectorAll("div, li, span, button, a");
+      // Broader fallback (still exclude dialog)
+      const all = Array.from(document.querySelectorAll("div, li, span, button, a")).filter(el => {
+        if (el.closest("[role='dialog']")) return false;
+        return el.offsetParent !== null;
+      });
       for (const el of all) {
         if (el.children.length < 3 && el.textContent.trim() === text) {
-          el.click();
-          return true;
+          const rect = el.getBoundingClientRect();
+          return { found: true, rect: { x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 } };
         }
       }
-      return false;
+      return { found: false };
     },
     optionText,
     SERVICES.CATEGORY_ITEM
   );
+
+  if (result.found && result.rect) {
+    await page.mouse.click(result.rect.x, result.rect.y);
+    return true;
+  }
+  return false;
 }
 
 /**
  * Click an add-on checkbox by text.
  */
 async function clickAddOn(page, addOnText) {
-  return page.evaluate(
+  const result = await page.evaluate(
     (text, sel) => {
       for (const s of sel.split(", ")) {
-        const els = document.querySelectorAll(s);
+        const els = Array.from(document.querySelectorAll(s)).filter(el => {
+          if (el.closest("[role='dialog']")) return false;
+          return el.offsetParent !== null;
+        });
         for (const el of els) {
           if ((el.textContent || "").trim().includes(text)) {
-            el.click();
-            return true;
+            const rect = el.getBoundingClientRect();
+            return { found: true, rect: { x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 } };
           }
         }
       }
-      return false;
+      return { found: false };
     },
     addOnText,
     SERVICES.ADDON_CHECKBOX
   );
+
+  if (result.found && result.rect) {
+    await page.mouse.click(result.rect.x, result.rect.y);
+    return true;
+  }
+  return false;
 }
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
 function sleep(ms) {
   return new Promise((r) => setTimeout(r, ms));
-}
-
-async function findElement(page, selectorStr) {
-  for (const sel of selectorStr.split(", ")) {
-    try {
-      const el = await page.$(sel);
-      if (el) return el;
-    } catch { /* try next — :has-text() not supported natively */ }
-  }
-
-  // Text-based fallback for :has-text() selectors
-  for (const sel of selectorStr.split(", ")) {
-    const match = sel.match(/:has-text\("([^"]+)"\)/);
-    if (match) {
-      const text = match[1];
-      // Extract tag hint from selector (e.g., "button" from 'button:has-text("X")')
-      const tagHint = sel.split(":")[0].split("[")[0].split(".")[0].toLowerCase();
-      const el = await page.evaluateHandle((text, tagHint) => {
-        const candidates = tagHint
-          ? Array.from(document.querySelectorAll(`${tagHint}, [role="button"], [role="tab"]`))
-          : Array.from(document.querySelectorAll("button, a, [role='button'], [role='tab'], div"));
-        for (const el of candidates) {
-          if (el.textContent.trim().includes(text) && el.offsetParent !== null) return el;
-        }
-        return null;
-      }, text, tagHint);
-      // Check if the handle is a valid element
-      const isElement = await el.evaluate(n => n !== null).catch(() => false);
-      if (isElement) return el.asElement();
-    }
-  }
-
-  return null;
-}
-
-async function clickFirstAvailable(page, selectorStr) {
-  for (const sel of selectorStr.split(", ")) {
-    try {
-      const el = await page.$(sel);
-      if (el) {
-        await el.click();
-        return true;
-      }
-    } catch { /* try next */ }
-  }
-  // Text-based fallback
-  return page.evaluate((sels) => {
-    for (const sel of sels.split(", ")) {
-      // Extract text hint from :has-text("...")
-      const match = sel.match(/:has-text\("([^"]+)"\)/);
-      if (match) {
-        const text = match[1];
-        const els = document.querySelectorAll("button, a, [role='button'], [role='tab']");
-        for (const el of els) {
-          if (el.textContent.trim().includes(text)) {
-            el.click();
-            return true;
-          }
-        }
-      }
-    }
-    return false;
-  }, selectorStr);
 }
 
 function buildRepairContext(diagnosis, vehicle) {
