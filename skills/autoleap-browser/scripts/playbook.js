@@ -63,6 +63,7 @@ async function runPlaybook({ customer, vehicle, diagnosis, parts, progressCallba
     browser = await puppeteer.connect({
       browserURL: CHROME_CDP_URL,
       defaultViewport: { width: 1280, height: 900 },
+      protocolTimeout: 60000,
     });
 
     // Find or create AutoLeap page
@@ -259,7 +260,7 @@ async function ensureLoggedIn(page) {
   }
 
   // Navigate to login page
-  await page.goto(AUTOLEAP_APP_URL, { waitUntil: "domcontentloaded", timeout: 15000 });
+  await page.goto(AUTOLEAP_APP_URL, { waitUntil: "domcontentloaded", timeout: 30000 });
   await sleep(2000);
 
   // Check if redirected to dashboard (already logged in)
@@ -313,7 +314,7 @@ async function createEstimateWithCustomerVehicle(page, customer, vehicle) {
   if (!page.url().includes("/workboard")) {
     await page.goto(`${AUTOLEAP_APP_URL}/workboard`, {
       waitUntil: "domcontentloaded",
-      timeout: 15000,
+      timeout: 30000,
     });
     await sleep(3000);
   }
