@@ -319,188 +319,187 @@ async function createEstimateWithCustomerVehicle(page, customer, vehicle) {
     await sleep(3000);
   }
 
-  // Step 2: Click global "New" / "+" button
-  console.log(`${LOG} Clicking "New" button...`);
-  const newClicked = await page.evaluate(() => {
-    // Try several button patterns
-    const patterns = [
-      'button:has-text("New")',
-      'button.global-add-btn',
-      'button[aria-label="Create new"]',
-    ];
-    // Direct search
+  // Step 2: Click green "Estimate" button (top right of workboard)
+  console.log(`${LOG} Clicking "Estimate" button...`);
+  const estClicked = await page.evaluate(() => {
     const btns = Array.from(document.querySelectorAll("button, a, [role='button']"));
     for (const btn of btns) {
-      const text = btn.textContent.trim().toLowerCase();
-      if (
-        text === "new" ||
-        text === "+" ||
-        text.includes("create new") ||
-        text.includes("new estimate")
-      ) {
+      const text = btn.textContent.trim();
+      if (text === "Estimate") {
+        btn.click();
+        return "Estimate";
+      }
+    }
+    // Fallback: green + button in header
+    for (const btn of btns) {
+      const text = btn.textContent.trim();
+      if (text === "+" || text === "New") {
         btn.click();
         return text;
       }
     }
-    // Look for FAB button
-    const fab = document.querySelector('[class*="fab"], [class*="add-button"], button[class*="primary"]');
-    if (fab) { fab.click(); return "fab"; }
     return null;
   });
 
-  if (!newClicked) {
-    await page.screenshot({ path: "/tmp/debug-no-new-btn.png", fullPage: true });
-    return { success: false, error: "Could not find New/+ button on workboard" };
+  if (!estClicked) {
+    await page.screenshot({ path: "/tmp/debug-no-est-btn.png", fullPage: true });
+    return { success: false, error: 'Could not find "Estimate" button on workboard' };
   }
-  console.log(`${LOG} Clicked: ${newClicked}`);
-  await sleep(2000);
+  console.log(`${LOG} Clicked: "${estClicked}"`);
+  await sleep(3000);
 
-  // Debug: screenshot after New button click
-  await page.screenshot({ path: "/tmp/debug-after-new-click.png", fullPage: true });
-  console.log(`${LOG} Screenshot: /tmp/debug-after-new-click.png`);
+  // Screenshot after clicking Estimate
+  await page.screenshot({ path: "/tmp/debug-after-estimate-click.png", fullPage: true });
+  console.log(`${LOG} Screenshot: /tmp/debug-after-estimate-click.png`);
 
-  // Debug: dump form-related elements
+  // Debug: check what's visible now
   const formDebug = await page.evaluate(() => {
-    const inputs = Array.from(document.querySelectorAll("input")).map(i => ({
-      name: i.name, type: i.type, placeholder: i.placeholder,
-      id: i.id, className: i.className.substring(0, 60),
-      formcontrolname: i.getAttribute("formcontrolname"),
+    const url = window.location.href;
+    // Find visible inputs (offsetParent !== null)
+    const visibleInputs = Array.from(document.querySelectorAll("input")).filter(i => i.offsetParent !== null).map(i => ({
+      id: i.id, type: i.type, placeholder: i.placeholder,
+      name: i.name, className: i.className.substring(0, 80),
     }));
-    const selects = Array.from(document.querySelectorAll("select")).map(s => ({
-      name: s.name, id: s.id, className: s.className.substring(0, 60),
-      formcontrolname: s.getAttribute("formcontrolname"),
-      optionCount: s.options?.length || 0,
+    // Find visible buttons
+    const visibleButtons = Array.from(document.querySelectorAll("button")).filter(b => b.offsetParent !== null).map(b => ({
+      text: b.textContent.trim().substring(0, 50), disabled: b.disabled,
+      className: b.className.substring(0, 80),
     }));
-    const buttons = Array.from(document.querySelectorAll("button")).slice(0, 20).map(b => ({
-      text: b.textContent.trim().substring(0, 40), disabled: b.disabled,
-      className: b.className.substring(0, 60),
+    // Find visible selects
+    const visibleSelects = Array.from(document.querySelectorAll("select")).filter(s => s.offsetParent !== null).map(s => ({
+      id: s.id, name: s.name, options: s.options?.length || 0,
     }));
-    return { inputs, selects, buttons, url: window.location.href };
+    // Check for drawers/modals/dialogs
+    const dialogs = Array.from(document.querySelectorAll('[role="dialog"], [class*="drawer"], [class*="modal"], [class*="sidebar"]'))
+      .filter(d => d.offsetParent !== null)
+      .map(d => ({ tag: d.tagName, class: d.className.substring(0, 80) }));
+    return { url, visibleInputs, visibleButtons, visibleSelects, dialogs };
   });
-  console.log(`${LOG} DOM debug — URL: ${formDebug.url}`);
-  console.log(`${LOG} Inputs (${formDebug.inputs.length}):`);
-  for (const i of formDebug.inputs) {
-    console.log(`${LOG}   name="${i.name}" type="${i.type}" placeholder="${i.placeholder}" formcontrolname="${i.formcontrolname}" id="${i.id}"`);
+  console.log(`${LOG} URL: ${formDebug.url}`);
+  console.log(`${LOG} Visible inputs (${formDebug.visibleInputs.length}):`);
+  for (const i of formDebug.visibleInputs) {
+    console.log(`${LOG}   id="${i.id}" placeholder="${i.placeholder}" type="${i.type}" class="${i.className}"`);
   }
-  console.log(`${LOG} Selects (${formDebug.selects.length}):`);
-  for (const s of formDebug.selects) {
-    console.log(`${LOG}   name="${s.name}" formcontrolname="${s.formcontrolname}" options=${s.optionCount}`);
+  console.log(`${LOG} Visible selects (${formDebug.visibleSelects.length}):`);
+  for (const s of formDebug.visibleSelects) {
+    console.log(`${LOG}   id="${s.id}" name="${s.name}" options=${s.options}`);
   }
-  console.log(`${LOG} Buttons (${formDebug.buttons.length}):`);
-  for (const b of formDebug.buttons) {
+  console.log(`${LOG} Visible buttons (${formDebug.visibleButtons.length}):`);
+  for (const b of formDebug.visibleButtons) {
     console.log(`${LOG}   "${b.text}" disabled=${b.disabled}`);
   }
-
-  // Look for "Customer & Vehicle" option in dropdown if it appeared
-  await page.evaluate(() => {
-    const items = Array.from(document.querySelectorAll("li, a, button, [role='menuitem']"));
-    for (const item of items) {
-      const text = (item.textContent || "").toLowerCase();
-      if (text.includes("customer") || text.includes("estimate")) {
-        item.click();
-        return true;
-      }
-    }
-    return false;
-  });
-  await sleep(2000);
-
-  // Wait for form/drawer to appear
-  try {
-    await page.waitForSelector(
-      CUSTOMER.DRAWER.split(", ")[0],
-      { timeout: 8000 }
-    );
-  } catch {
-    // May not use a drawer — could be inline form
+  console.log(`${LOG} Dialogs/drawers (${formDebug.dialogs.length}):`);
+  for (const d of formDebug.dialogs) {
+    console.log(`${LOG}   ${d.tag} class="${d.class}"`);
   }
 
-  // Step 3: Fill customer info
+  // Step 3: Fill customer info using AutoLeap's actual IDs
   const nameParts = (customer.name || "Customer").trim().split(/\s+/);
   const firstName = nameParts[0] || "";
   const lastName = nameParts.length > 1 ? nameParts.slice(1).join(" ") : "";
 
   console.log(`${LOG} Filling customer: ${firstName} ${lastName}`);
 
-  await fillField(page, CUSTOMER.FIRST_NAME, firstName);
-  await fillField(page, CUSTOMER.LAST_NAME, lastName);
+  // AutoLeap uses id-based selectors, not name/formcontrolname
+  await fillField(page, '#personal-card-fname, input[placeholder="First Name*"]', firstName);
+  await fillField(page, '#personal-card-lname, input[placeholder="Last Name*"]', lastName);
   if (customer.phone) {
-    await fillField(page, CUSTOMER.PHONE, customer.phone);
+    await fillField(page, '#personal-card-mobile, input[placeholder="Mobile*"]', customer.phone);
   }
 
-  // Step 4: Enter vehicle
-  if (vehicle.vin) {
-    console.log(`${LOG} Decoding VIN: ${vehicle.vin}`);
-    const vinField = await findFirstElement(page, CUSTOMER.VIN);
-    if (vinField) {
-      await vinField.click({ clickCount: 3 });
-      await vinField.type(vehicle.vin, { delay: 30 });
-      await sleep(500);
+  // Step 4: Vehicle — check if there's a vehicle section visible
+  // AutoLeap has no native <select> elements — YMME uses custom dropdowns
+  console.log(`${LOG} Looking for vehicle section...`);
+  const vehicleDebug = await page.evaluate(() => {
+    // Look for VIN field
+    const vinInputs = Array.from(document.querySelectorAll("input")).filter(i =>
+      i.offsetParent !== null && (
+        i.placeholder?.toLowerCase().includes("vin") ||
+        i.id?.toLowerCase().includes("vin") ||
+        i.name?.toLowerCase().includes("vin")
+      )
+    );
+    // Look for Year/Make/Model inputs or dropdowns
+    const ymmeInputs = Array.from(document.querySelectorAll("input")).filter(i =>
+      i.offsetParent !== null && (
+        i.placeholder?.toLowerCase().includes("year") ||
+        i.placeholder?.toLowerCase().includes("make") ||
+        i.placeholder?.toLowerCase().includes("model") ||
+        i.id?.toLowerCase().includes("year") ||
+        i.id?.toLowerCase().includes("make") ||
+        i.id?.toLowerCase().includes("model")
+      )
+    );
+    return {
+      vinFields: vinInputs.map(i => ({ id: i.id, placeholder: i.placeholder, class: i.className.substring(0, 60) })),
+      ymmeFields: ymmeInputs.map(i => ({ id: i.id, placeholder: i.placeholder, class: i.className.substring(0, 60) })),
+    };
+  });
+  console.log(`${LOG} VIN fields: ${JSON.stringify(vehicleDebug.vinFields)}`);
+  console.log(`${LOG} YMME fields: ${JSON.stringify(vehicleDebug.ymmeFields)}`);
 
-      // Click "Decode" button
-      const decodeBtn = await findFirstElement(page, CUSTOMER.VIN_DECODE);
-      if (decodeBtn) {
-        await decodeBtn.click();
-        // Wait for decode to complete
-        await sleep(5000);
-        console.log(`${LOG} VIN decoded`);
-      }
-    }
-  } else {
-    // YMME fallback
-    console.log(`${LOG} Manual YMME: ${vehicle.year} ${vehicle.make} ${vehicle.model}`);
-    await selectDropdown(page, CUSTOMER.YEAR, String(vehicle.year));
+  // Try filling vehicle if fields are visible
+  if (vehicle.vin && vehicleDebug.vinFields.length > 0) {
+    console.log(`${LOG} Entering VIN: ${vehicle.vin}`);
+    const vinSel = vehicleDebug.vinFields[0].id ? `#${vehicleDebug.vinFields[0].id}` : `input[placeholder*="VIN" i]`;
+    await fillField(page, vinSel, vehicle.vin);
     await sleep(1000);
-    await selectDropdown(page, CUSTOMER.MAKE, vehicle.make);
-    await sleep(1000);
-    await selectDropdown(page, CUSTOMER.MODEL, vehicle.model);
-    await sleep(1000);
-    if (vehicle.engine?.displacement) {
-      await selectDropdown(page, CUSTOMER.ENGINE, vehicle.engine.displacement);
-      await sleep(1000);
-    }
-  }
-
-  // Step 5: Click "Save & Create Estimate"
-  console.log(`${LOG} Clicking "Save & Create Estimate"...`);
-  let saveClicked = false;
-
-  // Try primary button
-  const saveBtn = await findFirstElement(page, CUSTOMER.SAVE_CREATE_ESTIMATE);
-  if (saveBtn) {
-    await saveBtn.click();
-    saveClicked = true;
-  }
-
-  if (!saveClicked) {
-    // Text fallback
-    saveClicked = await page.evaluate(() => {
-      const btns = Array.from(document.querySelectorAll("button"));
+    // Try to click Decode button
+    await page.evaluate(() => {
+      const btns = Array.from(document.querySelectorAll("button")).filter(b => b.offsetParent !== null);
       for (const btn of btns) {
-        if (btn.textContent.trim().includes("Save & Create Estimate")) {
-          btn.click();
-          return true;
-        }
-        if (btn.textContent.trim().includes("Save & Create")) {
+        if (btn.textContent.trim().toLowerCase().includes("decode")) {
           btn.click();
           return true;
         }
       }
       return false;
     });
-  }
-
-  if (!saveClicked) {
-    // Last resort: just click Save
-    const justSave = await findFirstElement(page, CUSTOMER.SAVE);
-    if (justSave) {
-      await justSave.click();
-      saveClicked = true;
+    await sleep(5000);
+  } else if (vehicleDebug.ymmeFields.length > 0) {
+    console.log(`${LOG} YMME fields found — filling year/make/model`);
+    // Fill whatever YMME fields are visible
+    for (const field of vehicleDebug.ymmeFields) {
+      const sel = field.id ? `#${field.id}` : `input[placeholder="${field.placeholder}"]`;
+      const placeholder = (field.placeholder || "").toLowerCase();
+      if (placeholder.includes("year")) {
+        await fillField(page, sel, String(vehicle.year));
+      } else if (placeholder.includes("make")) {
+        await fillField(page, sel, vehicle.make);
+      } else if (placeholder.includes("model")) {
+        await fillField(page, sel, vehicle.model);
+      }
+      await sleep(500);
     }
+  } else {
+    console.log(`${LOG} No vehicle fields visible — will skip vehicle entry`);
   }
 
-  if (!saveClicked) {
-    return { success: false, error: '"Save & Create Estimate" button not found' };
+  // Step 5: Click "Save" then create estimate
+  console.log(`${LOG} Looking for Save / Create Estimate button...`);
+  let saveClicked = false;
+
+  // Try text-based button search (visible buttons only)
+  saveClicked = await page.evaluate(() => {
+    const btns = Array.from(document.querySelectorAll("button")).filter(b => b.offsetParent !== null && !b.disabled);
+    // Priority order
+    const priorities = ["Save & Create Estimate", "Save & Create", "Create Estimate", "Save"];
+    for (const text of priorities) {
+      for (const btn of btns) {
+        if (btn.textContent.trim().includes(text)) {
+          btn.click();
+          return text;
+        }
+      }
+    }
+    return null;
+  });
+
+  if (saveClicked) {
+    console.log(`${LOG} Clicked: "${saveClicked}"`);
+  } else {
+    await page.screenshot({ path: "/tmp/debug-no-save-btn.png", fullPage: true });
+    return { success: false, error: '"Save" button not found' };
   }
 
   // Wait for navigation to estimate page
