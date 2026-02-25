@@ -67,63 +67,144 @@ async function navigateMotorTree(page, diagnosis, vehicle) {
   });
   console.log(`${LOG} Dialog state: ${JSON.stringify(dialogState)}`);
 
-  // Check if MOTOR Primary tab exists already (might be connected)
+  // ── Step 3a: Try clicking MOTOR Primary tab (even if grayed out) ──
+  // From screenshots: tabs are [AutoLeap] [MOTOR Primary] [MOTOR Secondary] [Magic Services]
+  // MOTOR Primary is grayed when "Vehicle is not linked" — clicking may trigger linking
   let motorTabFound = false;
+
+  console.log(`${LOG} Looking for MOTOR Primary tab...`);
   const motorTabResult = await findInDialog(page, SERVICES.MOTOR_TAB_TEXT);
   if (motorTabResult.found) {
-    console.log(`${LOG} MOTOR Primary tab found — clicking...`);
+    console.log(`${LOG} MOTOR Primary tab found at (${Math.round(motorTabResult.rect.x)}, ${Math.round(motorTabResult.rect.y)}) — clicking...`);
     await page.mouse.click(motorTabResult.rect.x, motorTabResult.rect.y);
-    motorTabFound = true;
-    await sleep(2000);
-  } else {
-    // Need to connect to MOTOR first
-    console.log(`${LOG} Looking for "Connect to MOTOR"...`);
+    await sleep(3000);
 
-    // Scroll the modal tab bar to reveal MOTOR tabs
-    await page.evaluate(() => {
-      const containers = document.querySelectorAll(
-        "[class*='modal'] [class*='tabs'], [class*='modal'] [class*='tab-header'], " +
-        "[role='dialog'] [class*='scroll'], [role='dialog'] nav"
+    // Take screenshot to see result of clicking MOTOR Primary
+    await page.screenshot({ path: "/tmp/debug-motor-after-tab-click.png" });
+
+    // Check if we got a vehicle linking dialog or MOTOR tree
+    const afterTabClick = await page.evaluate(() => {
+      // Check for any new dialog/popup about vehicle linking
+      const allDialogs = Array.from(document.querySelectorAll("[role='dialog'], [class*='modal']"))
+        .filter(d => d.offsetParent !== null || d.offsetWidth > 0);
+      const texts = allDialogs.map(d => d.textContent.trim().substring(0, 300));
+
+      // Check if MOTOR tree appeared (category items)
+      const treeItems = document.querySelectorAll(
+        "div[role='button'], li[role='treeitem'], [class*='category-item'], [class*='tree-node']"
       );
-      for (const c of containers) {
-        if (c.scrollWidth > c.clientWidth) {
-          c.scrollLeft += 500;
-        }
-      }
-    });
-    await sleep(1000);
+      const visibleItems = Array.from(treeItems).filter(el => el.offsetParent !== null);
 
+      // Check for vehicle selection / engine selection
+      const selects = Array.from(document.querySelectorAll("select, [class*='dropdown']"))
+        .filter(el => el.offsetParent !== null)
+        .map(el => ({ tag: el.tagName, cls: (el.className || "").substring(0, 40) }));
+
+      return {
+        dialogCount: allDialogs.length,
+        dialogTexts: texts,
+        treeItemCount: visibleItems.length,
+        treeItems: visibleItems.slice(0, 5).map(el => el.textContent.trim().substring(0, 40)),
+        selects,
+      };
+    });
+    console.log(`${LOG} After MOTOR tab click: ${JSON.stringify(afterTabClick)}`);
+
+    if (afterTabClick.treeItemCount > 0) {
+      console.log(`${LOG} MOTOR tree visible with ${afterTabClick.treeItemCount} items ✓`);
+      motorTabFound = true;
+    }
+  }
+
+  // ── Step 3b: If MOTOR tree not showing, try "Connect to MOTOR" button ──
+  if (!motorTabFound) {
+    console.log(`${LOG} MOTOR tree not visible — trying "Connect to MOTOR" button...`);
     const connectResult = await findInDialog(page, SERVICES.CONNECT_MOTOR_TEXT);
     if (connectResult.found) {
-      console.log(`${LOG} Clicking "Connect to MOTOR"...`);
+      console.log(`${LOG} Found "Connect to MOTOR" at (${Math.round(connectResult.rect.x)}, ${Math.round(connectResult.rect.y)}) — clicking...`);
       await page.mouse.click(connectResult.rect.x, connectResult.rect.y);
-      await sleep(6000);
+      await sleep(4000);
 
-      // Take screenshot after connecting
+      // Take screenshot
       await page.screenshot({ path: "/tmp/debug-motor-after-connect.png" });
 
-      // Log dialog state after connection
+      // Check for vehicle linking dialog (may need to select engine)
       const postConnect = await page.evaluate(() => {
-        const dialog = document.querySelector("[role='dialog'], [class*='modal-content']");
-        if (!dialog) return { found: false };
-        const tabs = Array.from(dialog.querySelectorAll("a, button, li, [role='tab'], span"))
-          .filter(el => el.offsetParent !== null)
-          .map(el => el.textContent.trim())
-          .filter(t => t.length > 0 && t.length < 50);
-        return { found: true, tabs: [...new Set(tabs)].slice(0, 25) };
+        const allDialogs = Array.from(document.querySelectorAll("[role='dialog'], [class*='modal']"))
+          .filter(d => d.offsetParent !== null || d.offsetWidth > 0);
+        const buttons = [];
+        const texts = [];
+        const inputs = [];
+        for (const d of allDialogs) {
+          const btns = d.querySelectorAll("button");
+          btns.forEach(b => {
+            if (b.offsetParent) buttons.push(b.textContent.trim().substring(0, 40));
+          });
+          texts.push(d.textContent.trim().substring(0, 200));
+          const inps = d.querySelectorAll("input, select");
+          inps.forEach(i => {
+            if (i.offsetParent) inputs.push({
+              tag: i.tagName,
+              type: i.type || "",
+              name: i.name || "",
+              placeholder: (i.placeholder || "").substring(0, 30),
+            });
+          });
+        }
+        return { dialogCount: allDialogs.length, buttons: [...new Set(buttons)], texts, inputs };
       });
-      console.log(`${LOG} Dialog after Connect: ${JSON.stringify(postConnect)}`);
+      console.log(`${LOG} After Connect to MOTOR: ${JSON.stringify(postConnect)}`);
 
-      // Now look for MOTOR Primary tab
+      // Check if there's a vehicle search/select that we need to interact with
+      if (postConnect.inputs.length > 0) {
+        console.log(`${LOG} Found input fields after Connect — may need vehicle selection`);
+      }
+
+      // Wait more and retry MOTOR Primary tab
+      await sleep(5000);
       const motorRetry = await findInDialog(page, SERVICES.MOTOR_TAB_TEXT);
       if (motorRetry.found) {
-        console.log(`${LOG} MOTOR Primary tab found after connect — clicking...`);
+        console.log(`${LOG} MOTOR Primary tab found — clicking...`);
         await page.mouse.click(motorRetry.rect.x, motorRetry.rect.y);
-        motorTabFound = true;
         await sleep(2000);
+        motorTabFound = true;
       }
     } else {
-      console.log(`${LOG} "Connect to MOTOR" not found in dialog`);
+      console.log(`${LOG} "Connect to MOTOR" not found`);
+    }
+  }
+
+  // ── Step 3c: If still no MOTOR, check the "not linked" warning ──
+  if (!motorTabFound) {
+    console.log(`${LOG} Checking for "not linked" warning...`);
+    const notLinked = await page.evaluate(() => {
+      const els = Array.from(document.querySelectorAll("*")).filter(el =>
+        el.offsetParent !== null &&
+        el.textContent.includes("not linked") &&
+        el.children.length < 5
+      );
+      if (els.length > 0) {
+        const rect = els[0].getBoundingClientRect();
+        return { found: true, text: els[0].textContent.trim().substring(0, 60), rect: { x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 } };
+      }
+      return { found: false };
+    });
+    if (notLinked.found) {
+      console.log(`${LOG} Found "${notLinked.text}" — clicking...`);
+      await page.mouse.click(notLinked.rect.x, notLinked.rect.y);
+      await sleep(5000);
+      await page.screenshot({ path: "/tmp/debug-motor-after-notlinked.png" });
+
+      // Check for any new dialog/selection that appeared
+      const afterNotLinked = await page.evaluate(() => {
+        const allDialogs = Array.from(document.querySelectorAll("[role='dialog'], [class*='modal']"))
+          .filter(d => d.offsetParent !== null || d.offsetWidth > 0);
+        return {
+          dialogCount: allDialogs.length,
+          texts: allDialogs.map(d => d.textContent.trim().substring(0, 200)),
+        };
+      });
+      console.log(`${LOG} After clicking "not linked": ${JSON.stringify(afterNotLinked)}`);
     }
   }
 
