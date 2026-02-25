@@ -111,7 +111,8 @@ async function runPlaybook({ customer, vehicle, diagnosis, parts, progressCallba
       const vehInput = document.querySelector("#estimate-vehicle");
       if (vehInput) {
         // If input has placeholder "Select vehicle" AND value is empty → needs vehicle
-        return vehInput.placeholder.includes("Select vehicle") && !vehInput.value;
+        const placeholder = vehInput.placeholder || vehInput.getAttribute("placeholder") || "";
+        return placeholder.includes("Select vehicle") && !vehInput.value;
       }
       // Fallback: check page text
       const pageText = document.body?.innerText || "";
