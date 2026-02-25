@@ -456,8 +456,10 @@ async function runPlaybook({ customer, vehicle, diagnosis, parts, progressCallba
           }
         }
 
-        // ── Step C: SAVE estimate to commit vehicle selection to Angular state ──
-        console.log(`${LOG}   Step C: Saving estimate to commit vehicle selection...`);
+        // ── Step C: SAVE estimate to commit vehicle selection ──
+        // DON'T reload the page after save — screenshots prove vehicle IS linked
+        // after Confirm, but reloading destroys the Angular state.
+        console.log(`${LOG}   Step C: Saving estimate...`);
         const saveBtn = await page.evaluate(() => {
           const btns = Array.from(document.querySelectorAll("button"));
           const save = btns.find(b =>
@@ -473,67 +475,34 @@ async function runPlaybook({ customer, vehicle, diagnosis, parts, progressCallba
         });
         if (saveBtn.found) {
           await page.mouse.click(saveBtn.rect.x, saveBtn.rect.y);
-          console.log(`${LOG}   Save clicked — waiting for save to complete...`);
-          await sleep(5000);
-        } else {
-          console.log(`${LOG}   Save button not found/disabled — trying keyboard shortcut...`);
+          console.log(`${LOG}   Save clicked — waiting...`);
+          await sleep(4000);
         }
 
-        // ── Step D: Reload estimate page to get fresh Angular state ──
-        // This forces Angular to re-fetch estimate data (with vehicle now saved)
-        console.log(`${LOG}   Step D: Reloading estimate page for fresh state...`);
-        const estUrl = `${AUTOLEAP_APP_URL}/#/estimate/${result.estimateId}`;
-        await page.goto(estUrl, { waitUntil: "domcontentloaded", timeout: 30000 });
-        await sleep(6000);
-
-        // ── Verify we're still on the estimate page ──
-        if (!page.url().includes("/estimate/")) {
-          console.log(`${LOG}   WARNING: Navigated away — going back to estimate`);
-          await page.evaluate((id) => { window.location.hash = `/estimate/${id}`; }, result.estimateId);
-          await sleep(5000);
-        }
-
-        // ── Final verification using PT button disabled state (most reliable indicator) ──
+        // ── Verify vehicle is showing (no page reload — that destroys Angular state) ──
         await page.screenshot({ path: "/tmp/debug-after-vehicle.png" });
         const finalCheck = await page.evaluate((yr, mk) => {
           const vInput = document.querySelector("#estimate-vehicle");
-          const wrapper = vInput?.closest("[class*='vehicle']") || vInput?.parentElement?.parentElement;
-          const wrapperText = wrapper?.textContent?.trim() || "";
-          const ptDisabled = !!document.querySelector(".ro-partstech-new button.if-disabled");
-          const ptButton = document.querySelector('.ro-partstech-new button');
+          const vehicleRow = vInput?.closest("[class*='row']") || vInput?.closest("div")?.parentElement;
+          const vehicleText = vehicleRow?.textContent?.trim() || "";
+          // Check the vehicle-specific area, not the whole wrapper
+          const vehicleInField = vehicleText.includes(yr) && vehicleText.includes(mk);
+          // Check both PT buttons (there are 2 ro-partstech-new containers)
+          const ptButtons = Array.from(document.querySelectorAll(".ro-partstech-new button"));
+          const ptClasses = ptButtons.map(b => b.className.substring(0, 60));
           return {
-            vehicleInWrapper: wrapperText.includes(yr) && wrapperText.includes(mk),
-            ptDisabled,
-            ptButtonClass: ptButton?.className?.substring(0, 80) || "not found",
-            wrapperText: wrapperText.substring(0, 80),
+            vehicleInField,
+            vehicleText: vehicleText.substring(0, 80),
+            ptButtons: ptClasses,
           };
         }, String(vehicle.year || ""), vehicle.make || "");
         console.log(`${LOG}   Final check: ${JSON.stringify(finalCheck)}`);
 
-        if (!finalCheck.ptDisabled) {
-          console.log(`${LOG}   PT button ENABLED ✓ — vehicle properly linked`);
-        } else if (finalCheck.vehicleInWrapper) {
-          console.log(`${LOG}   Vehicle in wrapper but PT disabled — trying page.reload()...`);
-          // One more attempt: hard reload to force everything fresh
-          try {
-            await page.reload({ waitUntil: "domcontentloaded", timeout: 30000 });
-            await sleep(6000);
-            const recheck = await page.evaluate(() => ({
-              ptDisabled: !!document.querySelector(".ro-partstech-new button.if-disabled"),
-            }));
-            if (!recheck.ptDisabled) {
-              console.log(`${LOG}   PT enabled after reload ✓`);
-            } else {
-              console.log(`${LOG}   PT still disabled after reload — vehicle may need MOTOR connection`);
-              result.warnings.push({ code: "VEHICLE_TEXT_ONLY", msg: "Vehicle shows in UI but PT still disabled" });
-            }
-          } catch (reloadErr) {
-            console.log(`${LOG}   Reload failed: ${reloadErr.message}`);
-            result.warnings.push({ code: "VEHICLE_TEXT_ONLY", msg: "Vehicle shows in UI but could not verify PT state" });
-          }
+        if (finalCheck.vehicleInField) {
+          console.log(`${LOG}   Vehicle confirmed in UI ✓ — proceeding to Parts ordering`);
         } else {
-          console.log(`${LOG}   WARNING: Vehicle not linked in UI`);
-          result.warnings.push({ code: "NO_VEHICLE_UI", msg: "Vehicle not selected in AutoLeap UI — PartsTech SSO may fail" });
+          console.log(`${LOG}   Vehicle not visible in UI — may need manual linking`);
+          result.warnings.push({ code: "NO_VEHICLE_UI", msg: "Vehicle not visible after confirm" });
         }
       } catch (vehErr) {
         console.log(`${LOG} Phase 2b error: ${vehErr.message} — continuing`);
@@ -560,16 +529,30 @@ async function runPlaybook({ customer, vehicle, diagnosis, parts, progressCallba
       if (!ptWorkPage && isIframe) {
         console.log(`${LOG} Phase 3: PartsTech opened as iframe — getting frame content...`);
         try {
-          const iframeEl = await page.$('iframe[src*="partstech"]');
+          // Check ALL iframes (the src might not contain "partstech" if SSO redirects)
+          const iframeSrcs = await page.evaluate(() => {
+            return Array.from(document.querySelectorAll("iframe")).map(f => ({
+              src: (f.src || "").substring(0, 120),
+              id: f.id || "",
+              cls: (f.className || "").substring(0, 40),
+            }));
+          });
+          console.log(`${LOG} Phase 3: All iframes: ${JSON.stringify(iframeSrcs)}`);
+
+          const iframeEl = await page.$('iframe[src*="partstech"]') || await page.$('iframe:not([src=""])');
           if (iframeEl) {
+            // Also log the src attribute before accessing contentFrame
+            const iframeSrc = await page.evaluate(el => el.src || el.getAttribute("src") || "no-src", iframeEl);
+            console.log(`${LOG} Phase 3: iframe src attribute: ${iframeSrc.substring(0, 120)}`);
+
             ptWorkPage = await iframeEl.contentFrame();
             if (ptWorkPage) {
               const iframeUrl = ptWorkPage.url() || "";
-              console.log(`${LOG} Phase 3: Got iframe frame, URL: ${iframeUrl.substring(0, 80)}`);
+              console.log(`${LOG} Phase 3: Got iframe frame, URL: ${iframeUrl.substring(0, 120)}`);
               // Check if SSO failed (chrome-error page means PartsTech couldn't load)
               if (iframeUrl.includes("chrome-error") || iframeUrl === "about:blank") {
                 console.log(`${LOG} Phase 3: PartsTech SSO failed (iframe shows error page)`);
-                console.log(`${LOG}   This usually means no vehicle is linked to the estimate`);
+                console.log(`${LOG}   iframe src was: ${iframeSrc.substring(0, 120)}`);
                 ptWorkPage = null;
               } else {
                 await sleep(3000); // Let iframe content load
