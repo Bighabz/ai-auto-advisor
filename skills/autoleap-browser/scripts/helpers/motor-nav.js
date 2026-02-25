@@ -279,22 +279,80 @@ async function navigateMotorTree(page, diagnosis, vehicle) {
         if (retryTab.found) {
           console.log(`${LOG} MOTOR Primary tab found after connection — clicking...`);
           await page.mouse.click(retryTab.rect.x, retryTab.rect.y);
-          await sleep(3000);
+          await sleep(5000);
 
-          // Check for tree items
-          const treeCheck = await page.evaluate(() => {
+          // Take screenshot to see if tab activated
+          await page.screenshot({ path: "/tmp/debug-motor-after-tab-click2.png" });
+
+          // Check content area — what's showing after tab click?
+          const contentCheck = await page.evaluate(() => {
             const items = Array.from(document.querySelectorAll(
               "div[role='button'], li[role='treeitem'], [class*='category-item'], [class*='tree-node']"
             )).filter(el => el.offsetParent !== null);
+
+            // Also check what the main content area contains
+            // Look for any list-like content besides canned services
+            const allLi = Array.from(document.querySelectorAll("li")).filter(el =>
+              el.offsetParent !== null && !el.closest("nav") && el.textContent.trim().length > 2
+            );
+            const lastContent = allLi.slice(0, 10).map(l => l.textContent.trim().substring(0, 50));
+
+            // Check which tab appears active (bold/highlighted)
+            const tabs = Array.from(document.querySelectorAll("p[class*='service-tab']"))
+              .filter(el => el.offsetParent !== null)
+              .map(el => ({
+                text: el.textContent.trim(),
+                cls: el.className,
+                active: el.className.includes("active") || el.className.includes("selected"),
+                bg: getComputedStyle(el).backgroundColor,
+                color: getComputedStyle(el).color,
+              }));
+
+            // Check for loading/spinner
+            const spinner = !!document.querySelector("[class*='spinner'], [class*='loading']");
+
             return {
-              count: items.length,
-              items: items.slice(0, 8).map(el => el.textContent.trim().substring(0, 40)),
+              treeItemCount: items.length,
+              treeItems: items.slice(0, 5).map(el => el.textContent.trim().substring(0, 40)),
+              tabs,
+              listContent: lastContent,
+              spinner,
             };
           });
-          console.log(`${LOG} MOTOR tree after connection: ${JSON.stringify(treeCheck)}`);
+          console.log(`${LOG} Content after MOTOR tab click: ${JSON.stringify(contentCheck)}`);
 
-          if (treeCheck.count > 0) {
+          if (contentCheck.treeItemCount > 0) {
             motorTabFound = true;
+          } else if (contentCheck.tabs.some(t => t.text.includes("MOTOR Primary") && !t.active)) {
+            // Tab didn't activate — try clicking harder (double-click or click parent)
+            console.log(`${LOG} MOTOR Primary tab not active — trying parent element click...`);
+            const parentClick = await page.evaluate(() => {
+              const tabs = document.querySelectorAll("p[class*='service-tab']");
+              for (const tab of tabs) {
+                if (tab.textContent.trim() === "MOTOR Primary" || tab.textContent.trim().includes("MOTOR Primary")) {
+                  // Try clicking parent elements
+                  let target = tab.parentElement || tab;
+                  const rect = target.getBoundingClientRect();
+                  return { found: true, rect: { x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 }, tag: target.tagName };
+                }
+              }
+              return { found: false };
+            });
+            if (parentClick.found) {
+              console.log(`${LOG} Clicking parent ${parentClick.tag} at (${Math.round(parentClick.rect.x)}, ${Math.round(parentClick.rect.y)})...`);
+              await page.mouse.click(parentClick.rect.x, parentClick.rect.y);
+              await sleep(5000);
+              await page.screenshot({ path: "/tmp/debug-motor-parent-click.png" });
+
+              const retreeCheck = await page.evaluate(() => {
+                const items = Array.from(document.querySelectorAll(
+                  "div[role='button'], li[role='treeitem'], [class*='category-item'], [class*='tree-node']"
+                )).filter(el => el.offsetParent !== null);
+                return items.length;
+              });
+              console.log(`${LOG} Tree after parent click: ${retreeCheck} items`);
+              if (retreeCheck > 0) motorTabFound = true;
+            }
           }
         }
       } else {
