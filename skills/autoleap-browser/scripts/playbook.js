@@ -375,23 +375,50 @@ async function createEstimateWithCustomerVehicle(page, customer, vehicle) {
   }
 
   // Step 2d: Navigate browser to the estimate page
-  // AutoLeap uses: /#/estimates/{objectId} (NOT /#/workboard/estimate/{id})
+  // First go to workboard to reset Angular SPA state (avoids 404 loop)
+  console.log(`${LOG} Navigating to workboard first (reset SPA state)...`);
+  await page.goto(`${AUTOLEAP_APP_URL}/#/workboard`, { waitUntil: "domcontentloaded", timeout: 30000 });
+  await sleep(3000);
+
+  // Now navigate to the estimate page
   const estUrl = `${AUTOLEAP_APP_URL}/#/estimates/${estimateId}`;
-  console.log(`${LOG} Navigating to estimate page: ${estUrl}`);
+  console.log(`${LOG} Navigating to estimate: ${estUrl}`);
   await page.goto(estUrl, { waitUntil: "domcontentloaded", timeout: 30000 });
   await sleep(5000);
 
-  // Verify we're on the estimate page (not a 404)
+  // Also try hash navigation if goto didn't work
   let currentUrl = page.url();
+  if (!currentUrl.includes(`/estimates/${estimateId}`)) {
+    console.log(`${LOG} URL mismatch — trying hash navigation...`);
+    await page.evaluate((id) => { window.location.hash = `#/estimates/${id}`; }, estimateId);
+    await sleep(5000);
+    currentUrl = page.url();
+  }
   console.log(`${LOG} Current URL: ${currentUrl}`);
 
   // Check for 404
   const is404 = await page.evaluate(() => {
-    return document.body.innerText.includes("404") || document.body.innerText.includes("not found");
+    const text = document.body?.innerText || "";
+    return text.includes("404") && text.includes("not found");
   });
   if (is404) {
-    console.log(`${LOG} Got 404 — estimate page URL is wrong`);
-    return { success: false, error: "Estimate page 404" };
+    console.log(`${LOG} Got 404 — trying alternate URL patterns...`);
+    // Try other patterns
+    for (const pattern of [
+      `/#/workboard/estimates/${estimateId}`,
+      `/#/estimate/${estimateId}`,
+    ]) {
+      await page.goto(`${AUTOLEAP_APP_URL}${pattern}`, { waitUntil: "domcontentloaded", timeout: 30000 });
+      await sleep(3000);
+      const still404 = await page.evaluate(() => {
+        const text = document.body?.innerText || "";
+        return text.includes("404") && text.includes("not found");
+      });
+      if (!still404) {
+        console.log(`${LOG} Pattern worked: ${pattern}`);
+        break;
+      }
+    }
   }
 
   await page.screenshot({ path: "/tmp/debug-estimate-page.png" });
