@@ -310,81 +310,81 @@ async function ensureLoggedIn(page) {
 // ═══════════════════════════════════════════════════════════════════════════════
 
 async function createEstimateWithCustomerVehicle(page, customer, vehicle) {
-  // Navigate to workboard first
-  if (!page.url().includes("/workboard")) {
-    await page.goto(`${AUTOLEAP_APP_URL}/workboard`, {
-      waitUntil: "domcontentloaded",
-      timeout: 30000,
-    });
-    await sleep(3000);
-  }
+  // Step 2: Navigate to Customers page and open "Add Customer" form
+  console.log(`${LOG} Navigating to Customers page...`);
+  await page.goto(`${AUTOLEAP_APP_URL}/#/customers`, {
+    waitUntil: "domcontentloaded",
+    timeout: 30000,
+  });
+  await sleep(3000);
 
-  // Step 2: Click "+" button in header → opens dropdown menu
-  console.log(`${LOG} Clicking "+" button...`);
-  const plusClicked = await page.evaluate(() => {
-    const allClickable = Array.from(document.querySelectorAll("button, a, [role='button'], span, i"));
-    for (const el of allClickable) {
-      const text = el.textContent.trim();
-      if (text === "+" && el.offsetParent !== null) {
-        el.click();
-        return "+";
+  // Screenshot to see the Customers page
+  await page.screenshot({ path: "/tmp/debug-customers-page.png" });
+
+  // Look for "Add Customer" or "+" button on the Customers page
+  console.log(`${LOG} Looking for Add Customer button...`);
+  const addClicked = await page.evaluate(() => {
+    const btns = Array.from(document.querySelectorAll("button, a, [role='button']"))
+      .filter(b => b.offsetParent !== null);
+    // Try: "Add Customer", "Add", "New Customer", "Create Customer"
+    const targets = ["Add Customer", "New Customer", "Create Customer", "Add New"];
+    for (const target of targets) {
+      for (const btn of btns) {
+        if ((btn.textContent || "").trim().includes(target)) {
+          btn.click();
+          return target;
+        }
       }
     }
-    for (const el of allClickable) {
-      const cls = (el.className || "").toLowerCase();
-      if ((cls.includes("plus") || cls.includes("fab")) && el.offsetParent !== null) {
-        el.click();
-        return `class:${cls.substring(0, 40)}`;
+    // Try "+" button or icon
+    for (const btn of btns) {
+      const text = (btn.textContent || "").trim();
+      if (text === "+" || text === "Add") {
+        btn.click();
+        return `"${text}"`;
       }
     }
-    return null;
+    // Try icon-based buttons (fa-plus, fa-plus-circle)
+    for (const btn of btns) {
+      const icons = btn.querySelectorAll("i.fa-plus, i.fa-plus-circle, i.fas.fa-plus");
+      if (icons.length > 0) {
+        btn.click();
+        return "icon:fa-plus";
+      }
+    }
+    // Log what buttons exist
+    const allBtnTexts = btns.map(b => b.textContent.trim().substring(0, 40)).filter(t => t.length > 0);
+    return { buttons: allBtnTexts.slice(0, 15) };
   });
 
-  if (!plusClicked) {
-    await page.screenshot({ path: "/tmp/debug-no-plus-btn.png", fullPage: true });
-    return { success: false, error: 'Could not find "+" button in header' };
-  }
-  console.log(`${LOG} Clicked: "${plusClicked}"`);
-  await sleep(1500);
+  console.log(`${LOG} Add Customer result: ${JSON.stringify(addClicked)}`);
 
-  // Step 2b: Click "Customer" from the dropdown menu (NOT "Estimate & Invoice" — that creates a blank estimate)
-  console.log(`${LOG} Clicking "Customer" from dropdown...`);
-  const menuClicked = await page.evaluate(() => {
-    const allEls = Array.from(document.querySelectorAll("div, li, a, button, span, [role='menuitem']"));
-    // Find the "Customer" menu item (not "Estimate & Invoice" which creates blank estimate)
-    for (const el of allEls) {
-      const text = (el.textContent || "").trim();
-      // Match exact "Customer" — avoid matching "Customers" nav link or nested text
-      if (text === "Customer") {
-        el.click();
-        return "Customer";
-      }
-    }
-    // Broader fallback
-    for (const el of allEls) {
-      const text = (el.textContent || "").trim();
-      if (text.includes("Customer") && !text.includes("Customers") && text.length < 30) {
-        el.click();
-        return `Customer(${text})`;
-      }
-    }
-    return null;
-  });
-
-  if (!menuClicked) {
-    await page.screenshot({ path: "/tmp/debug-no-menu-item.png", fullPage: true });
-    return { success: false, error: 'Could not find "Customer" in dropdown menu' };
+  if (typeof addClicked === "object") {
+    // Failed — log the available buttons for debugging
+    console.log(`${LOG} Available buttons: ${JSON.stringify(addClicked.buttons)}`);
+    await page.screenshot({ path: "/tmp/debug-no-add-customer.png", fullPage: true });
+    return { success: false, error: `Could not find "Add Customer" button. Available: ${(addClicked.buttons || []).join(", ")}` };
   }
-  console.log(`${LOG} Clicked: "${menuClicked}"`);
+
+  console.log(`${LOG} Clicked: "${addClicked}"`);
   await sleep(3000);
 
   // Wait for the customer form to appear (drawer/modal with personal-card-fname)
   console.log(`${LOG} Waiting for customer form...`);
   let formVisible = false;
-  for (let attempt = 0; attempt < 5; attempt++) {
+  for (let attempt = 0; attempt < 8; attempt++) {
     formVisible = await page.evaluate(() => {
       const fname = document.querySelector('#personal-card-fname');
-      return fname && fname.offsetParent !== null;
+      if (fname && fname.offsetParent !== null) return true;
+      // Also check for any First Name input that's visible
+      const inputs = Array.from(document.querySelectorAll("input"));
+      for (const inp of inputs) {
+        if (inp.offsetParent !== null &&
+            (inp.placeholder?.includes("First") || inp.id?.includes("fname"))) {
+          return true;
+        }
+      }
+      return false;
     });
     if (formVisible) break;
     await sleep(1500);
@@ -392,8 +392,6 @@ async function createEstimateWithCustomerVehicle(page, customer, vehicle) {
 
   if (!formVisible) {
     await page.screenshot({ path: "/tmp/debug-no-customer-form.png", fullPage: true });
-
-    // Debug: log what IS visible
     const debugInfo = await page.evaluate(() => {
       const url = window.location.href;
       const visibleInputs = Array.from(document.querySelectorAll("input"))
@@ -410,8 +408,7 @@ async function createEstimateWithCustomerVehicle(page, customer, vehicle) {
     console.log(`${LOG} Form NOT visible. URL: ${debugInfo.url}`);
     console.log(`${LOG} Visible inputs: ${JSON.stringify(debugInfo.visibleInputs)}`);
     console.log(`${LOG} Buttons: ${JSON.stringify(debugInfo.visibleButtons)}`);
-
-    return { success: false, error: 'Customer form did not appear after clicking "Customer" menu item' };
+    return { success: false, error: 'Customer form did not appear' };
   }
   console.log(`${LOG} Customer form visible ✓`);
 
