@@ -394,9 +394,12 @@ async function runPlaybook({ customer, vehicle, diagnosis, parts, progressCallba
           if (vehDropdown.found && vehDropdown.rect) {
             // Use puppeteer-native click for proper Angular event dispatch
             await page.mouse.click(vehDropdown.rect.x, vehDropdown.rect.y);
+            console.log(`${LOG}   Vehicle clicked (native): "${vehDropdown.text}"`);
+            await sleep(2000);
+
+            // AutoLeap shows "Update vehicle for this Order" confirmation modal
+            await clickVehicleConfirmModal(page);
             vehicleSelected = true;
-            console.log(`${LOG}   Vehicle selected (native click): "${vehDropdown.text}"`);
-            await sleep(3000);
           } else if (vehDropdown.count === 0) {
             // No items from clicking — try typing to search
             console.log(`${LOG}   No dropdown items — typing "${vehicle.year}" to search...`);
@@ -432,6 +435,8 @@ async function runPlaybook({ customer, vehicle, diagnosis, parts, progressCallba
             console.log(`${LOG}   Vehicle type search: ${JSON.stringify(typedVeh)}`);
             if (typedVeh.found && typedVeh.rect) {
               await page.mouse.click(typedVeh.rect.x, typedVeh.rect.y);
+              await sleep(2000);
+              await clickVehicleConfirmModal(page);
               vehicleSelected = true;
               await sleep(3000);
             }
@@ -445,6 +450,8 @@ async function runPlaybook({ customer, vehicle, diagnosis, parts, progressCallba
             await page.keyboard.press("ArrowDown");
             await sleep(500);
             await page.keyboard.press("Enter");
+            await sleep(2000);
+            await clickVehicleConfirmModal(page);
             await sleep(3000);
           }
         }
@@ -707,6 +714,30 @@ async function runPlaybook({ customer, vehicle, diagnosis, parts, progressCallba
   }
 
   return result;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Helper: Click "Confirm" on "Update vehicle for this Order" modal
+// AutoLeap shows this modal when changing the vehicle on an existing estimate.
+// ═══════════════════════════════════════════════════════════════════════════════
+
+async function clickVehicleConfirmModal(page) {
+  const confirmResult = await page.evaluate(() => {
+    const btns = Array.from(document.querySelectorAll("button"));
+    const confirm = btns.find(b => b.textContent.trim() === "Confirm" && b.offsetParent !== null);
+    if (confirm) {
+      const rect = confirm.getBoundingClientRect();
+      return { found: true, rect: { x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 } };
+    }
+    return { found: false };
+  });
+  if (confirmResult.found) {
+    await page.mouse.click(confirmResult.rect.x, confirmResult.rect.y);
+    console.log(`${LOG}   Clicked "Confirm" on vehicle update modal ✓`);
+    await sleep(3000);
+    return true;
+  }
+  return false;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
