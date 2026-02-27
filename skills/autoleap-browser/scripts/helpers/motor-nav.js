@@ -393,65 +393,35 @@ async function navigateMotorTree(page, diagnosis, vehicle) {
   const repairContext = buildRepairContext(diagnosis, vehicle);
   console.log(`${LOG} Repair context: ${repairContext.substring(0, 100)}...`);
 
-  // ── Navigate MOTOR tree levels with Claude AI ──
-  // MOTOR uses an EXPANDING TREE — clicking a category shows children inline
-  // while keeping all siblings visible. We track which items existed BEFORE
-  // each click, and after clicking, the NEW items are the children to navigate.
-  const maxLevels = 7;
+  // ── Navigate MOTOR left tree (2 levels: System → Component) ──
+  // MOTOR UI: left panel = category tree, right panel = operational procedures.
+  // After selecting the right Component (e.g., "Engine"), the right panel shows
+  // procedures like "Catalytic Converter R&R" with labor hours and a "+" button.
+  const maxTreeLevels = 3;
   let lastPickedName = "";
-  let previousItems = new Set(); // tracks items seen before current level
+  let previousItems = new Set();
 
-  for (let level = 0; level < maxLevels; level++) {
+  for (let level = 0; level < maxTreeLevels; level++) {
     const currentLevel = level + 1;
 
-    // Read ALL visible category options from DOM
     const allOptions = await readCategoryOptions(page);
-
-    // Determine current level's options: items NOT in previousItems
     let options;
     if (currentLevel === 1) {
-      options = allOptions; // first level: everything is new
+      options = allOptions;
     } else {
       options = allOptions.filter(o => !previousItems.has(o));
-    }
-
-    // If no new items appeared, the tree didn't expand — check for Add button or leaf
-    if (options.length === 0 && currentLevel > 1) {
-      // Maybe the tree shows a detail view instead of more categories
-      const hasAdd = await hasAddButton(page);
-      if (hasAdd) {
-        console.log(`${LOG} Found Add button at level ${currentLevel} — adding labor`);
+      if (options.length === 0) {
+        console.log(`${LOG} No new tree items at level ${currentLevel} — tree navigation done`);
         break;
       }
-      // Take screenshot for debugging
-      await page.screenshot({ path: `/tmp/debug-motor-level${currentLevel}.png` });
-      console.log(`${LOG} No NEW options at level ${currentLevel} (all ${allOptions.length} already seen)`);
-
-      // Check if we reached a leaf: look for procedure details, hours, qualifiers
-      const hasQuals = (await readQualifierOptions(page)).length > 0;
-      if (hasQuals) {
-        console.log(`${LOG} Found qualifiers at level ${currentLevel} — at leaf node`);
-        break;
-      }
-      console.log(`${LOG} No new categories or qualifiers — may be at leaf`);
-      break;
     }
 
-    console.log(`${LOG} Level ${currentLevel} options (${options.length}): ${options.slice(0, 10).join(", ")}${options.length > 10 ? "..." : ""}`);
+    console.log(`${LOG} Tree level ${currentLevel} (${options.length}): ${options.slice(0, 10).join(", ")}${options.length > 10 ? "..." : ""}`);
 
-    if (options.length === 0) {
-      const hasAdd = await hasAddButton(page);
-      if (hasAdd) {
-        console.log(`${LOG} Found Add button at level ${currentLevel} — adding labor`);
-        break;
-      }
-      console.log(`${LOG} No options at level ${currentLevel} — may be at leaf`);
-      break;
-    }
+    if (options.length === 0) break;
 
     if (options.length === 1) {
       console.log(`${LOG} Level ${currentLevel}: Auto-selecting "${options[0]}"`);
-      // Record all current items before clicking (so we can diff after)
       previousItems = new Set(allOptions);
       await clickCategoryOption(page, options[0]);
       lastPickedName = options[0];
@@ -459,25 +429,15 @@ async function navigateMotorTree(page, diagnosis, vehicle) {
       continue;
     }
 
-    // Ask Claude to pick
     const levelLabel = getLevelLabel(currentLevel);
-    const pick = await askClaudeForCategory(
-      repairContext,
-      options,
-      levelLabel,
-      lastPickedName
-    );
-
+    const pick = await askClaudeForCategory(repairContext, options, levelLabel, lastPickedName);
     if (!pick) {
-      return { success: false, error: `Claude could not pick a ${levelLabel} from: ${options.join(", ")}` };
+      return { success: false, error: `Claude could not pick ${levelLabel} from: ${options.join(", ")}` };
     }
 
-    console.log(`${LOG} Level ${currentLevel} (${levelLabel}): Claude picked "${pick}"`);
-
-    // Record all current items before clicking
+    console.log(`${LOG} Level ${currentLevel} (${levelLabel}): Claude → "${pick}"`);
     previousItems = new Set(allOptions);
 
-    // Click the picked option using native mouse click
     const clicked = await clickCategoryOption(page, pick);
     if (!clicked) {
       const fuzzy = findClosestMatch(pick, options);
@@ -491,70 +451,79 @@ async function navigateMotorTree(page, diagnosis, vehicle) {
 
     lastPickedName = pick;
     await sleep(2000);
-
-    // Debug: screenshot and DOM dump after each click
-    await page.screenshot({ path: `/tmp/debug-motor-level${currentLevel}-after.png` });
-    const postClickState = await page.evaluate(() => {
-      // Dump ALL visible items in any tree-like structure
-      const allEls = Array.from(document.querySelectorAll(
-        "div[role='button'], li[role='treeitem'], [class*='category-item'], [class*='tree-node'], " +
-        "[class*='tree'] li, [class*='catalog'] li, [class*='category'] li, [class*='service-list'] li, " +
-        "[class*='subcategory'], [class*='child-item'], [class*='nested'], [class*='expand']"
-      )).filter(el => el.offsetParent !== null);
-      const texts = allEls.map(el => el.textContent.trim().substring(0, 50)).filter(t => t.length > 1 && t.length < 60);
-      return { count: allEls.length, unique: [...new Set(texts)].slice(0, 20) };
-    });
-    console.log(`${LOG} Post-click DOM (${postClickState.count} items): ${postClickState.unique.slice(0, 10).join(" | ")}`);
   }
 
-  // ── Handle qualifiers (if present) ──
-  const qualifiers = await readQualifierOptions(page);
-  if (qualifiers.length > 0) {
-    console.log(`${LOG} Qualifiers found: ${qualifiers.join(", ")}`);
-    const qualPick = await askClaudeForCategory(
-      repairContext,
-      qualifiers,
-      "qualifier",
-      lastPickedName
-    );
-    if (qualPick) {
-      console.log(`${LOG} Qualifier selected: "${qualPick}"`);
-      await clickCategoryOption(page, qualPick);
-      await sleep(1500);
+  // ── Read operational procedures from RIGHT panel ──
+  // After tree navigation, the right panel shows procedures with Labor, Parts,
+  // Subtotal columns and a green "+" button to add each one.
+  console.log(`${LOG} Reading operational procedures from right panel...`);
+  await page.screenshot({ path: "/tmp/debug-motor-procedures.png" });
+
+  const procedures = await readProcedures(page);
+  console.log(`${LOG} Found ${procedures.length} procedures: ${procedures.slice(0, 5).map(p => p.name).join(", ")}${procedures.length > 5 ? "..." : ""}`);
+
+  if (procedures.length === 0) {
+    return { success: false, error: "No operational procedures found in MOTOR right panel" };
+  }
+
+  // ── Ask Claude to pick the correct procedure ──
+  const procNames = procedures.map(p => `${p.name} (${p.hours}h, $${p.labor})`);
+  const procPick = await askClaudeForCategory(
+    repairContext,
+    procNames,
+    "operational procedure",
+    lastPickedName
+  );
+
+  if (!procPick) {
+    // Fallback: text-match against repair description
+    const repairDesc = (diagnosis?.ai?.repair_plan?.labor?.description || diagnosis?.ai?.diagnoses?.[0]?.cause || "").toLowerCase();
+    const directMatch = procedures.find(p => p.name.toLowerCase().includes("catalytic") || repairDesc.includes(p.name.toLowerCase().split(" ")[0]));
+    if (directMatch) {
+      console.log(`${LOG} Direct text match: "${directMatch.name}"`);
+      await clickProcedurePlus(page, directMatch);
+      await sleep(3000);
+      return { success: true, procedure: directMatch.name, hours: directMatch.hours, addOns: [] };
     }
+    return { success: false, error: "Claude could not pick a procedure and no text match found" };
   }
 
-  // ── Handle add-ons (if present) ──
-  const addOns = await readAddOnOptions(page);
-  const selectedAddOns = [];
-  if (addOns.length > 0) {
-    console.log(`${LOG} Add-ons available: ${addOns.join(", ")}`);
-    const addOnPicks = await askClaudeForAddOns(repairContext, addOns, lastPickedName);
-    for (const pick of addOnPicks) {
-      console.log(`${LOG} Add-on selected: "${pick}"`);
-      await clickAddOn(page, pick);
-      selectedAddOns.push(pick);
-      await sleep(500);
+  // Find the matching procedure from Claude's pick
+  const cleanPick = procPick.replace(/\s*\([\d.]+h.*\)$/, "").trim(); // strip "(1.2h, $150)" suffix
+  const matchedProc = procedures.find(p => p.name === cleanPick)
+    || procedures.find(p => p.name.toLowerCase().includes(cleanPick.toLowerCase())
+      || cleanPick.toLowerCase().includes(p.name.toLowerCase()));
+
+  if (!matchedProc) {
+    const fuzzyProc = findClosestMatch(cleanPick, procedures.map(p => p.name));
+    const fp = procedures.find(p => p.name === fuzzyProc);
+    if (fp) {
+      console.log(`${LOG} Fuzzy procedure match: "${cleanPick}" → "${fp.name}"`);
+      await clickProcedurePlus(page, fp);
+      await sleep(3000);
+      return { success: true, procedure: fp.name, hours: fp.hours, addOns: [] };
     }
+    return { success: false, error: `Could not find procedure "${cleanPick}" in right panel` };
   }
 
-  // ── Click "Add" button ──
-  console.log(`${LOG} Clicking "Add" to add labor line...`);
-  const addClicked = await clickAddButton(page);
-  if (!addClicked) {
-    return { success: false, error: "Could not find Add button to confirm labor" };
+  console.log(`${LOG} Procedure: "${matchedProc.name}" — ${matchedProc.hours}h, $${matchedProc.labor} — clicking "+"...`);
+  const addResult = await clickProcedurePlus(page, matchedProc);
+  if (!addResult) {
+    return { success: false, error: `Could not click "+" for "${matchedProc.name}"` };
   }
+
   await sleep(3000);
+  await page.screenshot({ path: "/tmp/debug-motor-after-add.png" });
 
-  // ── Read the hours (GOLDEN RULE: NEVER modify) ──
-  const hours = await readMotorHours(page);
-  console.log(`${LOG} MOTOR labor added: ${hours}h (NEVER modifying Qty/Hrs)`);
+  // ── Read hours from the estimate (GOLDEN RULE: NEVER modify) ──
+  const hours = matchedProc.hours || (await readMotorHours(page));
+  console.log(`${LOG} MOTOR labor added: "${matchedProc.name}" — ${hours}h (NEVER modifying Qty/Hrs)`);
 
   return {
     success: true,
-    procedure: lastPickedName,
+    procedure: matchedProc.name,
     hours,
-    addOns: selectedAddOns,
+    addOns: [],
   };
 }
 
@@ -1011,6 +980,203 @@ async function callClaude(userMessage) {
     console.log(`${LOG} Claude API error: ${err.message}`);
     return null;
   }
+}
+
+// ─── Procedure Panel (Right Side) ────────────────────────────────────────────
+
+/**
+ * Read operational procedures from the MOTOR right panel.
+ * Each row has: procedure name, labor $, hours, parts $, fluids $, subtotal, "+" button.
+ */
+async function readProcedures(page) {
+  // The right panel may need scrolling to show all procedures.
+  // First, read what's visible, then scroll down to load more.
+  let allProcs = [];
+  let prevCount = 0;
+  const maxScrollAttempts = 10;
+
+  for (let scroll = 0; scroll <= maxScrollAttempts; scroll++) {
+    const procs = await page.evaluate(() => {
+      // Procedure rows are in the right panel — look for rows with labor/price data
+      // Each row typically has: expand chevron, name, info icon, guide icon, prices, "+" button
+      const results = [];
+
+      // Strategy 1: Find rows by looking for the green "+" buttons and working backward
+      const plusBtns = Array.from(document.querySelectorAll(
+        "button[class*='btn-success'], button[class*='add-btn'], [class*='add-service-btn']"
+      )).filter(el => el.offsetParent !== null);
+
+      for (const btn of plusBtns) {
+        const row = btn.closest("tr, [class*='row'], [class*='item'], [class*='service-line']") || btn.parentElement?.parentElement;
+        if (!row) continue;
+        const rowText = row.textContent || "";
+        // Extract procedure name (the longest text that isn't a price)
+        const spans = Array.from(row.querySelectorAll("span, div, td, a")).filter(el =>
+          el.offsetParent !== null && el.children.length < 3
+        );
+        let name = "";
+        for (const s of spans) {
+          const t = s.textContent.trim();
+          if (t.length > 5 && t.length < 60 && !t.startsWith("$") && !t.match(/^\d+\.\d{2}$/) && t.length > name.length) {
+            name = t;
+          }
+        }
+        // Extract hours from row text
+        const hoursMatch = rowText.match(/(\d+\.\d+)\s*$/m) || rowText.match(/[⏱◷]\s*(\d+\.?\d*)/);
+        let hours = 0;
+        // Look for small text that could be hours (format: "1.20" under the labor price)
+        const smallTexts = Array.from(row.querySelectorAll("span, div")).filter(el =>
+          el.offsetParent !== null && el.children.length === 0
+        ).map(el => el.textContent.trim());
+        for (const t of smallTexts) {
+          const m = t.match(/^(\d+\.\d+)$/);
+          if (m && parseFloat(m[1]) > 0 && parseFloat(m[1]) < 50) {
+            hours = parseFloat(m[1]);
+            break;
+          }
+        }
+        // Extract labor price
+        const priceMatch = rowText.match(/\$(\d+\.?\d*)/);
+        const labor = priceMatch ? parseFloat(priceMatch[1]) : 0;
+
+        const btnRect = btn.getBoundingClientRect();
+        if (name && btnRect.width > 0) {
+          results.push({
+            name: name.replace(/\s*ⓘ.*/, "").trim(),
+            hours,
+            labor,
+            plusRect: { x: btnRect.x + btnRect.width / 2, y: btnRect.y + btnRect.height / 2 },
+          });
+        }
+      }
+
+      // Strategy 2: Look for procedure text directly if strategy 1 found nothing
+      if (results.length === 0) {
+        // Look for the operational column headers as anchor
+        const headers = Array.from(document.querySelectorAll("*")).filter(el =>
+          el.textContent.trim() === "Operational" && el.offsetParent !== null
+        );
+        if (headers.length > 0) {
+          const container = headers[0].closest("[class*='content'], [class*='panel'], [class*='body']") || headers[0].parentElement;
+          if (container) {
+            // Find all clickable rows/items below the header
+            const items = container.querySelectorAll("[class*='row'], tr, [class*='item']");
+            for (const item of items) {
+              const text = item.textContent.trim();
+              if (text.length > 10 && text.includes("$")) {
+                const nameEl = item.querySelector("span, a, div");
+                const name = nameEl ? nameEl.textContent.trim() : text.substring(0, 40);
+                const btn = item.querySelector("button, [class*='add']");
+                if (btn) {
+                  const rect = btn.getBoundingClientRect();
+                  results.push({
+                    name,
+                    hours: 0,
+                    labor: 0,
+                    plusRect: { x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 },
+                  });
+                }
+              }
+            }
+          }
+        }
+      }
+
+      return results;
+    });
+
+    // Merge new procs (deduplicate by name)
+    const existingNames = new Set(allProcs.map(p => p.name));
+    for (const p of procs) {
+      if (!existingNames.has(p.name)) {
+        allProcs.push(p);
+        existingNames.add(p.name);
+      }
+    }
+
+    // If no new procedures found after scroll, stop
+    if (allProcs.length === prevCount && scroll > 0) break;
+    prevCount = allProcs.length;
+
+    // Scroll the right panel down to load more
+    if (scroll < maxScrollAttempts) {
+      await page.evaluate(() => {
+        // Find the scrollable container for procedures
+        const containers = Array.from(document.querySelectorAll(
+          "[class*='content'], [class*='panel-body'], [class*='scroll'], [class*='table-container']"
+        )).filter(el => el.scrollHeight > el.clientHeight && el.offsetParent !== null);
+        for (const c of containers) {
+          if (c.scrollHeight > c.clientHeight + 100) {
+            c.scrollTop += 300;
+            return;
+          }
+        }
+        // Fallback: scroll the dialog body
+        const dialog = document.querySelector("[role='dialog']");
+        if (dialog) {
+          const scrollable = dialog.querySelector("[class*='body'], [class*='content']");
+          if (scrollable) scrollable.scrollTop += 300;
+        }
+      });
+      await sleep(500);
+    }
+  }
+
+  return allProcs;
+}
+
+/**
+ * Click the green "+" button for a specific procedure.
+ * Uses the stored plusRect coordinates for native mouse click.
+ */
+async function clickProcedurePlus(page, proc) {
+  if (proc.plusRect) {
+    // First scroll the procedure into view if needed
+    await page.evaluate((name) => {
+      const spans = Array.from(document.querySelectorAll("span, div, a")).filter(el =>
+        el.offsetParent !== null && el.textContent.trim().includes(name.substring(0, 20))
+      );
+      if (spans.length > 0) {
+        spans[0].scrollIntoView({ block: "center", behavior: "smooth" });
+      }
+    }, proc.name);
+    await sleep(500);
+
+    // Re-find the "+" button near this procedure (coordinates may have changed after scroll)
+    const freshRect = await page.evaluate((name) => {
+      const rows = Array.from(document.querySelectorAll("tr, [class*='row'], [class*='item']")).filter(el =>
+        el.offsetParent !== null && el.textContent.includes(name.substring(0, 20))
+      );
+      for (const row of rows) {
+        const btn = row.querySelector("button[class*='btn-success'], button[class*='add']");
+        if (btn && btn.offsetParent !== null) {
+          const rect = btn.getBoundingClientRect();
+          return { x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 };
+        }
+        // Also check for green circle/icon buttons
+        const icons = row.querySelectorAll("[class*='fa-plus'], [class*='pi-plus']");
+        for (const icon of icons) {
+          const clickTarget = icon.closest("button") || icon;
+          if (clickTarget.offsetParent !== null) {
+            const rect = clickTarget.getBoundingClientRect();
+            return { x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 };
+          }
+        }
+      }
+      return null;
+    }, proc.name);
+
+    if (freshRect) {
+      console.log(`${LOG} Clicking "+" for "${proc.name}" at (${Math.round(freshRect.x)}, ${Math.round(freshRect.y)})`);
+      await page.mouse.click(freshRect.x, freshRect.y);
+      return true;
+    }
+    // Fallback to stored coordinates
+    console.log(`${LOG} Using stored "+" coordinates for "${proc.name}"`);
+    await page.mouse.click(proc.plusRect.x, proc.plusRect.y);
+    return true;
+  }
+  return false;
 }
 
 // ─── DOM Readers ────────────────────────────────────────────────────────────
