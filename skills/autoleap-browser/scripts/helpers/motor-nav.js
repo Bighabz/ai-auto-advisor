@@ -511,6 +511,63 @@ async function navigateMotorTree(page, diagnosis, vehicle) {
   });
   console.log(`${LOG} Right panel dump: ${JSON.stringify(rightPanelDump)}`);
 
+  // ── Targeted DOM discovery: find MOTOR procedure row structure ──
+  // We know MOTOR procedures like "Cooling System" exist in the DOM.
+  // Find their exact structure, siblings, and any add/click mechanisms.
+  const motorRowDiscovery = await page.evaluate(() => {
+    // Find elements containing known MOTOR procedure keywords
+    const keywords = ["Cooling System", "Compression Test", "Emission Control", "Leak Inspection", "Catalytic"];
+    const results = [];
+    for (const kw of keywords) {
+      const els = Array.from(document.querySelectorAll("*")).filter(el =>
+        el.offsetParent !== null &&
+        el.textContent.includes(kw) &&
+        el.textContent.trim().length < 100 &&
+        el.children.length < 8
+      );
+      for (const el of els.slice(0, 3)) {
+        // Walk up to find the row container
+        let row = el;
+        for (let i = 0; i < 5; i++) {
+          if (row.parentElement) row = row.parentElement;
+          const tag = row.tagName.toLowerCase();
+          if (tag === "tr" || row.className?.includes("row") || row.className?.includes("item")) break;
+        }
+        // Find ALL clickable elements in this row
+        const clickables = Array.from(row.querySelectorAll("button, a, i, [role='button'], [class*='click'], [class*='add'], [class*='plus']"))
+          .filter(c => c.offsetParent !== null)
+          .map(c => ({
+            tag: c.tagName,
+            text: c.textContent.trim().substring(0, 20),
+            cls: (c.className || "").substring(0, 50),
+            cursor: getComputedStyle(c).cursor,
+            rect: (() => { const r = c.getBoundingClientRect(); return { x: Math.round(r.x), y: Math.round(r.y), w: Math.round(r.width), h: Math.round(r.height) }; })(),
+          }));
+        // Also find any elements with pointer cursor (clickable)
+        const pointers = Array.from(row.querySelectorAll("*"))
+          .filter(c => c.offsetParent !== null && getComputedStyle(c).cursor === "pointer" && c.children.length < 2)
+          .map(c => ({
+            tag: c.tagName,
+            text: c.textContent.trim().substring(0, 20),
+            cls: (c.className || "").substring(0, 50),
+          }));
+        results.push({
+          keyword: kw,
+          elTag: el.tagName,
+          elClass: (el.className || "").substring(0, 50),
+          elText: el.textContent.trim().substring(0, 60),
+          rowTag: row.tagName,
+          rowClass: (row.className || "").substring(0, 60),
+          rowHTML: row.innerHTML?.substring(0, 200),
+          clickables: clickables.slice(0, 5),
+          pointers: pointers.slice(0, 5),
+        });
+      }
+    }
+    return results;
+  });
+  console.log(`${LOG} MOTOR row discovery: ${JSON.stringify(motorRowDiscovery)}`);
+
   const procedures = await readProcedures(page);
   console.log(`${LOG} Found ${procedures.length} procedures: ${procedures.slice(0, 5).map(p => p.name).join(", ")}${procedures.length > 5 ? "..." : ""}`);
 
