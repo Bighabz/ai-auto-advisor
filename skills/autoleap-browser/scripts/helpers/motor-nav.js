@@ -1009,40 +1009,73 @@ async function readProcedures(page) {
       for (const btn of plusBtns) {
         const row = btn.closest("tr, [class*='row'], [class*='item'], [class*='service-line']") || btn.parentElement?.parentElement;
         if (!row) continue;
-        const rowText = row.textContent || "";
-        // Extract procedure name (the longest text that isn't a price)
-        const spans = Array.from(row.querySelectorAll("span, div, td, a")).filter(el =>
-          el.offsetParent !== null && el.children.length < 3
-        );
+
+        // Extract procedure name: find the first text-heavy element that isn't a price/number
+        // From screenshots: name is a span/div with text like "Catalytic Converter R&R"
+        const nameEls = Array.from(row.querySelectorAll("span, div, td, a")).filter(el => {
+          if (!el.offsetParent) return false;
+          const t = el.textContent.trim();
+          // Must be text-like (not a price, not just a number, not too short/long)
+          return t.length > 3 && t.length < 55
+            && !t.startsWith("$")
+            && !t.match(/^\d+\.?\d*$/)
+            && !/^[\d$.,\s]+$/.test(t)
+            && el.children.length < 4;
+        });
+        // Pick the best name: prefer exact match (no child text), then longest
         let name = "";
-        for (const s of spans) {
-          const t = s.textContent.trim();
-          if (t.length > 5 && t.length < 60 && !t.startsWith("$") && !t.match(/^\d+\.\d{2}$/) && t.length > name.length) {
-            name = t;
-          }
+        for (const el of nameEls) {
+          const t = el.textContent.trim();
+          // Skip if this element contains price-like children
+          if (t.includes("$") && t.split("$").length > 2) continue;
+          if (t.length > name.length) name = t;
         }
-        // Extract hours from row text
-        const hoursMatch = rowText.match(/(\d+\.\d+)\s*$/m) || rowText.match(/[⏱◷]\s*(\d+\.?\d*)/);
+
+        // Extract hours: look for small leaf elements with clock icon or standalone decimal
+        // From screenshots: hours appear as "1.20" near a clock (⏱/◷) icon
         let hours = 0;
-        // Look for small text that could be hours (format: "1.20" under the labor price)
-        const smallTexts = Array.from(row.querySelectorAll("span, div")).filter(el =>
+        const leafEls = Array.from(row.querySelectorAll("span, div, i")).filter(el =>
           el.offsetParent !== null && el.children.length === 0
-        ).map(el => el.textContent.trim());
-        for (const t of smallTexts) {
-          const m = t.match(/^(\d+\.\d+)$/);
-          if (m && parseFloat(m[1]) > 0 && parseFloat(m[1]) < 50) {
-            hours = parseFloat(m[1]);
-            break;
+        );
+        // First pass: look for clock icon sibling
+        for (let i = 0; i < leafEls.length; i++) {
+          const cls = (leafEls[i].className || "").toLowerCase();
+          const text = leafEls[i].textContent.trim();
+          if (cls.includes("clock") || cls.includes("time") || text === "⏱" || text === "◷") {
+            // Next sibling leaf should be hours
+            for (let j = i + 1; j < Math.min(i + 3, leafEls.length); j++) {
+              const m = leafEls[j].textContent.trim().match(/^(\d+\.?\d*)$/);
+              if (m && parseFloat(m[1]) > 0 && parseFloat(m[1]) < 30) {
+                hours = parseFloat(m[1]);
+                break;
+              }
+            }
+            if (hours > 0) break;
           }
         }
-        // Extract labor price
+        // Second pass: first standalone decimal that's reasonable for hours (0.1-20)
+        if (hours === 0) {
+          for (const el of leafEls) {
+            const t = el.textContent.trim();
+            const m = t.match(/^(\d+\.\d+)$/);
+            if (m) {
+              const val = parseFloat(m[1]);
+              if (val > 0 && val < 20) { hours = val; break; }
+            }
+          }
+        }
+
+        // Extract labor price (first $X.XX in the row)
+        const rowText = row.textContent || "";
         const priceMatch = rowText.match(/\$(\d+\.?\d*)/);
         const labor = priceMatch ? parseFloat(priceMatch[1]) : 0;
 
         const btnRect = btn.getBoundingClientRect();
         if (name && btnRect.width > 0) {
+          // Clean name: remove info icon text, trim
+          const cleanName = name.replace(/\s*[ⓘℹ].*/, "").replace(/\s+/g, " ").trim();
           results.push({
-            name: name.replace(/\s*ⓘ.*/, "").trim(),
+            name: cleanName,
             hours,
             labor,
             plusRect: { x: btnRect.x + btnRect.width / 2, y: btnRect.y + btnRect.height / 2 },

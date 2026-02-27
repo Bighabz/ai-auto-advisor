@@ -73,6 +73,17 @@ if (process.env.AUTOLEAP_EMAIL) {
     // autoleap-api not available — estimate creation disabled
   }
 }
+
+// AutoLeap browser playbook — 100% browser-driven estimate (MOTOR labor + PartsTech parts)
+let autoLeapPlaybook = null;
+if (process.env.AUTOLEAP_EMAIL) {
+  try {
+    autoLeapPlaybook = require("../../autoleap-browser/scripts/playbook");
+  } catch {
+    // playbook not available — falls back to REST API estimate
+  }
+}
+
 // Legacy reference kept null so handleApprovalAndOrder gracefully returns "not configured"
 const autoLeapBrowser = null;
 
@@ -1292,74 +1303,69 @@ async function buildEstimate(params) {
     }
   }
 
-  // ─── Step 6: Build Estimate in AutoLeap (REST API + code markup) ───
+  // ─── Step 6: Build Estimate in AutoLeap ───
   if (params.progressCallback) await params.progressCallback("building_estimate").catch(() => {});
 
-  if (autoLeapApi && params.customer) {
-    // REST API path: creates estimate with labor + parts (retail = cost * markup in code)
-    log.info("Step 6: Creating estimate in AutoLeap (REST API + code markup)...");
+  if (autoLeapPlaybook && params.customer) {
+    // Browser playbook path: 100% browser-driven (MOTOR labor + PartsTech parts + markup matrix)
+    log.info("Step 6: Creating estimate via browser playbook (MOTOR + PartsTech + markup matrix)...");
 
     try {
       const estParts = results.parts?.bestValueBundle?.parts || [];
+      console.log(`  → Parts with pricing: ${estParts.filter(p => p.selected).length}`);
 
-      // Build explicit labor override from ProDemand MOTOR data (no diagnosis mutation)
-      const pdLaborTimes = results.diagnosis?.prodemand?.laborTimes || [];
-      const pdBestLabor = pdLaborTimes.length > 0 ? pdLaborTimes[0] : null;
-      const laborHoursOverride = (pdBestLabor?.hours > 0)
-        ? { hours: pdBestLabor.hours, source: "MOTOR", description: pdBestLabor.procedure || null }
-        : null;
-
-      const partsWithSelection = estParts.filter(p => p.selected);
-      console.log(`  → Labor source: ${laborHoursOverride ? `MOTOR(${pdBestLabor.hours}h)` : "AI/default"}`);
-      console.log(`  → Parts with pricing: ${partsWithSelection.length}`);
-
-      const autoLeapEstArgs = {
-        customerName: params.customer.name,
-        phone: params.customer.phone || null,
-        vehicleYear: vehicle.year,
-        vehicleMake: vehicle.make,
-        vehicleModel: vehicle.model,
-        vin: vehicle.vin || null,
+      const playbookResult = await autoLeapPlaybook.runPlaybook({
+        customer: params.customer,
+        vehicle: { year: vehicle.year, make: vehicle.make, model: vehicle.model, vin: vehicle.vin || null },
         diagnosis: results.diagnosis,
         parts: estParts,
-        laborHoursOverride,
-      };
-      const doAutoLeapEstimate = async () => autoLeapApi.buildEstimate(autoLeapEstArgs);
-      const apiEstimate = FEAT_RETRY_ENABLED
-        ? await breakers.autoleap.call(() => withRetry(doAutoLeapEstimate, { maxRetries: 1, baseDelay: 2000 }))
-        : await doAutoLeapEstimate();
+        progressCallback: params.progressCallback || null,
+      });
 
-      if (apiEstimate.success) {
+      if (playbookResult.success) {
         results.estimate = {
           success: true,
-          estimateId: apiEstimate.estimateId,
-          estimateCode: apiEstimate.estimateCode,
-          total:       apiEstimate.total,
-          totalLabor:  apiEstimate.totalLabor,
-          totalParts:  apiEstimate.totalParts,
-          laborHours:  apiEstimate.laborHours,
-          laborRate:   apiEstimate.laborRate,
+          estimateId: playbookResult.estimateId,
+          estimateCode: playbookResult.roNumber,
+          total:       playbookResult.total,
+          totalLabor:  playbookResult.totalLabor,
+          totalParts:  playbookResult.totalParts,
+          laborHours:  playbookResult.laborHours,
+          laborRate:   playbookResult.laborRate,
           shopSupplies: null,
           tax: null,
-          customerName: apiEstimate.customerName,
-          vehicleDesc: apiEstimate.vehicleDesc,
-          pricingSource: "matrix-code",
+          customerName: params.customer.name,
+          vehicleDesc: `${vehicle.year} ${vehicle.make} ${vehicle.model}`,
+          pricingSource: playbookResult.pricingSource || "autoleap-native",
         };
-        results.resolvedLaborHours = apiEstimate.laborHours;
-        results.resolvedLaborRate  = apiEstimate.laborRate;
-        results.estimateSource = "matrix-code";
-        console.log(`  → Estimate ${apiEstimate.estimateCode} created for ${apiEstimate.customerName}`);
-        console.log(`  → Vehicle: ${apiEstimate.vehicleDesc}`);
-        console.log(`  → Pricing: code markup (retail = cost × ${Number(process.env.AUTOLEAP_PARTS_MARKUP_PERCENT) || 40}%)`);
-        console.log(`  → Parts: ${partsWithSelection.length}, Labor: ${apiEstimate.laborHours}h`);
-        console.log(`  → Total: $${apiEstimate.total} (labor $${apiEstimate.totalLabor} + parts $${apiEstimate.totalParts})`);
+        results.resolvedLaborHours = playbookResult.laborHours;
+        results.resolvedLaborRate  = playbookResult.laborRate;
+        results.estimateSource = "autoleap-native";
+
+        // Playbook provides PDF directly
+        if (playbookResult.pdfPath) {
+          results.pdfPath = playbookResult.pdfPath;
+          results.pdfSource = "autoleap-native";
+        }
+
+        console.log(`  → Estimate ${playbookResult.roNumber} created via browser playbook`);
+        console.log(`  → Labor: ${playbookResult.laborHours}h (MOTOR)`);
+        console.log(`  → Parts: ${playbookResult.partsAdded?.length || 0} added via PartsTech`);
+        console.log(`  → Total: $${playbookResult.total} (labor $${playbookResult.totalLabor} + parts $${playbookResult.totalParts})`);
+        console.log(`  → Pricing: AutoLeap markup matrix (native)`);
+
+        // Surface playbook warnings
+        if (playbookResult.warnings?.length > 0) {
+          results.warnings = results.warnings || [];
+          results.warnings.push(...playbookResult.warnings);
+        }
 
         trackEvent(shopId, "estimate_created", {
           vehicle: { year: vehicle.year, make: vehicle.make, model: vehicle.model },
-          total: apiEstimate.total,
-          estimateId: apiEstimate.estimateId,
-          source: "matrix-code",
-          partsCount: estParts.length,
+          total: playbookResult.total,
+          estimateId: playbookResult.estimateId,
+          source: "autoleap-native",
+          partsCount: playbookResult.partsAdded?.length || 0,
           platformsUsed: [
             alldata && !alldata.error ? "alldata" : null,
             identifix && !identifix.error ? "identifix" : null,
@@ -1367,103 +1373,33 @@ async function buildEstimate(params) {
           ].filter(Boolean),
         }).catch(() => {});
       } else {
-        console.error(`  → AutoLeap estimate failed: ${apiEstimate.error}`);
-        results.estimate = { error: apiEstimate.error };
+        console.error(`  → Playbook failed: ${playbookResult.error}`);
+        results.estimate = { error: playbookResult.error };
+        // Surface playbook warnings even on failure
+        if (playbookResult.warnings?.length > 0) {
+          results.warnings = results.warnings || [];
+          results.warnings.push(...playbookResult.warnings);
+        }
       }
     } catch (err) {
-      console.error(`  → AutoLeap error: ${err.message}`);
+      console.error(`  → Playbook error: ${err.message}`);
       results.estimate = { error: err.message };
     }
   } else if (params.customer) {
-    // Fallback: API-based estimate (existing code)
-    log.info("Step 6: Creating estimate in AutoLeap (fallback API)...");
-
-    try {
-      const customer = await findOrCreateCustomer(params.customer);
-      const autoLeapVehicle = await findOrCreateVehicle({
-        customerId: customer.id,
-        vin: vehicle.vin,
-        year: vehicle.year,
-        make: vehicle.make,
-        model: vehicle.model,
-        mileage: vehicle.mileage || 0,
-      });
-
-      // Build line items from parts
-      const lineItems = [];
-
-      // Get labor hours: repair plan → ProDemand → params → default
-      const repairPlan = results.diagnosis?.ai?.repair_plan;
-      let laborHours = repairPlan?.labor?.hours || null;
-      let laborSource = repairPlan?.labor?.source || null;
-
-      // Fallback to ProDemand labor times
-      if (!laborHours && results.prodemandLabor?.length > 0) {
-        laborHours = results.prodemandLabor[0].hours;
-        laborSource = "prodemand";
-      }
-
-      laborHours = laborHours || params.laborHours || 1.0;
-      laborSource = laborSource || "estimated";
-
-      // Add labor line
-      lineItems.push({
-        description: params.query,
-        laborHours,
-        partsCost: 0,
-      });
-      console.log(`  → Labor: ${laborHours}h (source: ${laborSource})`);
-
-      // Add parts from best value bundle
-      if (results.parts?.bestValueBundle?.parts) {
-        for (const item of results.parts.bestValueBundle.parts) {
-          if (item.selected) {
-            lineItems.push({
-              description: `${item.selected.brand} ${item.selected.description}`,
-              laborHours: 0,
-              partsCost: item.selected.totalCost,
-              partNumber: item.selected.partNumber,
-            });
-          }
-        }
-      }
-
-      results.estimate = await createEstimate({
-        customerId: customer.id,
-        vehicleId: autoLeapVehicle.id,
-        lineItems,
-        shopConfig,
-      });
-      results.estimateSource = "api";
-
-      console.log(`  → Estimate created: ${results.estimate.estimateId}`);
-      console.log(`  → Total: $${results.estimate.total}`);
-
-      // Track estimate creation event
-      trackEvent(shopId, "estimate_created", {
-        vehicle: { year: vehicle.year, make: vehicle.make, model: vehicle.model },
-        total: results.estimate.total,
-        estimateId: results.estimate.estimateId,
-        source: "api",
-        partsCount: results.parts?.bestValueBundle?.parts?.length || 0,
-        platformsUsed: [
-          alldata && !alldata.error ? "alldata" : null,
-          identifix && !identifix.error ? "identifix" : null,
-          prodemand && !prodemand.error ? "prodemand" : null,
-        ].filter(Boolean),
-      }).catch(() => {});
-    } catch (err) {
-      console.error(`  → AutoLeap error: ${err.message}`);
-      results.estimate = { error: err.message };
-    }
+    log.info("Step 6: Skipped (browser playbook not available)");
+    results.estimate = { error: "Browser playbook not configured (AUTOLEAP_EMAIL not set)" };
   } else {
     log.info("Step 6: Skipped AutoLeap (provide customer info to create)");
   }
 
-  // ─── Step 7: Download AutoLeap PDF (native — no custom PDF) ───
-  log.info("Step 7: Downloading AutoLeap estimate PDF...");
+  // ─── Step 7: Download AutoLeap PDF ───
+  log.info("Step 7: AutoLeap estimate PDF...");
 
-  if (autoLeapApi && results.estimate?.estimateId) {
+  if (results.pdfPath) {
+    // Playbook already provided PDF in Step 6
+    console.log(`  → PDF already available from playbook: ${results.pdfPath}`);
+  } else if (autoLeapApi && results.estimate?.estimateId) {
+    // Fallback: download PDF via REST API
     try {
       const safeName = `${vehicle.year}-${vehicle.make}-${vehicle.model}`.replace(/[^a-zA-Z0-9 \-]/g, "").replace(/\s+/g, "-");
       const pdfOutputPath = require("path").join(
