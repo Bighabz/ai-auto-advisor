@@ -1095,133 +1095,67 @@ async function callClaude(userMessage) {
 
 /**
  * Read operational procedures from the MOTOR right panel.
- * Each row has: procedure name, labor $, hours, parts $, fluids $, subtotal, "+" button.
  *
- * IMPORTANT: Must scope to MOTOR-specific content area. The Browse dialog has
- * multiple tabs (Internal, MOTOR Primary, etc.) and each tab has "+" buttons.
- * If we search too broadly, we'll find canned service buttons instead.
+ * DOM structure (discovered from live AutoLeap):
+ *   div.motor-service-item                          ← row container
+ *     app-accordian
+ *       div.accordian-header.pointer                ← clickable header (full row)
+ *         div.custom-accordian-header-checkbox       ← checkbox to SELECT this procedure
+ *         div.custom-header-template                ← contains name + pricing text
+ *           p.motor-service-name                    ← procedure name (e.g. "Catalytic Converter R&R")
+ *         ... price/hours columns ...
+ *         i.fa-chevron-right                        ← expand chevron
+ *         i.motor-service-info                      ← info icon
+ *         i.fa-file-alt.repair-diagram-             ← repair diagram
+ *         i.fa-clock                                ← clock icon (hours nearby)
+ *         i.fa-tools                                ← tools icon
+ *
+ * To ADD a procedure: click its checkbox, then click the "Add" button at bottom.
+ * There are NO green btn-success "+" buttons in MOTOR panels.
  */
 async function readProcedures(page) {
-  // The right panel may need scrolling to show all procedures.
   let allProcs = [];
   let prevCount = 0;
   const maxScrollAttempts = 10;
 
-  // Noise filter: names that are clearly NOT real MOTOR procedures
-  const NOISE_NAMES = /^(search canned services|service|search|add|cancel|close|save|browse|internal|deferred|labor|part|canned)$/i;
-
   for (let scroll = 0; scroll <= maxScrollAttempts; scroll++) {
-    const procs = await page.evaluate((noisePattern) => {
+    const procs = await page.evaluate(() => {
       const results = [];
 
-      // ── Strategy 1: Find the MOTOR-specific content container ──
-      // MOTOR content typically has table headers: "Labor", "Parts", "Subtotal"
-      // Or procedure rows with R&R, R&I, Inspect, etc.
-      // Find the active tab content that contains MOTOR-type data.
-
-      // First, try to find a container that has "Operational" or procedure-like content
-      // (NOT canned services which have simpler structure)
-      let motorContainer = null;
-
-      // Look for elements with "Operational" header text — this is MOTOR-specific
-      const opHeaders = Array.from(document.querySelectorAll("*")).filter(el =>
-        el.offsetParent !== null &&
-        el.children.length < 3 &&
-        /^Operational$/i.test(el.textContent.trim())
-      );
-      if (opHeaders.length > 0) {
-        motorContainer = opHeaders[0].closest("[class*='content'], [class*='panel'], [class*='body'], [class*='tab-pane']")
-          || opHeaders[0].parentElement?.parentElement;
-      }
-
-      // If no "Operational" header, look for table headers "Labor" + "Parts" + "Subtotal"
-      if (!motorContainer) {
-        const tables = Array.from(document.querySelectorAll("table, [class*='table']")).filter(el => {
-          if (!el.offsetParent) return false;
-          const text = el.textContent || "";
-          return text.includes("Labor") && text.includes("Parts") && (text.includes("Subtotal") || text.includes("Total"));
-        });
-        if (tables.length > 0) {
-          motorContainer = tables[0];
-        }
-      }
-
-      // If no MOTOR container found, look for R&R/R&I procedure text as anchor
-      if (!motorContainer) {
-        const procAnchors = Array.from(document.querySelectorAll("*")).filter(el =>
-          el.offsetParent !== null &&
-          el.children.length < 3 &&
-          /R&R|R&I|Inspect|Overhaul|Diagnos/i.test(el.textContent.trim()) &&
-          el.textContent.trim().length < 60
-        );
-        if (procAnchors.length > 0) {
-          motorContainer = procAnchors[0].closest("[class*='content'], [class*='panel'], [class*='body'], [class*='list'], table")
-            || procAnchors[0].parentElement?.parentElement?.parentElement;
-        }
-      }
-
-      // Search scope: prefer MOTOR container, fallback to entire dialog, last resort whole page
-      const searchRoot = motorContainer
-        || document.querySelector("[role='dialog'] [class*='tab-content']")
-        || document.querySelector("[role='dialog']")
-        || document;
-
-      // ── Find rows with green "+" buttons within our scoped container ──
-      const plusBtns = Array.from(searchRoot.querySelectorAll(
-        "button[class*='btn-success'], button[class*='add-btn'], [class*='add-service-btn']"
+      // ── Primary strategy: Find MOTOR procedure rows by their unique class ──
+      const motorRows = Array.from(document.querySelectorAll(
+        "[class*='motor-service-item'], [class*='motor-service']"
       )).filter(el => el.offsetParent !== null);
 
-      for (const btn of plusBtns) {
-        const row = btn.closest("tr, [class*='row'], [class*='item'], [class*='service-line']") || btn.parentElement?.parentElement;
-        if (!row) continue;
+      for (const row of motorRows) {
+        // Extract procedure name from p.motor-service-name
+        const nameEl = row.querySelector("[class*='motor-service-name']");
+        let name = nameEl ? nameEl.textContent.trim() : "";
 
-        // Extract procedure name
-        const nameEls = Array.from(row.querySelectorAll("span, div, td, a")).filter(el => {
-          if (!el.offsetParent) return false;
-          const t = el.textContent.trim();
-          return t.length > 3 && t.length < 55
-            && !t.startsWith("$")
-            && !t.match(/^\d+\.?\d*$/)
-            && !/^[\d$.,\s]+$/.test(t)
-            && el.children.length < 4;
-        });
-        let name = "";
-        for (const el of nameEls) {
-          const t = el.textContent.trim();
-          if (t.includes("$") && t.split("$").length > 2) continue;
-          // Prefer elements with "R&R", "R&I", etc. — these are real MOTOR procedure names
-          if (/R&R|R&I|Inspect|Overhaul|Diagnos|Replace|Remove/i.test(t) && t.length > name.length) {
-            name = t;
-          } else if (!name && t.length > 3) {
-            name = t;
-          }
-        }
-        // If still no name, try the longest candidate
+        // Fallback: try the custom-header-template
         if (!name) {
-          for (const el of nameEls) {
-            const t = el.textContent.trim();
-            if (t.length > name.length) name = t;
+          const tmpl = row.querySelector("[class*='custom-header-template']");
+          if (tmpl) {
+            // Get text from the first P or span child (not the whole template which has prices)
+            const firstText = tmpl.querySelector("p, span");
+            name = firstText ? firstText.textContent.trim() : "";
           }
         }
+
+        if (!name || name.length < 3) continue;
 
         // Clean name
-        name = (name || "").replace(/\s*[ⓘℹ].*/, "").replace(/\s+/g, " ").trim();
+        name = name.replace(/\s*[ⓘℹ].*/, "").replace(/\s+/g, " ").trim();
 
-        // Filter noise: skip obviously wrong items
-        const noiseRe = new RegExp(noisePattern, "i");
-        if (!name || noiseRe.test(name)) continue;
-        // Skip if name is too short or too generic
-        if (name.length < 4) continue;
-
-        // Extract hours: look for clock icon sibling or standalone decimal
+        // Extract hours: look for clock icon and its nearby text sibling
         let hours = 0;
-        const leafEls = Array.from(row.querySelectorAll("span, div, i")).filter(el =>
+        const leafEls = Array.from(row.querySelectorAll("span, div, i, p")).filter(el =>
           el.offsetParent !== null && el.children.length === 0
         );
         for (let i = 0; i < leafEls.length; i++) {
           const cls = (leafEls[i].className || "").toLowerCase();
-          const text = leafEls[i].textContent.trim();
-          if (cls.includes("clock") || cls.includes("time") || text === "⏱" || text === "◷") {
+          if (cls.includes("clock") || cls.includes("time")) {
+            // Next sibling leaf should be hours
             for (let j = i + 1; j < Math.min(i + 3, leafEls.length); j++) {
               const m = leafEls[j].textContent.trim().match(/^(\d+\.?\d*)$/);
               if (m && parseFloat(m[1]) > 0 && parseFloat(m[1]) < 30) {
@@ -1232,68 +1166,56 @@ async function readProcedures(page) {
             if (hours > 0) break;
           }
         }
+        // Fallback: parse hours from row text (e.g. "$150.00  1.20  $0.00")
         if (hours === 0) {
-          for (const el of leafEls) {
-            const t = el.textContent.trim();
-            const m = t.match(/^(\d+\.\d+)$/);
-            if (m) {
-              const val = parseFloat(m[1]);
-              if (val > 0 && val < 20) { hours = val; break; }
+          const rowText = row.textContent || "";
+          // Look for standalone decimal that's NOT a price (not preceded by $)
+          const nums = rowText.match(/(?:^|\s)(\d+\.\d{2})(?:\s|$)/g);
+          if (nums) {
+            for (const n of nums) {
+              const val = parseFloat(n.trim());
+              if (val > 0 && val < 20 && !rowText.includes(`$${n.trim()}`)) {
+                hours = val;
+                break;
+              }
             }
           }
         }
 
-        // Extract labor price
+        // Extract labor price (first $X.XX in the row)
         const rowText = row.textContent || "";
         const priceMatch = rowText.match(/\$(\d+\.?\d*)/);
         const labor = priceMatch ? parseFloat(priceMatch[1]) : 0;
 
-        const btnRect = btn.getBoundingClientRect();
-        if (btnRect.width > 0) {
+        // Get the checkbox click target (custom-accordian-header-checkbox)
+        const checkbox = row.querySelector("[class*='accordian-header-checkbox'], [class*='accordion-header-checkbox']");
+        let checkboxRect = null;
+        if (checkbox && checkbox.offsetParent !== null) {
+          const r = checkbox.getBoundingClientRect();
+          checkboxRect = { x: r.x + r.width / 2, y: r.y + r.height / 2 };
+        }
+
+        // Fallback: get the accordion header itself (the whole row is clickable)
+        if (!checkboxRect) {
+          const header = row.querySelector("[class*='accordian-header'], [class*='accordion-header']");
+          if (header && header.offsetParent !== null) {
+            const r = header.getBoundingClientRect();
+            checkboxRect = { x: r.x + 20, y: r.y + r.height / 2 }; // Click near left edge (checkbox area)
+          }
+        }
+
+        if (checkboxRect) {
           results.push({
             name,
             hours,
             labor,
-            plusRect: { x: btnRect.x + btnRect.width / 2, y: btnRect.y + btnRect.height / 2 },
+            plusRect: checkboxRect, // Reuse plusRect field for the checkbox click target
           });
         }
       }
 
-      // ── Strategy 2: If strategy 1 found nothing inside MOTOR container,
-      //    look for procedure-like text (R&R, R&I) anywhere in the dialog ──
-      if (results.length === 0) {
-        const dialogRoot = document.querySelector("[role='dialog']") || document;
-        const allRows = Array.from(dialogRoot.querySelectorAll("tr, [class*='row'], [class*='item']")).filter(el => {
-          if (!el.offsetParent) return false;
-          const text = el.textContent.trim();
-          // Must contain R&R/R&I/procedure keywords AND a $ amount
-          return text.length > 10 && text.includes("$") &&
-            /R&R|R&I|Inspect|Overhaul|Diagnos|Replace|Remove/i.test(text);
-        });
-        for (const row of allRows) {
-          const nameEl = Array.from(row.querySelectorAll("span, a, div, td")).find(el =>
-            el.offsetParent !== null &&
-            el.children.length < 3 &&
-            /R&R|R&I|Inspect|Overhaul|Diagnos|Replace|Remove/i.test(el.textContent.trim()) &&
-            el.textContent.trim().length < 55
-          );
-          if (!nameEl) continue;
-          const name = nameEl.textContent.trim().replace(/\s+/g, " ");
-          const btn = row.querySelector("button[class*='btn-success'], button[class*='add']");
-          if (btn && btn.offsetParent !== null) {
-            const rect = btn.getBoundingClientRect();
-            results.push({
-              name,
-              hours: 0,
-              labor: 0,
-              plusRect: { x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 },
-            });
-          }
-        }
-      }
-
       return results;
-    }, NOISE_NAMES.source);
+    });
 
     // Merge new procs (deduplicate by name)
     const existingNames = new Set(allProcs.map(p => p.name));
@@ -1311,19 +1233,15 @@ async function readProcedures(page) {
     // Scroll the right panel down to load more
     if (scroll < maxScrollAttempts) {
       await page.evaluate(() => {
+        // Find the scrollable container for MOTOR procedures
         const containers = Array.from(document.querySelectorAll(
-          "[class*='content'], [class*='panel-body'], [class*='scroll'], [class*='table-container']"
+          "[class*='motor'], [class*='content'], [class*='panel-body'], [class*='scroll']"
         )).filter(el => el.scrollHeight > el.clientHeight && el.offsetParent !== null);
         for (const c of containers) {
-          if (c.scrollHeight > c.clientHeight + 100) {
+          if (c.scrollHeight > c.clientHeight + 50) {
             c.scrollTop += 300;
             return;
           }
-        }
-        const dialog = document.querySelector("[role='dialog']");
-        if (dialog) {
-          const scrollable = dialog.querySelector("[class*='body'], [class*='content']");
-          if (scrollable) scrollable.scrollTop += 300;
         }
       });
       await sleep(500);
@@ -1337,65 +1255,69 @@ async function readProcedures(page) {
  * Click the green "+" button for a specific procedure.
  * Uses the stored plusRect coordinates for native mouse click.
  */
+/**
+ * Select a MOTOR procedure and add it to the estimate.
+ *
+ * MOTOR uses checkbox + "Add" button pattern:
+ * 1. Click the checkbox (or accordion header) to select the procedure
+ * 2. Click the "Add" button at the bottom of the dialog
+ *
+ * @param {import('puppeteer-core').Page} page
+ * @param {{ name: string, hours: number, labor: number, plusRect: { x: number, y: number } }} proc
+ * @returns {Promise<boolean>}
+ */
 async function clickProcedurePlus(page, proc) {
-  if (proc.plusRect) {
-    // First scroll the procedure into view if needed
-    await page.evaluate((name) => {
-      // Search for the procedure name text to scroll into view
-      const searchText = name.substring(0, 20);
-      const spans = Array.from(document.querySelectorAll("span, div, a, td")).filter(el =>
-        el.offsetParent !== null &&
-        el.children.length < 4 &&
-        el.textContent.trim().includes(searchText)
-      );
-      if (spans.length > 0) {
-        spans[0].scrollIntoView({ block: "center", behavior: "smooth" });
-      }
-    }, proc.name);
-    await sleep(500);
+  if (!proc.plusRect) return false;
 
-    // Re-find the "+" button near this procedure (coordinates may have changed after scroll)
-    const freshRect = await page.evaluate((name) => {
-      const searchText = name.substring(0, 20);
-      // Look for rows containing the procedure name
-      const rows = Array.from(document.querySelectorAll("tr, [class*='row'], [class*='item']")).filter(el =>
-        el.offsetParent !== null && el.textContent.includes(searchText)
-      );
-      for (const row of rows) {
-        // Prefer btn-success (green "+")
-        const btn = row.querySelector("button[class*='btn-success']");
-        if (btn && btn.offsetParent !== null) {
-          const rect = btn.getBoundingClientRect();
-          if (rect.width > 0 && rect.height > 0) {
-            return { x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 };
-          }
-        }
-        // Also check for plus icon buttons
-        const icons = row.querySelectorAll("[class*='fa-plus'], [class*='pi-plus']");
-        for (const icon of icons) {
-          const clickTarget = icon.closest("button") || icon;
-          if (clickTarget.offsetParent !== null) {
-            const rect = clickTarget.getBoundingClientRect();
-            if (rect.width > 0 && rect.height > 0) {
-              return { x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 };
-            }
-          }
-        }
-      }
-      return null;
-    }, proc.name);
-
-    if (freshRect) {
-      console.log(`${LOG} Clicking "+" for "${proc.name}" at (${Math.round(freshRect.x)}, ${Math.round(freshRect.y)})`);
-      await page.mouse.click(freshRect.x, freshRect.y);
-      return true;
+  // Step 1: Scroll the procedure into view
+  await page.evaluate((name) => {
+    const searchText = name.substring(0, 20);
+    const els = Array.from(document.querySelectorAll("[class*='motor-service-name'], [class*='motor-service-item']"))
+      .filter(el => el.offsetParent !== null && el.textContent.includes(searchText));
+    if (els.length > 0) {
+      els[0].scrollIntoView({ block: "center", behavior: "smooth" });
     }
-    // Fallback to stored coordinates
-    console.log(`${LOG} Using stored "+" coordinates for "${proc.name}"`);
-    await page.mouse.click(proc.plusRect.x, proc.plusRect.y);
+  }, proc.name);
+  await sleep(500);
+
+  // Step 2: Re-find the checkbox for this procedure (coordinates may have shifted after scroll)
+  const freshRect = await page.evaluate((name) => {
+    const searchText = name.substring(0, 20);
+    const rows = Array.from(document.querySelectorAll("[class*='motor-service-item']"))
+      .filter(el => el.offsetParent !== null && el.textContent.includes(searchText));
+    for (const row of rows) {
+      // Try checkbox first
+      const cb = row.querySelector("[class*='accordian-header-checkbox'], [class*='accordion-header-checkbox']");
+      if (cb && cb.offsetParent !== null) {
+        const r = cb.getBoundingClientRect();
+        if (r.width > 0) return { x: r.x + r.width / 2, y: r.y + r.height / 2 };
+      }
+      // Fallback: click the accordion header near its left edge
+      const header = row.querySelector("[class*='accordian-header'], [class*='accordion-header']");
+      if (header && header.offsetParent !== null) {
+        const r = header.getBoundingClientRect();
+        return { x: r.x + 20, y: r.y + r.height / 2 };
+      }
+    }
+    return null;
+  }, proc.name);
+
+  const clickTarget = freshRect || proc.plusRect;
+  console.log(`${LOG} Clicking checkbox for "${proc.name}" at (${Math.round(clickTarget.x)}, ${Math.round(clickTarget.y)})`);
+  await page.mouse.click(clickTarget.x, clickTarget.y);
+  await sleep(1000);
+
+  // Step 3: Click the "Add" button to add the selected procedure to the estimate
+  console.log(`${LOG} Clicking "Add" button to confirm procedure...`);
+  const addClicked = await clickAddButton(page);
+  if (addClicked) {
+    console.log(`${LOG} "Add" button clicked ✓`);
     return true;
   }
-  return false;
+
+  // Fallback: maybe the checkbox click already added it (some UI variants)
+  console.log(`${LOG} "Add" button not found — checkbox click may have been sufficient`);
+  return true;
 }
 
 // ─── DOM Readers ────────────────────────────────────────────────────────────
