@@ -200,19 +200,35 @@ async function openPartsTechTab(page, browser) {
   console.log(`${LOG} PT button located: ${JSON.stringify(ptBtnSelector)}`);
 
   if (ptBtnSelector.found) {
-    // Force-enable the button if Angular's if-disabled directive blocked it.
-    // The button IS bound to the correct handler, but Angular conditionally
-    // disables it. Removing the class + disabled attribute lets the click through.
-    await page.evaluate(() => {
+    const isDisabled = await page.evaluate(() => {
       const el = document.querySelector('[data-pt-plus="true"]');
-      if (el) {
-        el.classList.remove("if-disabled");
-        el.removeAttribute("disabled");
-        el.style.pointerEvents = "auto";
-        el.style.opacity = "1";
-      }
+      return el ? el.className.includes("if-disabled") : false;
     });
-    await sleep(200);
+    console.log(`${LOG} PT button if-disabled: ${isDisabled}`);
+
+    if (isDisabled) {
+      // Force-enable the button: remove if-disabled class, disabled attr, and CSS blocks
+      await page.evaluate(() => {
+        const el = document.querySelector('[data-pt-plus="true"]');
+        if (el) {
+          el.classList.remove("if-disabled");
+          el.removeAttribute("disabled");
+          el.style.pointerEvents = "auto";
+          el.style.opacity = "1";
+        }
+      });
+      await sleep(200);
+    }
+
+    // Intercept window.open to capture the PT SSO URL (AutoLeap opens PT in a new tab)
+    await page.evaluate(() => {
+      window.__ptSsoUrl = null;
+      const origOpen = window.open;
+      window.open = function(url, ...args) {
+        window.__ptSsoUrl = url;
+        return origOpen.call(this, url, ...args);
+      };
+    });
 
     // Use puppeteer native click instead of JS click for proper event dispatch
     try {
@@ -229,7 +245,15 @@ async function openPartsTechTab(page, browser) {
       });
       ptBtnClicked = { clicked: true, btnText: ptBtnSelector.text, strategy: ptBtnSelector.strategy + "-js" };
     }
-    // Clean up marker
+
+    // Check if window.open was called (captured SSO URL)
+    await sleep(2000);
+    const ssoUrl = await page.evaluate(() => window.__ptSsoUrl);
+    if (ssoUrl) {
+      console.log(`${LOG} Captured PT SSO URL: ${ssoUrl.substring(0, 120)}`);
+    }
+
+    // Clean up marker and interceptor
     await page.evaluate(() => {
       const el = document.querySelector('[data-pt-plus="true"]');
       if (el) el.removeAttribute("data-pt-plus");

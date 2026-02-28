@@ -557,54 +557,58 @@ async function runPlaybook({ customer, vehicle, diagnosis, parts, progressCallba
       const addOnStr = motorResult.addOns?.length > 0 ? `, add-ons: ${motorResult.addOns.join(", ")}` : "";
       console.log(`${LOG} Phase 3: MOTOR labor added: ${motorResult.hours}h (NEVER modifying Qty/Hrs)${addOnStr}`);
 
-      // Reload page to ensure Angular reflects MOTOR additions and save
-      console.log(`${LOG} Phase 3b: Reloading estimate to commit MOTOR labor...`);
-      const currentUrl = page.url();
-      await page.reload({ waitUntil: "networkidle2", timeout: 30000 }).catch(() => {});
-      await sleep(5000);
+      // After MOTOR dialog closes, navigate tabs to force Angular to update state.
+      // DO NOT reload the page — reload resets Angular state and breaks PT button.
+      console.log(`${LOG} Phase 3b: Saving estimate + verifying MOTOR service...`);
 
-      // Ensure we're on the estimate page (reload might redirect)
-      if (!page.url().includes("estimate")) {
-        console.log(`${LOG} Phase 3b: Page redirected after reload, navigating back...`);
-        await page.goto(currentUrl, { waitUntil: "networkidle2", timeout: 30000 }).catch(() => {});
-        await sleep(5000);
-      }
-
-      // Wait for Angular to render the estimate content (services section)
-      const procShort = (motorResult.procedure || "").substring(0, 15);
-      try {
-        await page.waitForFunction(
-          (text) => (document.body.innerText || "").includes(text),
-          { timeout: 15000 },
-          procShort
-        );
-        console.log(`${LOG} Phase 3b: Service "${procShort}" visible in DOM ✓`);
-      } catch {
-        console.log(`${LOG} Phase 3b: Service text not found in DOM after 15s — continuing`);
-      }
-
-      // Save after reload
+      // Save first — commits the MOTOR labor addition
       await saveEstimate(page);
+      await sleep(3000);
+
+      // Click "Services" tab to force Angular to render the services panel
+      await page.evaluate(() => {
+        const tabs = Array.from(document.querySelectorAll("a[role='tab'], [class*='tabview-nav-link']"));
+        for (const tab of tabs) {
+          if (tab.textContent.trim() === "Services") { tab.click(); return; }
+        }
+      });
       await sleep(2000);
 
-      // Verify MOTOR service appears in the estimate services list
+      // Verify MOTOR service appears in the services panel
+      const procShort = (motorResult.procedure || "").substring(0, 15);
       const serviceCheck = await page.evaluate((procName, procShort) => {
         const allText = document.body.innerText || "";
-        // Check both full name and shortened name
         const hasService = allText.includes(procName) || allText.includes(procShort);
-        // Check PartsTech button state after save
-        const ptBtns = Array.from(document.querySelectorAll(".ro-partstech-new button, [class*='partstech'] button"));
-        const ptEnabled = ptBtns.some(b => !b.className.includes("if-disabled") && b.offsetParent !== null);
-        // Count service lines: look for MOTOR tags or service amount patterns
-        const motorTags = document.querySelectorAll("[class*='motor-tag'], [class*='motor-badge'], span.badge");
-        const serviceLines = Array.from(motorTags).filter(el => el.textContent.includes("MOTOR")).length;
-        // Also count by hrs pattern in service rows
-        const hrsCount = (allText.match(/\d+\.\d{2}\s*hrs?/gi) || []).length;
-        return { hasService, ptEnabled, ptBtnCount: ptBtns.length, serviceLines, hrsCount };
+        // Look for MOTOR tag badges
+        const allBadges = Array.from(document.querySelectorAll("span, div")).filter(el =>
+          el.offsetParent !== null && el.textContent.trim() === "MOTOR"
+        );
+        return { hasService, motorBadges: allBadges.length };
       }, motorResult.procedure, procShort);
-      console.log(`${LOG} Phase 3b: Service in estimate: ${serviceCheck.hasService}, PT enabled: ${serviceCheck.ptEnabled}, MOTOR lines: ${serviceCheck.serviceLines}, hrs patterns: ${serviceCheck.hrsCount}`);
+      console.log(`${LOG} Phase 3b: Service in estimate: ${serviceCheck.hasService}, MOTOR badges: ${serviceCheck.motorBadges}`);
 
-      // Take a debug screenshot of the estimate page after reload + save
+      // Now click "Parts ordering" tab to check PT button state
+      await page.evaluate(() => {
+        const tabs = Array.from(document.querySelectorAll("a[role='tab'], [class*='tabview-nav-link']"));
+        for (const tab of tabs) {
+          if (tab.textContent.trim() === "Parts ordering") { tab.click(); return; }
+        }
+      });
+      await sleep(2000);
+
+      // Check PT button state after tab navigation
+      const ptCheck = await page.evaluate(() => {
+        const ptBtns = Array.from(document.querySelectorAll(".ro-partstech-new button, [class*='partstech'] button"));
+        return ptBtns.map(b => ({
+          classes: (b.className || "").substring(0, 80),
+          disabled: b.disabled,
+          hasIfDisabled: b.className.includes("if-disabled"),
+          visible: b.offsetParent !== null,
+          text: b.textContent.trim().substring(0, 20),
+        }));
+      });
+      console.log(`${LOG} Phase 3b: PT buttons after tab nav: ${JSON.stringify(ptCheck)}`);
+
       await page.screenshot({ path: "/tmp/debug-after-motor-save.png" });
     } else {
       console.log(`${LOG} Phase 3: MOTOR navigation failed: ${motorResult.error}`);
@@ -733,6 +737,15 @@ async function runPlaybook({ customer, vehicle, diagnosis, parts, progressCallba
 
     // Save
     await saveEstimate(page);
+
+    // Click "Labor summary" tab to read totals from the right panel
+    await page.evaluate(() => {
+      const tabs = Array.from(document.querySelectorAll("a[role='tab'], [class*='tabview-nav-link']"));
+      for (const tab of tabs) {
+        if (tab.textContent.includes("Labor summary")) { tab.click(); return; }
+      }
+    });
+    await sleep(2000);
 
     // Read totals from page DOM
     const totals = await readEstimateTotals(page);
