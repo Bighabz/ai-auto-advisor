@@ -1206,7 +1206,10 @@ async function linkPartsToServices(page, addedParts, laborResult) {
   const serviceName = laborResult.procedure || "";
 
   // Parts appear in the "Parts ordering" tab under "PartsTech's orders" section.
-  // Each imported part row has a "Select service" dropdown (PrimeNG p-dropdown).
+  // Each imported part row has a custom APP-DROPDOWN with class "dropdown-wrapper dropdown-light".
+  // Structure: APP-DROPDOWN > DIV.dropdown > DIV.dropdown-wrapper > DIV.selected-view (click target)
+  //   + DIV.dropdown-list-wrapper (options panel, display:none → show on click)
+  //     > UL.dropdown-list > LI.dropdown-list-item (each option)
   await clickTab(page, "Parts ordering");
   await sleep(3000);
 
@@ -1214,66 +1217,36 @@ async function linkPartsToServices(page, addedParts, laborResult) {
     await page.screenshot({ path: "/tmp/debug-phase5-parts.png" });
   } catch { /* optional */ }
 
-  // Debug: check if PartsTech orders section is visible
-  const partsDebug = await page.evaluate(() => {
-    const allText = document.body.innerText || "";
-    const hasOrders = allText.includes("PartsTech's orders") || allText.includes("PartsTech");
-    const hasSelectService = allText.includes("Select service");
-    // Find "Select service" elements — these are PrimeNG dropdown labels
-    const selectSvcEls = Array.from(document.querySelectorAll("*")).filter(el => {
-      if (!el.offsetParent) return false;
-      const text = el.textContent.trim();
-      return (text === "Select service" || text === "Select Service") && el.children.length <= 2;
-    });
-    return {
-      hasOrders,
-      hasSelectService,
-      selectServiceCount: selectSvcEls.length,
-      selectServiceTags: selectSvcEls.slice(0, 3).map(el => ({
-        tag: el.tagName,
-        cls: (el.className || "").substring(0, 50),
-        parent: el.parentElement?.tagName || "none",
-        parentCls: (el.parentElement?.className || "").substring(0, 50),
-      })),
-    };
+  // Count APP-DROPDOWN components with "Select service" text
+  const dropdownCount = await page.evaluate(() => {
+    const appDropdowns = Array.from(document.querySelectorAll("app-dropdown, APP-DROPDOWN"));
+    return appDropdowns.filter(dd => dd.textContent.includes("Select service")).length;
   });
-  console.log(`${LOG} Phase 5: ${JSON.stringify(partsDebug)}`);
+  console.log(`${LOG} Phase 5: Found ${dropdownCount} "Select service" APP-DROPDOWNs`);
 
-  if (partsDebug.selectServiceCount === 0) {
+  if (dropdownCount === 0) {
     console.log(`${LOG} Phase 5: No "Select service" dropdowns found`);
     return { linked: 0 };
   }
 
   // Click each "Select service" dropdown and pick the MOTOR service
-  for (let i = 0; i < Math.min(partsDebug.selectServiceCount, addedParts.length); i++) {
+  const maxLinks = Math.min(dropdownCount, Math.max(addedParts.length, 1));
+  for (let i = 0; i < maxLinks; i++) {
     try {
-      // Find the "Select service" text and get its clickable parent (p-dropdown)
+      // Find the i-th APP-DROPDOWN with "Select service" and get its selected-view click target
       const dropdownInfo = await page.evaluate(() => {
-        const els = Array.from(document.querySelectorAll("*")).filter(el => {
-          if (!el.offsetParent) return false;
-          const text = el.textContent.trim();
-          return (text === "Select service" || text === "Select Service") && el.children.length <= 2;
-        });
-        if (els.length === 0) return { found: false };
-        // Walk up to find the PrimeNG dropdown container
-        let target = els[0];
-        for (let d = 0; d < 5; d++) {
-          const parent = target.parentElement;
-          if (!parent) break;
-          if (parent.tagName === "P-DROPDOWN" || parent.classList.contains("p-dropdown") ||
-              parent.classList.contains("ui-dropdown") || parent.getAttribute("role") === "listbox") {
-            target = parent;
-            break;
-          }
-          target = parent;
-        }
-        const rect = target.getBoundingClientRect();
+        const appDropdowns = Array.from(document.querySelectorAll("app-dropdown, APP-DROPDOWN"));
+        const svcDropdowns = appDropdowns.filter(dd => dd.textContent.includes("Select service"));
+        if (svcDropdowns.length === 0) return { found: false };
+        // Always click the first remaining "Select service" (once linked, text changes)
+        const dd = svcDropdowns[0];
+        const selectedView = dd.querySelector(".selected-view");
+        if (!selectedView) return { found: false };
+        const rect = selectedView.getBoundingClientRect();
         return {
           found: true,
           x: rect.x + rect.width / 2,
           y: rect.y + rect.height / 2,
-          tag: target.tagName,
-          cls: (target.className || "").substring(0, 50),
         };
       });
 
@@ -1284,51 +1257,60 @@ async function linkPartsToServices(page, addedParts, laborResult) {
 
       console.log(`${LOG} Phase 5: Clicking "Select service" at (${Math.round(dropdownInfo.x)}, ${Math.round(dropdownInfo.y)})`);
       await page.mouse.click(dropdownInfo.x, dropdownInfo.y);
-      await sleep(1500);
+      await sleep(2000);
 
-      // Select the MOTOR service from the dropdown overlay
+      // Select the MOTOR service from the dropdown-list-wrapper overlay.
+      // Options are LI.dropdown-list-item inside UL.dropdown-list inside the now-visible
+      // DIV.dropdown-list-wrapper.show within the same APP-DROPDOWN.
       const selected = await page.evaluate((svcName) => {
-        // PrimeNG dropdown overlay with options
-        const options = Array.from(document.querySelectorAll(
-          ".p-dropdown-item, .ui-dropdown-item, li[role='option'], [class*='dropdown-item']"
-        )).filter(el => el.offsetParent !== null);
+        // Primary: AutoLeap custom APP-DROPDOWN list items
+        let options = Array.from(document.querySelectorAll(
+          "li.dropdown-list-item"
+        )).filter(el => {
+          // Must be visible (not the hidden "Loading" item)
+          if (el.hidden || getComputedStyle(el).display === "none") return false;
+          // Must be inside a .show wrapper (i.e., an open dropdown)
+          const wrapper = el.closest(".dropdown-list-wrapper");
+          return wrapper && wrapper.classList.contains("show");
+        });
 
-        // Also try generic visible li elements in overlay panels
+        // Fallback: PrimeNG or generic dropdown items
         if (options.length === 0) {
-          const overlayLis = Array.from(document.querySelectorAll(
-            ".p-dropdown-panel li, .ui-dropdown-panel li, .cdk-overlay-container li"
+          options = Array.from(document.querySelectorAll(
+            ".p-dropdown-item, .ui-dropdown-item, li[role='option']"
           )).filter(el => el.offsetParent !== null);
-          options.push(...overlayLis);
         }
+
+        const texts = options.map(o => (o.textContent || "").trim().substring(0, 60));
 
         // Try partial match (service name)
         for (const opt of options) {
           const text = (opt.textContent || "").trim();
-          if (text.toLowerCase().includes(svcName.toLowerCase())) {
+          if (svcName && text.toLowerCase().includes(svcName.toLowerCase())) {
             opt.click();
-            return { matched: true, text };
+            return { matched: true, text, count: options.length };
           }
         }
-        // Fallback: first non-placeholder option
+        // Fallback: first non-loading, non-placeholder option
         for (const opt of options) {
           const text = (opt.textContent || "").trim();
-          if (text.length > 0 && !/select service/i.test(text)) {
+          if (text.length > 0 && !/select service/i.test(text) && !/^loading$/i.test(text)) {
             opt.click();
-            return { matched: true, text, fallback: true };
+            return { matched: true, text, fallback: true, count: options.length };
           }
         }
-        return { matched: false, count: options.length, texts: options.slice(0, 5).map(o => o.textContent.trim().substring(0, 40)) };
+        return { matched: false, count: options.length, texts };
       }, serviceName);
 
       if (selected.matched) {
         linked++;
-        console.log(`${LOG} Phase 5: Linked part ${i + 1} → "${selected.text}"${selected.fallback ? " (fallback)" : ""}`);
+        console.log(`${LOG} Phase 5: Linked part ${i + 1} → "${selected.text}"${selected.fallback ? " (fallback)" : ""} (${selected.count} options)`);
       } else {
-        console.log(`${LOG} Phase 5: No matching service option: ${JSON.stringify(selected)}`);
+        console.log(`${LOG} Phase 5: No matching option: ${JSON.stringify(selected)}`);
         await page.keyboard.press("Escape");
       }
 
-      await sleep(1500);
+      await sleep(2000);
     } catch (err) {
       console.log(`${LOG} Phase 5: Link attempt ${i + 1} failed: ${err.message}`);
     }
