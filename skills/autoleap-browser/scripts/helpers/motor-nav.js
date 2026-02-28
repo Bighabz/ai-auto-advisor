@@ -539,6 +539,19 @@ async function navigateMotorTree(page, diagnosis, vehicle) {
   await sleep(3000);
   await page.screenshot({ path: "/tmp/debug-motor-after-add.png" });
 
+  // ── Close the MOTOR Browse dialog by clicking "Done" ──
+  console.log(`${LOG} Clicking "Done" to close MOTOR dialog...`);
+  const doneClicked = await findInDialog(page, "Done");
+  if (doneClicked.found && doneClicked.rect) {
+    await page.mouse.click(doneClicked.rect.x, doneClicked.rect.y);
+    console.log(`${LOG} "Done" clicked ✓`);
+    await sleep(2000);
+  } else {
+    // Try pressing Escape as fallback
+    await page.keyboard.press("Escape");
+    await sleep(1000);
+  }
+
   // ── Read hours from the estimate (GOLDEN RULE: NEVER modify) ──
   const hours = matchedProc.hours || (await readMotorHours(page));
   console.log(`${LOG} MOTOR labor added: "${matchedProc.name}" — ${hours}h (NEVER modifying Qty/Hrs)`);
@@ -1215,47 +1228,50 @@ async function clickProcedurePlus(page, proc) {
   }, proc.name);
   await sleep(800);
 
-  // Step 2: Re-find the green "+" button for this procedure (coordinates shift after scroll)
+  // Step 2: Get the EXACT position of the target row's accordion header.
+  // The green "+" circle is always at x≈1180, aligned with the header's vertical center.
+  // We use the HEADER rect (not the whole motor-service-item which may include expanded content).
   const freshRect = await page.evaluate((name) => {
     const searchText = name.substring(0, 20);
     const rows = Array.from(document.querySelectorAll("[class*='motor-service-item']"))
       .filter(el => el.offsetParent !== null && el.textContent.includes(searchText));
 
     for (const row of rows) {
-      const rowRect = row.getBoundingClientRect();
-      const rowCenterY = rowRect.y + rowRect.height / 2;
+      // Use the accordion HEADER element for precise y — it's the compact single-line row
+      // (the motor-service-item can be much taller if expanded)
+      const header = row.querySelector("[class*='accordian-header'], [class*='accordion-header']")
+        || row.querySelector("[class*='custom-header-template']");
+      const target = header || row;
+      const rect = target.getBoundingClientRect();
+      const centerY = rect.y + rect.height / 2;
 
-      // Look for green "+" button: div.pointer.font-primary near this row's y
-      const wrapper = row.closest("[class*='motor-service-item-wrapper']") || row.parentElement;
-      const greenBtns = (wrapper || document).querySelectorAll(
-        "div[class*='pointer'][class*='font-primary'], [class*='m-estimate'] [class*='pointer']"
-      );
-      for (const gb of greenBtns) {
-        if (!gb.offsetParent) continue;
-        const r = gb.getBoundingClientRect();
-        if (Math.abs(r.y + r.height / 2 - rowCenterY) < 30 && r.x > 900) {
-          return { x: r.x + r.width / 2, y: r.y + r.height / 2 };
-        }
-      }
-
-      // Broader search: any div.pointer.font-primary on the page near this y
+      // First try to find the actual green "+" div at this y
       const allGreen = document.querySelectorAll("div[class*='pointer'][class*='font-primary']");
       for (const gb of allGreen) {
         if (!gb.offsetParent) continue;
         const r = gb.getBoundingClientRect();
-        if (Math.abs(r.y + r.height / 2 - rowCenterY) < 30 && r.x > 900) {
-          return { x: r.x + r.width / 2, y: r.y + r.height / 2 };
+        // Must be very close to this row's header center (±20px) and at x > 1000
+        if (Math.abs(r.y + r.height / 2 - centerY) < 20 && r.x > 1000) {
+          return { x: r.x + r.width / 2, y: r.y + r.height / 2, strategy: "green-div" };
         }
       }
 
-      // Last resort: use the fixed x=1180 position at row center
-      return { x: 1180, y: rowCenterY };
+      // Fallback: use elementFromPoint at fixed x=1180 at the header's center y
+      const el = document.elementFromPoint(1180, centerY);
+      if (el && (el.className || "").includes("pointer")) {
+        const r = el.getBoundingClientRect();
+        return { x: r.x + r.width / 2, y: r.y + r.height / 2, strategy: "elementFromPoint" };
+      }
+
+      // Last resort: fixed position
+      return { x: 1180, y: centerY, strategy: "fixed-position" };
     }
     return null;
   }, proc.name);
 
   const clickTarget = freshRect || proc.plusRect;
-  console.log(`${LOG} Clicking green "+" for "${proc.name}" at (${Math.round(clickTarget.x)}, ${Math.round(clickTarget.y)})`);
+  const strategy = freshRect?.strategy || "stored-rect";
+  console.log(`${LOG} Clicking green "+" for "${proc.name}" at (${Math.round(clickTarget.x)}, ${Math.round(clickTarget.y)}) [${strategy}]`);
   await page.mouse.click(clickTarget.x, clickTarget.y);
   await sleep(2000);
 
