@@ -567,12 +567,7 @@ async function runPlaybook({ customer, vehicle, diagnosis, parts, progressCallba
       await sleep(3000);
 
       // Click "Services" tab to force Angular to render the services panel
-      await page.evaluate(() => {
-        const tabs = Array.from(document.querySelectorAll("a[role='tab'], [class*='tabview-nav-link']"));
-        for (const tab of tabs) {
-          if (tab.textContent.trim() === "Services") { tab.click(); return; }
-        }
-      });
+      await clickTab(page, "Services");
       await sleep(2000);
 
       // Verify MOTOR service appears in the services panel
@@ -588,13 +583,8 @@ async function runPlaybook({ customer, vehicle, diagnosis, parts, progressCallba
       }, motorResult.procedure, procShort);
       console.log(`${LOG} Phase 3b: Service in estimate: ${serviceCheck.hasService}, MOTOR badges: ${serviceCheck.motorBadges}`);
 
-      // Now click "Parts ordering" tab to check PT button state
-      await page.evaluate(() => {
-        const tabs = Array.from(document.querySelectorAll("a[role='tab'], [class*='tabview-nav-link']"));
-        for (const tab of tabs) {
-          if (tab.textContent.trim() === "Parts ordering") { tab.click(); return; }
-        }
-      });
+      // Now click "Parts ordering" tab for Phase 4
+      await clickTab(page, "Parts ordering");
       await sleep(2000);
 
       // Check PT button state after tab navigation
@@ -736,51 +726,119 @@ async function runPlaybook({ customer, vehicle, diagnosis, parts, progressCallba
     await progress(progressCallback, "generating_pdf");
     console.log(`${LOG} Phase 6: Saving estimate...`);
 
-    // Save
+    // Save the estimate
     await saveEstimate(page);
+    await sleep(3000);
 
-    // Navigate to Services tab first (makes Save button visible)
-    await page.evaluate(() => {
-      const tabs = Array.from(document.querySelectorAll("a[role='tab'], [class*='tabview-nav-link']"));
-      for (const tab of tabs) {
-        if (tab.textContent.trim() === "Services") { tab.click(); return; }
+    // Strategy 1: Read totals from AutoLeap REST API (most reliable)
+    let totals = { labor: 0, parts: 0, shopSupplies: 0, tax: 0, grandTotal: 0, source: "none" };
+    try {
+      const token = await getToken();
+      if (token && result.estimateId) {
+        const estData = await getEstimate(token, result.estimateId);
+        if (estData) {
+          // AutoLeap estimate response has various total fields
+          // Try common field names
+          const svcTotal = estData.serviceTotal || estData.laborTotal || estData.totalLabor || 0;
+          const partsTotal = estData.partsTotal || estData.totalParts || 0;
+          const supplies = estData.shopSupplies || estData.shopSuppliesTotal || 0;
+          const tax = estData.tax || estData.taxTotal || estData.salesTax || 0;
+          const grand = estData.total || estData.grandTotal || estData.totalAmount ||
+            estData.netTotal || estData.estimateTotal || 0;
+
+          // Also try nested: estData.totals.xxx or estData.summary.xxx
+          const nested = estData.totals || estData.summary || {};
+          totals.labor = svcTotal || nested.serviceTotal || nested.labor || 0;
+          totals.parts = partsTotal || nested.parts || nested.partsTotal || 0;
+          totals.shopSupplies = supplies || nested.shopSupplies || 0;
+          totals.tax = tax || nested.tax || 0;
+          totals.grandTotal = grand || nested.total || nested.grandTotal || 0;
+
+          // If no grand total but we have services, sum up service amounts
+          if (totals.grandTotal === 0 && estData.services && Array.isArray(estData.services)) {
+            let svcSum = 0;
+            for (const svc of estData.services) {
+              svcSum += (svc.amount || svc.total || svc.netTotal || 0);
+            }
+            if (svcSum > 0) { totals.labor = svcSum; totals.grandTotal = svcSum; }
+          }
+
+          totals.source = "api";
+          console.log(`${LOG} Phase 6: API totals: ${JSON.stringify(totals)}`);
+
+          // Debug: log raw estimate fields for troubleshooting
+          const debugFields = {};
+          for (const k of Object.keys(estData)) {
+            const v = estData[k];
+            if (typeof v === "number" || (typeof v === "string" && v.includes("$"))) {
+              debugFields[k] = v;
+            }
+          }
+          console.log(`${LOG} Phase 6: Estimate numeric fields: ${JSON.stringify(debugFields)}`);
+        }
       }
-    });
-    await sleep(1000);
+    } catch (apiErr) {
+      console.log(`${LOG} Phase 6: API totals failed: ${apiErr.message}`);
+    }
 
-    // Click "Labor summary" tab to read totals from the right panel
-    await page.evaluate(() => {
-      const tabs = Array.from(document.querySelectorAll("a[role='tab'], [class*='tabview-nav-link']"));
-      for (const tab of tabs) {
-        if (tab.textContent.includes("Labor summary")) { tab.click(); return; }
+    // Strategy 2: DOM scraping fallback — click Labor summary tab and parse
+    if (totals.grandTotal === 0) {
+      console.log(`${LOG} Phase 6: Falling back to DOM totals...`);
+      // Click Services tab, then Labor summary tab
+      await clickTab(page, "Services");
+      await sleep(1500);
+      await clickTab(page, "Labor summary");
+      await sleep(2000);
+
+      const domTotals = await readEstimateTotals(page);
+      console.log(`${LOG} Phase 6: DOM totals: ${JSON.stringify(domTotals)}`);
+      if (domTotals.grandTotal > 0 || domTotals.labor > 0) {
+        totals = { ...domTotals, source: "dom" };
       }
-    });
-    await sleep(2000);
+    }
 
-    // Read totals from page DOM
-    const totals = await readEstimateTotals(page);
-    console.log(`${LOG} Phase 6: Totals: ${JSON.stringify(totals)}`);
     result.totalLabor = totals.labor || 0;
     result.totalParts = totals.parts || 0;
     result.total = totals.grandTotal || (result.totalLabor + result.totalParts);
 
-    // Export PDF
+    // Export PDF via REST API first, puppeteer fallback
     console.log(`${LOG} Phase 6: Exporting PDF...`);
     const safeName = `${vehicle.year}-${vehicle.make}-${vehicle.model}`.replace(/[^a-zA-Z0-9\-]/g, "").replace(/\s+/g, "-");
     const pdfOutputPath = path.join(os.tmpdir(), `estimate-${safeName}-${Date.now()}.pdf`);
 
+    // Try REST API PDF download first
+    let pdfDone = false;
     try {
-      const pdfBuffer = await page.pdf({
-        format: "Letter",
-        printBackground: true,
-        margin: { top: "12mm", bottom: "12mm", left: "10mm", right: "10mm" },
-      });
-      fs.writeFileSync(pdfOutputPath, pdfBuffer);
-      result.pdfPath = pdfOutputPath;
-      console.log(`${LOG} Phase 6: PDF exported → ${pdfOutputPath} (${pdfBuffer.length} bytes)`);
-    } catch (pdfErr) {
-      console.log(`${LOG} Phase 6: PDF export failed: ${pdfErr.message}`);
-      result.warnings.push({ code: "PDF_FAILED", msg: pdfErr.message });
+      const { downloadEstimatePDF } = require("./autoleap-api");
+      const token = await getToken();
+      if (token && result.estimateId) {
+        const dlPath = await downloadEstimatePDF(token, result.estimateId, pdfOutputPath);
+        if (dlPath && fs.existsSync(dlPath)) {
+          result.pdfPath = dlPath;
+          const stat = fs.statSync(dlPath);
+          console.log(`${LOG} Phase 6: PDF via REST API → ${dlPath} (${stat.size} bytes)`);
+          pdfDone = true;
+        }
+      }
+    } catch (apiPdfErr) {
+      console.log(`${LOG} Phase 6: REST PDF failed: ${apiPdfErr.message}`);
+    }
+
+    // Fallback: puppeteer page.pdf()
+    if (!pdfDone) {
+      try {
+        const pdfBuffer = await page.pdf({
+          format: "Letter",
+          printBackground: true,
+          margin: { top: "12mm", bottom: "12mm", left: "10mm", right: "10mm" },
+        });
+        fs.writeFileSync(pdfOutputPath, pdfBuffer);
+        result.pdfPath = pdfOutputPath;
+        console.log(`${LOG} Phase 6: PDF via puppeteer → ${pdfOutputPath} (${pdfBuffer.length} bytes)`);
+      } catch (pdfErr) {
+        console.log(`${LOG} Phase 6: PDF export failed: ${pdfErr.message}`);
+        result.warnings.push({ code: "PDF_FAILED", msg: pdfErr.message });
+      }
     }
 
     result.success = true;
@@ -1400,6 +1458,39 @@ async function readEstimateTotals(page) {
 // ═══════════════════════════════════════════════════════════════════════════════
 // Shared Helpers
 // ═══════════════════════════════════════════════════════════════════════════════
+
+/**
+ * Click an AutoLeap tab by text (using includes, not exact match).
+ * PrimeNG tabs may have badge text appended (e.g. "Services 1").
+ */
+async function clickTab(page, tabText) {
+  const clicked = await page.evaluate((text) => {
+    // Try all tab-like elements
+    const selectors = "a[role='tab'], [class*='tabview-nav-link'], li[role='presentation'] a, [role='tab']";
+    const tabs = Array.from(document.querySelectorAll(selectors));
+    for (const tab of tabs) {
+      if (!tab.offsetParent) continue; // skip hidden
+      const t = tab.textContent.trim();
+      if (t.includes(text) || t.toLowerCase().includes(text.toLowerCase())) {
+        tab.click();
+        return { clicked: true, text: t };
+      }
+    }
+    // Fallback: try clicking parent li
+    for (const tab of tabs) {
+      const t = tab.textContent.trim();
+      if (t.includes(text) || t.toLowerCase().includes(text.toLowerCase())) {
+        const li = tab.closest("li");
+        if (li) { li.click(); return { clicked: true, text: t, via: "li" }; }
+      }
+    }
+    return { clicked: false, available: tabs.map(t => t.textContent.trim()).slice(0, 10) };
+  }, tabText);
+  if (!clicked.clicked) {
+    console.log(`${LOG} clickTab("${tabText}"): not found. Available: ${JSON.stringify(clicked.available)}`);
+  }
+  return clicked.clicked;
+}
 
 function sleep(ms) {
   return new Promise((r) => setTimeout(r, ms));

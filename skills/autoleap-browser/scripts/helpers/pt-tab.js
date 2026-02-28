@@ -39,12 +39,15 @@ async function openPartsTechTab(page, browser, estimateId, vehicleId) {
         console.log(`${LOG} Calling createPartsTechQuote API...`);
         const quoteResult = await createPartsTechQuote(token, estimateId, vehicleId);
 
-        if (quoteResult && quoteResult.redirectUrl) {
-          console.log(`${LOG} Got SSO URL: ${quoteResult.redirectUrl.substring(0, 100)}...`);
+        // API returns { status, response: { sessionId, redirectUrl }, error }
+        const redirectUrl = quoteResult?.redirectUrl || quoteResult?.response?.redirectUrl;
+
+        if (redirectUrl) {
+          console.log(`${LOG} Got SSO URL: ${redirectUrl.substring(0, 100)}...`);
 
           // Open the SSO URL in a NEW tab (AutoLeap uses _self, but we want a separate tab)
           const ptPage = await browser.newPage();
-          await ptPage.goto(quoteResult.redirectUrl, {
+          await ptPage.goto(redirectUrl, {
             waitUntil: "domcontentloaded",
             timeout: 30000,
           });
