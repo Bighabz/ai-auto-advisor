@@ -427,6 +427,20 @@ async function downloadEstimatePDF(token, estimateId, outputPath) {
   }
 }
 
+/**
+ * Get PartsTech SSO redirect URL via AutoLeap API.
+ * Calls GET /partstech/create/qoute?orderId=xxx&vehicleId=yyy
+ * Returns { redirectUrl } which can be opened in a browser tab.
+ */
+async function createPartsTechQuote(token, estimateId, vehicleId) {
+  const qs = `orderId=${estimateId}&vehicleId=${vehicleId}`;
+  const res = await apiCall("GET", `/partstech/create/qoute?${qs}`, null, token);
+  if (res.status >= 200 && res.status < 300 && res.data) {
+    return res.data;
+  }
+  throw new Error(`createPartsTechQuote failed: ${res.status} ${JSON.stringify(res.data || res.raw || "").substring(0, 200)}`);
+}
+
 module.exports = {
   getToken,
   searchCustomer,
@@ -435,4 +449,5 @@ module.exports = {
   createEstimate,
   getEstimate,
   downloadEstimatePDF,
+  createPartsTechQuote,
 };

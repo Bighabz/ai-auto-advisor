@@ -94,6 +94,7 @@ async function runPlaybook({ customer, vehicle, diagnosis, parts, progressCallba
 
     result.estimateId = createResult.estimateId;
     result.roNumber = createResult.roNumber;
+    result.vehicleId = createResult.vehicleId;
     console.log(`${LOG} Phase 2: "Save & Create Estimate" → ${result.roNumber || result.estimateId}`);
 
     // Debug: check estimate via API to verify vehicle linkage
@@ -624,7 +625,7 @@ async function runPlaybook({ customer, vehicle, diagnosis, parts, progressCallba
       await progress(progressCallback, "adding_parts");
       console.log(`${LOG} Phase 4: Opening PartsTech tab...`);
 
-      const { ptPage, isIframe } = await openPartsTechTab(page, browser);
+      const { ptPage, isIframe } = await openPartsTechTab(page, browser, result.estimateId, result.vehicleId);
 
       // Get the working page for PartsTech (either new tab or iframe content)
       let ptWorkPage = ptPage;
@@ -737,6 +738,15 @@ async function runPlaybook({ customer, vehicle, diagnosis, parts, progressCallba
 
     // Save
     await saveEstimate(page);
+
+    // Navigate to Services tab first (makes Save button visible)
+    await page.evaluate(() => {
+      const tabs = Array.from(document.querySelectorAll("a[role='tab'], [class*='tabview-nav-link']"));
+      for (const tab of tabs) {
+        if (tab.textContent.trim() === "Services") { tab.click(); return; }
+      }
+    });
+    await sleep(1000);
 
     // Click "Labor summary" tab to read totals from the right panel
     await page.evaluate(() => {
@@ -1113,6 +1123,7 @@ async function createEstimateWithCustomerVehicle(page, customer, vehicle) {
     success: true,
     estimateId,
     roNumber,
+    vehicleId: vehicleId || null,
     vehicleInPage: vehiclePageCheck.vehicleInText || !!vehiclePageCheck.inputValue,
   };
 }
@@ -1265,12 +1276,42 @@ async function readEstimateTotals(page) {
     const result = { labor: 0, parts: 0, shopSupplies: 0, tax: 0, grandTotal: 0, debug: {} };
     const allText = document.body.innerText || "";
 
-    // Strategy 1: Parse "Service total" / "Service net total" patterns
-    // AutoLeap shows these near each service group and at the footer
-    const serviceTotalMatch = allText.match(/Service\s+(?:net\s+)?total[:\s]*\$?([\d,.]+)/i);
-    if (serviceTotalMatch) {
-      result.labor = parseFloat(serviceTotalMatch[1].replace(/,/g, "")) || 0;
-      result.debug.serviceTotalText = serviceTotalMatch[0];
+    // Strategy 1: Parse "Service net total" and "Subtotal" from the Labor summary tab
+    // AutoLeap shows these as text labels followed by dollar amounts on subsequent lines.
+    // The innerText has line breaks, so parse line-by-line.
+    const lines = allText.split("\n").map(l => l.trim()).filter(l => l.length > 0);
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i];
+      // "Service net total" — followed by the labor+service total on a nearby line
+      if (line === "Service net total" || line.toLowerCase().includes("service net total")) {
+        // Next dollar amount is the service total
+        for (let j = i + 1; j < Math.min(i + 5, lines.length); j++) {
+          const match = lines[j].match(/^\$?([\d,.]+)$/);
+          if (match) {
+            const val = parseFloat(match[1].replace(/,/g, ""));
+            if (val > 0) { result.labor = val; result.debug.laborSource = "service-net-total"; break; }
+          }
+        }
+      }
+      // "Subtotal" — the estimate subtotal before tax
+      if (line === "Subtotal" || line.toLowerCase() === "subtotal") {
+        for (let j = i + 1; j < Math.min(i + 5, lines.length); j++) {
+          const match = lines[j].match(/^\$?([\d,.]+)$/);
+          if (match) {
+            const val = parseFloat(match[1].replace(/,/g, ""));
+            if (val > 0 && result.grandTotal === 0) { result.grandTotal = val; result.debug.grandTotalSource = "subtotal"; break; }
+          }
+        }
+      }
+    }
+
+    // Fallback: regex match on full text
+    if (result.labor === 0) {
+      const serviceTotalMatch = allText.match(/Service\s+(?:net\s+)?total[\s\S]{0,30}?\$([\d,.]+)/i);
+      if (serviceTotalMatch) {
+        result.labor = parseFloat(serviceTotalMatch[1].replace(/,/g, "")) || 0;
+        result.debug.laborSource = "regex-fallback";
+      }
     }
 
     // Strategy 2: Look for individual service line amounts in the DOM

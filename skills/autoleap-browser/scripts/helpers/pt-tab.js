@@ -2,94 +2,85 @@
  * PartsTech New-Tab Flow
  *
  * Handles the PartsTech integration through AutoLeap's "Parts ordering" tab.
- * Opens PartsTech in a new browser tab (SSO), searches for parts,
- * adds cheapest in-stock to cart, and submits quote back to AutoLeap.
+ * Opens PartsTech via direct API call (bypasses UI if-disabled button),
+ * searches for parts, adds cheapest in-stock to cart, and submits quote
+ * back to AutoLeap.
+ *
+ * Key insight from Angular source analysis:
+ * - AutoLeap's createQoute API: GET /api/v1/partstech/create/qoute?orderId=xxx&vehicleId=yyy
+ * - Returns { redirectUrl } which is the PartsTech SSO URL
+ * - Angular opens it with window.open(url, "_self") — same tab, not new tab
+ * - We open it in a NEW tab instead, so we can interact with both pages
  */
 
 const { PARTS_TAB, PARTSTECH } = require("./selectors");
+const { getToken, createPartsTechQuote } = require("../autoleap-api");
 
 const LOG = "[playbook:pt-tab]";
 
 /**
- * Click the "Parts ordering" tab in AutoLeap estimate and click the + button
- * to open a PartsTech tab via SSO.
+ * Open PartsTech via direct API call, bypassing the disabled UI button.
  *
  * @param {import('puppeteer-core').Page} page - AutoLeap estimate page
  * @param {import('puppeteer-core').Browser} browser - Browser instance
+ * @param {string} estimateId - AutoLeap estimate ObjectId
+ * @param {string} vehicleId - AutoLeap vehicle ObjectId
  * @returns {{ ptPage: import('puppeteer-core').Page|null, isIframe: boolean }}
  */
-async function openPartsTechTab(page, browser) {
-  console.log(`${LOG} Clicking "Parts ordering" tab...`);
+async function openPartsTechTab(page, browser, estimateId, vehicleId) {
+  console.log(`${LOG} Opening PartsTech via direct API...`);
 
-  // Click the Parts ordering tab
-  await clickByTextFallback(page, [
-    PARTS_TAB.TAB,
-  ], "Parts ordering");
+  // Strategy 1: Call the AutoLeap API directly to get the SSO redirect URL
+  // This bypasses the if-disabled button entirely
+  if (estimateId && vehicleId) {
+    try {
+      const token = await getToken();
+      if (token) {
+        console.log(`${LOG} Calling createPartsTechQuote API...`);
+        const quoteResult = await createPartsTechQuote(token, estimateId, vehicleId);
+
+        if (quoteResult && quoteResult.redirectUrl) {
+          console.log(`${LOG} Got SSO URL: ${quoteResult.redirectUrl.substring(0, 100)}...`);
+
+          // Open the SSO URL in a NEW tab (AutoLeap uses _self, but we want a separate tab)
+          const ptPage = await browser.newPage();
+          await ptPage.goto(quoteResult.redirectUrl, {
+            waitUntil: "domcontentloaded",
+            timeout: 30000,
+          });
+          // Wait for SSO redirect to complete
+          await sleep(5000);
+
+          console.log(`${LOG} PartsTech tab opened: ${ptPage.url().substring(0, 80)}`);
+
+          // Check if we landed on an error page
+          const ptUrl = ptPage.url();
+          if (ptUrl.includes("chrome-error") || ptUrl === "about:blank") {
+            console.log(`${LOG} PartsTech SSO failed (error page) — closing tab`);
+            await ptPage.close();
+            return { ptPage: null, isIframe: false };
+          }
+
+          return { ptPage, isIframe: false };
+        } else {
+          console.log(`${LOG} API returned no redirectUrl: ${JSON.stringify(quoteResult).substring(0, 200)}`);
+        }
+      }
+    } catch (apiErr) {
+      console.log(`${LOG} Direct API approach failed: ${apiErr.message}`);
+    }
+  }
+
+  // Strategy 2: Try clicking the PartsTech button (may be disabled)
+  console.log(`${LOG} Falling back to UI button click...`);
+  await clickByTextFallback(page, [PARTS_TAB.TAB], "Parts ordering");
   await sleep(3000);
-
-  // Screenshot the Parts ordering tab content
-  await page.screenshot({ path: "/tmp/debug-parts-ordering-tab.png" });
-
-  // Debug: dump what's visible on the Parts ordering tab
-  const partsTabDump = await page.evaluate(() => {
-    const visibleButtons = Array.from(document.querySelectorAll("button, a, [role='button']"))
-      .filter(b => b.offsetParent !== null)
-      .map(b => ({
-        text: b.textContent.trim().substring(0, 50),
-        class: (b.className || "").substring(0, 50),
-        tag: b.tagName,
-      }))
-      .filter(b => b.text.length > 0)
-      .slice(0, 20);
-    // Look for any PartsTech-related elements
-    const ptElements = Array.from(document.querySelectorAll('[class*="partstech" i], [class*="parts-tech" i], [data-integration*="partstech" i], [class*="integration" i]'))
-      .map(el => ({
-        tag: el.tagName,
-        class: (el.className || "").substring(0, 60),
-        text: el.textContent.trim().substring(0, 50),
-        visible: el.offsetParent !== null,
-      }))
-      .slice(0, 10);
-    // Look for any + or add buttons
-    const addBtns = Array.from(document.querySelectorAll("button, a"))
-      .filter(b => b.offsetParent !== null && (b.textContent.trim() === "+" || b.textContent.trim().includes("Add") || b.textContent.trim().includes("Order")))
-      .map(b => ({
-        text: b.textContent.trim().substring(0, 30),
-        class: (b.className || "").substring(0, 50),
-        tag: b.tagName,
-      }))
-      .slice(0, 10);
-    return { visibleButtons, ptElements, addBtns };
-  });
-  console.log(`${LOG} Parts tab buttons: ${JSON.stringify(partsTabDump.visibleButtons)}`);
-  console.log(`${LOG} PartsTech elements: ${JSON.stringify(partsTabDump.ptElements)}`);
-  console.log(`${LOG} Add/+ buttons: ${JSON.stringify(partsTabDump.addBtns)}`);
-
-  // Wait for PartsTech card
-  let ptCardFound = false;
-  try {
-    await page.waitForSelector(PARTS_TAB.PT_CARD.split(", ")[0], { timeout: 5000 });
-    ptCardFound = true;
-  } catch {
-    // Try broader selector
-    ptCardFound = await page.evaluate(() => {
-      return !!document.querySelector('[class*="partstech"], [data-integration*="partstech"]');
-    });
-  }
-
-  if (!ptCardFound) {
-    // Try finding ANY + button on the parts tab (the PartsTech add button)
-    console.log(`${LOG} PartsTech card not found by selector — trying + buttons directly...`);
-  }
-
-  console.log(`${LOG} Clicking PartsTech + button to open new tab...`);
 
   // Set up new tab listener BEFORE clicking
   const newTabPromise = new Promise((resolve) => {
     const timeout = setTimeout(() => resolve(null), 15000);
     browser.once("targetcreated", async (target) => {
       clearTimeout(timeout);
-      // Wait for SSO redirect to complete
       await sleep(5000);
       try {
         const newPage = await target.page();
@@ -100,39 +91,9 @@ async function openPartsTechTab(page, browser) {
     });
   });
 
-  // Debug: dump the exact PartsTech card structure to find the "+" button element
-  const ptCardDebug = await page.evaluate(() => {
-    // Find the PartsTech card specifically (not Manual Ordering)
-    const cards = Array.from(document.querySelectorAll('.ro-partstech-new, .ro-partstech-inner'))
-      .filter(el => el.offsetParent !== null && el.textContent.includes("PartsTech") && !el.textContent.includes("manual"));
-    if (cards.length === 0) return { found: false };
-
-    // Get the outermost card
-    const card = cards[cards.length - 1];
-    // Dump ALL children to find the "+" element
-    const children = Array.from(card.querySelectorAll("*"))
-      .filter(el => el.offsetParent !== null)
-      .map(el => ({
-        tag: el.tagName,
-        class: (el.className || "").substring(0, 60),
-        text: el.textContent.trim().substring(0, 20),
-        hasClick: typeof el.onclick === "function",
-        role: el.getAttribute("role") || "",
-        cursor: window.getComputedStyle(el).cursor,
-      }))
-      .slice(0, 30);
-    return { found: true, children };
-  });
-  console.log(`${LOG} PT card children: ${JSON.stringify(ptCardDebug)}`);
-
-  // Click the PartsTech "+" button using puppeteer native click for proper event dispatch
-  // The "+" button is inside a .ro-partstech-new card with "PartsTech" text
-  let ptBtnClicked = { clicked: false };
-
-  // Strategy 1: Find PartsTech card, then click the teal "+" element inside it
+  // Find and click the PartsTech button
   const ptBtnSelector = await page.evaluate(() => {
-    // Find all ro-partstech-new cards
-    const cards = Array.from(document.querySelectorAll('.ro-partstech-new'))
+    const cards = Array.from(document.querySelectorAll(".ro-partstech-new"))
       .filter(el => el.offsetParent !== null);
 
     for (const card of cards) {
@@ -140,137 +101,61 @@ async function openPartsTechTab(page, browser) {
       if (!text.includes("PartsTech")) continue;
       if (text.includes("manual") || text.includes("Manual")) continue;
 
-      // Look for ANY element that could be the "+" button
       const allEls = Array.from(card.querySelectorAll("*")).filter(el => el.offsetParent !== null);
 
-      // Priority 1: element with "+" text
+      // Find the button with fa-plus icon
+      for (const el of allEls) {
+        if (el.tagName === "BUTTON" && el.querySelector("i.fa-plus, i[class*='fa-plus']")) {
+          el.setAttribute("data-pt-plus", "true");
+          return { found: true, tag: "BUTTON", strategy: "button-with-plus-icon" };
+        }
+      }
+
+      // Find via plus text
       for (const el of allEls) {
         const ownText = el.childNodes.length <= 1 ? el.textContent.trim() : "";
-        if (ownText === "+" || ownText === "+") {
+        if (ownText === "+") {
           el.setAttribute("data-pt-plus", "true");
-          return { found: true, tag: el.tagName, text: ownText, strategy: "plus-text" };
+          return { found: true, tag: el.tagName, strategy: "plus-text" };
         }
-      }
-
-      // Priority 2: find the BUTTON directly (it contains an <i class="fa-plus"> icon)
-      // The button has class "p-element btn btn-primary"
-      for (const el of allEls) {
-        if (el.tagName === "BUTTON" && el.querySelector("i.fa-plus, i[class*='fa-plus'], .pi-plus")) {
-          el.setAttribute("data-pt-plus", "true");
-          return { found: true, tag: "BUTTON", text: "+btn", strategy: "button-with-plus-icon" };
-        }
-      }
-
-      // Priority 2b: if no button found, find the <i> icon and navigate to button ancestor
-      for (const el of allEls) {
-        if (el.tagName === "I" && el.classList.contains("fa-plus")) {
-          const btn = el.closest("button");
-          if (btn) {
-            btn.setAttribute("data-pt-plus", "true");
-            return { found: true, tag: "BUTTON", text: "+icon-ancestor", strategy: "fa-plus-to-button" };
-          }
-        }
-      }
-
-      // Priority 3: element with cursor:pointer that's small (likely a button)
-      for (const el of allEls) {
-        const style = window.getComputedStyle(el);
-        const rect = el.getBoundingClientRect();
-        if (style.cursor === "pointer" && rect.width < 60 && rect.height < 60 && rect.width > 10) {
-          el.setAttribute("data-pt-plus", "true");
-          return { found: true, tag: el.tagName, text: el.textContent.trim().substring(0, 10), strategy: "cursor-pointer" };
-        }
-      }
-
-      // Priority 4: last interactive-looking element in the card
-      const interactives = allEls.filter(el => {
-        const tag = el.tagName;
-        return tag === "BUTTON" || tag === "A" || el.getAttribute("role") === "button" ||
-          el.classList.contains("pointer") || el.style.cursor === "pointer";
-      });
-      if (interactives.length > 0) {
-        const target = interactives[interactives.length - 1];
-        target.setAttribute("data-pt-plus", "true");
-        return { found: true, tag: target.tagName, text: target.textContent.trim().substring(0, 10), strategy: "last-interactive" };
       }
     }
     return { found: false };
   });
 
-  console.log(`${LOG} PT button located: ${JSON.stringify(ptBtnSelector)}`);
-
   if (ptBtnSelector.found) {
-    const isDisabled = await page.evaluate(() => {
-      const el = document.querySelector('[data-pt-plus="true"]');
-      return el ? el.className.includes("if-disabled") : false;
-    });
-    console.log(`${LOG} PT button if-disabled: ${isDisabled}`);
-
-    if (isDisabled) {
-      // Force-enable the button: remove if-disabled class, disabled attr, and CSS blocks
-      await page.evaluate(() => {
-        const el = document.querySelector('[data-pt-plus="true"]');
-        if (el) {
-          el.classList.remove("if-disabled");
-          el.removeAttribute("disabled");
-          el.style.pointerEvents = "auto";
-          el.style.opacity = "1";
-        }
-      });
-      await sleep(200);
-    }
-
-    // Intercept window.open to capture the PT SSO URL (AutoLeap opens PT in a new tab)
+    // Force-enable if disabled
     await page.evaluate(() => {
-      window.__ptSsoUrl = null;
-      const origOpen = window.open;
-      window.open = function(url, ...args) {
-        window.__ptSsoUrl = url;
-        return origOpen.call(this, url, ...args);
-      };
+      const el = document.querySelector('[data-pt-plus="true"]');
+      if (el) {
+        el.classList.remove("if-disabled");
+        el.removeAttribute("disabled");
+        el.style.pointerEvents = "auto";
+        el.style.opacity = "1";
+      }
     });
+    await sleep(200);
 
-    // Use puppeteer native click instead of JS click for proper event dispatch
     try {
       const markedEl = await page.$('[data-pt-plus="true"]');
-      if (markedEl) {
-        await markedEl.click();
-        ptBtnClicked = { clicked: true, btnText: ptBtnSelector.text, strategy: ptBtnSelector.strategy };
-      }
+      if (markedEl) await markedEl.click();
     } catch (clickErr) {
-      console.log(`${LOG} Puppeteer click failed: ${clickErr.message} — trying JS click`);
-      await page.evaluate(() => {
-        const el = document.querySelector('[data-pt-plus="true"]');
-        if (el) el.click();
-      });
-      ptBtnClicked = { clicked: true, btnText: ptBtnSelector.text, strategy: ptBtnSelector.strategy + "-js" };
+      console.log(`${LOG} Button click failed: ${clickErr.message}`);
     }
 
-    // Check if window.open was called (captured SSO URL)
-    await sleep(2000);
-    const ssoUrl = await page.evaluate(() => window.__ptSsoUrl);
-    if (ssoUrl) {
-      console.log(`${LOG} Captured PT SSO URL: ${ssoUrl.substring(0, 120)}`);
-    }
-
-    // Clean up marker and interceptor
     await page.evaluate(() => {
       const el = document.querySelector('[data-pt-plus="true"]');
       if (el) el.removeAttribute("data-pt-plus");
     });
   }
 
-  console.log(`${LOG} PartsTech button click: ${JSON.stringify(ptBtnClicked)}`);
-
   const ptPage = await newTabPromise;
-
   if (ptPage) {
-    console.log(`${LOG} PartsTech tab opened: ${ptPage.url().substring(0, 80)}`);
+    console.log(`${LOG} PartsTech tab opened via button: ${ptPage.url().substring(0, 80)}`);
     return { ptPage, isIframe: false };
   }
 
-  // Fallback: check for iframe
-  console.log(`${LOG} No new tab detected — checking for iframe...`);
+  // Check for iframe fallback
   const hasIframe = await page.$(PARTS_TAB.PT_IFRAME);
   if (hasIframe) {
     console.log(`${LOG} Found PartsTech iframe`);
@@ -283,10 +168,6 @@ async function openPartsTechTab(page, browser) {
 
 /**
  * Search for a part in PartsTech and add the cheapest in-stock to cart.
- *
- * @param {import('puppeteer-core').Page} ptPage - PartsTech tab page
- * @param {string} searchTerm - Part to search for (e.g., "catalytic converter")
- * @returns {{ success: boolean, partDetails?: object, error?: string }}
  */
 async function searchAndAddToCart(ptPage, searchTerm) {
   console.log(`${LOG} Searching PartsTech for: "${searchTerm}"`);
@@ -304,7 +185,6 @@ async function searchAndAddToCart(ptPage, searchTerm) {
   try {
     searchInput = await ptPage.waitForSelector(PARTSTECH.SEARCH_INPUT.split(", ")[0], { timeout: 10000 });
   } catch {
-    // Try other selectors
     for (const sel of PARTSTECH.SEARCH_INPUT.split(", ")) {
       searchInput = await ptPage.$(sel);
       if (searchInput) break;
@@ -343,9 +223,7 @@ async function searchAndAddToCart(ptPage, searchTerm) {
       ),
       ptPage.waitForSelector(PARTSTECH.PRODUCT_CARD.split(", ")[0], { timeout: 15000 }),
     ]);
-  } catch {
-    // Check if we at least have some content
-  }
+  } catch { /* check if we at least have some content */ }
 
   // Settle time for all supplier results
   await sleep(4000);
@@ -375,11 +253,9 @@ async function searchAndAddToCart(ptPage, searchTerm) {
       let bestDetails = null;
 
       for (const card of cards) {
-        // Skip out-of-stock
         const oos = card.querySelector(oosSelector);
         if (oos) continue;
 
-        // Find add-to-cart button
         let btn = null;
         for (const text of cartBtnTexts) {
           btn = Array.from(card.querySelectorAll("button")).find(
@@ -389,7 +265,6 @@ async function searchAndAddToCart(ptPage, searchTerm) {
         }
         if (!btn) continue;
 
-        // Find price
         let priceEl = null;
         for (const sel of priceSels) {
           priceEl = card.querySelector(sel);
@@ -433,14 +308,11 @@ async function searchAndAddToCart(ptPage, searchTerm) {
 
   console.log(`${LOG} Cheapest in-stock: ${found.brand} $${found.price} (${found.partNumber})`);
 
-  // Click the marked button
   const marked = await ptPage.$('button[data-sam-cheapest="true"]');
   if (!marked) {
     return { success: false, error: "Cheapest part button lost after evaluation" };
   }
   await marked.click();
-
-  // Wait for cart confirmation
   await sleep(3000);
   console.log(`${LOG} Part added to cart`);
 
@@ -449,20 +321,14 @@ async function searchAndAddToCart(ptPage, searchTerm) {
 
 /**
  * Go to cart and submit quote back to AutoLeap.
- *
- * @param {import('puppeteer-core').Page} ptPage - PartsTech tab page
- * @param {import('puppeteer-core').Page} alPage - AutoLeap estimate page
- * @returns {{ success: boolean, error?: string }}
  */
 async function submitCartToAutoLeap(ptPage, alPage) {
   console.log(`${LOG} Navigating to cart review...`);
 
-  // Click cart icon/link
   try {
     await clickByTextFallback(ptPage, [PARTSTECH.CART_LINK], "Cart");
     await sleep(3000);
   } catch {
-    // Try direct navigation
     try {
       await ptPage.goto("https://app.partstech.com/review-cart", {
         waitUntil: "domcontentloaded",
@@ -476,7 +342,6 @@ async function submitCartToAutoLeap(ptPage, alPage) {
 
   console.log(`${LOG} Clicking "Submit quote"...`);
 
-  // Click submit quote
   try {
     await clickByTextFallback(ptPage, [PARTSTECH.SUBMIT_QUOTE], "Submit quote");
   } catch (e) {
@@ -503,7 +368,6 @@ async function submitCartToAutoLeap(ptPage, alPage) {
   console.log(`${LOG} Waiting for parts sync...`);
   await sleep(5000);
 
-  // Check if parts appeared in AutoLeap
   try {
     await Promise.race([
       alPage.waitForResponse(
@@ -514,7 +378,7 @@ async function submitCartToAutoLeap(ptPage, alPage) {
       ),
       sleep(8000),
     ]);
-  } catch { /* sync check optional — parts may already be there */ }
+  } catch { /* sync check optional */ }
 
   console.log(`${LOG} Parts submitted to AutoLeap`);
   return { success: true };
@@ -526,9 +390,6 @@ function sleep(ms) {
   return new Promise((r) => setTimeout(r, ms));
 }
 
-/**
- * Try clicking by CSS selector first, fall back to text search.
- */
 async function clickByTextFallback(page, selectors, textHint) {
   for (const sel of selectors) {
     for (const s of sel.split(", ")) {
@@ -542,7 +403,6 @@ async function clickByTextFallback(page, selectors, textHint) {
     }
   }
 
-  // Text fallback
   if (textHint) {
     const clicked = await page.evaluate((text) => {
       const els = Array.from(document.querySelectorAll("button, a, [role='button'], [role='tab']"));
