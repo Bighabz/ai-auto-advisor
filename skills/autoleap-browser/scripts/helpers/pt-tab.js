@@ -423,11 +423,66 @@ async function submitCartToAutoLeap(ptPage, alPage) {
 
   console.log(`${LOG} Clicking "Submit quote"...`);
 
-  try {
-    await clickByTextFallback(ptPage, [PARTSTECH.SUBMIT_QUOTE], "Submit quote");
-  } catch (e) {
-    return { success: false, error: `Submit quote button not found: ${e.message}` };
+  // Use Puppeteer's trusted click (not DOM el.click()) — React may require trusted events
+  const submitResult = await ptPage.evaluate(() => {
+    const btns = Array.from(document.querySelectorAll("button")).filter(
+      b => b.offsetParent !== null && b.textContent.trim().includes("Submit quote")
+    );
+    if (btns.length === 0) return { found: false };
+    const btn = btns[0];
+    btn.setAttribute("data-sam-submit", "true");
+    const rect = btn.getBoundingClientRect();
+    return { found: true, x: rect.x + rect.width / 2, y: rect.y + rect.height / 2, text: btn.textContent.trim() };
+  });
+
+  if (!submitResult.found) {
+    // Fallback to Transfer button
+    const transferResult = await ptPage.evaluate(() => {
+      const btns = Array.from(document.querySelectorAll("button")).filter(
+        b => b.offsetParent !== null && b.textContent.trim().includes("Transfer")
+      );
+      if (btns.length === 0) return { found: false };
+      const btn = btns[0];
+      const rect = btn.getBoundingClientRect();
+      return { found: true, x: rect.x + rect.width / 2, y: rect.y + rect.height / 2, text: btn.textContent.trim() };
+    });
+    if (transferResult.found) {
+      await ptPage.mouse.click(transferResult.x, transferResult.y);
+      console.log(`${LOG} Clicked Transfer button at (${Math.round(transferResult.x)}, ${Math.round(transferResult.y)})`);
+    } else {
+      return { success: false, error: "Submit quote / Transfer button not found" };
+    }
+  } else {
+    console.log(`${LOG} Clicking Submit at (${Math.round(submitResult.x)}, ${Math.round(submitResult.y)})`);
+    await ptPage.mouse.click(submitResult.x, submitResult.y);
   }
+
+  // Wait a moment for the submit to process
+  await sleep(3000);
+
+  // Check for confirmation dialog
+  const confirmCheck = await ptPage.evaluate(() => {
+    const btns = Array.from(document.querySelectorAll("button")).filter(
+      b => b.offsetParent !== null && /confirm|yes|ok|continue/i.test(b.textContent.trim())
+    );
+    return btns.map(b => ({ text: b.textContent.trim().substring(0, 30) }));
+  });
+  if (confirmCheck.length > 0) {
+    console.log(`${LOG} Found confirmation buttons: ${JSON.stringify(confirmCheck)}`);
+    // Click the first confirm-like button
+    await ptPage.evaluate(() => {
+      const btns = Array.from(document.querySelectorAll("button")).filter(
+        b => b.offsetParent !== null && /confirm|yes|ok|continue/i.test(b.textContent.trim())
+      );
+      if (btns[0]) btns[0].click();
+    });
+    await sleep(2000);
+  }
+
+  // Screenshot after submit attempt
+  try {
+    await ptPage.screenshot({ path: "/tmp/debug-pt-after-submit.png" });
+  } catch { /* tab may be closed */ }
 
   // Wait for tab to close OR timeout
   console.log(`${LOG} Waiting for PartsTech tab to close...`);
@@ -439,6 +494,12 @@ async function submitCartToAutoLeap(ptPage, alPage) {
       sleep(15000),
     ]);
   } catch { /* tab may already be closed */ }
+
+  // Check if tab actually closed
+  try {
+    const stillOpen = !ptPage.isClosed();
+    console.log(`${LOG} PartsTech tab ${stillOpen ? "still open" : "closed"}: ${stillOpen ? ptPage.url().substring(0, 80) : "closed"}`);
+  } catch { /* tab closed */ }
 
   // Return focus to AutoLeap
   try {
