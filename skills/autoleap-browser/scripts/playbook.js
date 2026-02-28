@@ -706,11 +706,20 @@ async function runPlaybook({ customer, vehicle, diagnosis, parts, progressCallba
 
     // ═══════════════════════════════════════════════════════════════════════════
     // PHASE 5: Link Parts to Labor (Step 12) — THE PROFIT STEP
+    //
+    // After PartsTech quote submit, AutoLeap needs a page reload to show the
+    // imported parts. We opened PT in a new tab, so Angular doesn't auto-refresh.
     // ═══════════════════════════════════════════════════════════════════════════
     if (result.partsAdded.length > 0 && motorResult.success) {
       await progress(progressCallback, "linking_parts");
-      console.log(`${LOG} Phase 5: Linking parts to labor service...`);
+      console.log(`${LOG} Phase 5: Reloading estimate to pick up PartsTech parts...`);
 
+      // Reload estimate page to force Angular to fetch imported parts
+      const estUrl = `${AUTOLEAP_APP_URL}/#/estimate/${result.estimateId}`;
+      await page.goto(estUrl, { waitUntil: "domcontentloaded", timeout: 30000 });
+      await sleep(5000);
+
+      console.log(`${LOG} Phase 5: Linking parts to labor service...`);
       const linkResult = await linkPartsToServices(page, result.partsAdded, motorResult);
       if (linkResult.linked > 0) {
         console.log(`${LOG} Phase 5: Markup matrix triggered (${linkResult.linked} parts linked)`);
@@ -1176,110 +1185,164 @@ async function createEstimateWithCustomerVehicle(page, customer, vehicle) {
 
 async function linkPartsToServices(page, addedParts, laborResult) {
   let linked = 0;
-
-  // Switch to Parts ordering tab
-  await page.evaluate(() => {
-    const tabs = Array.from(document.querySelectorAll('button[role="tab"], [class*="tab"]'));
-    for (const tab of tabs) {
-      if ((tab.textContent || "").includes("Parts ordering") || (tab.textContent || "").includes("Parts")) {
-        tab.click();
-        return;
-      }
-    }
-  });
-  await sleep(2000);
-
-  // Find part rows and their service dropdowns
   const serviceName = laborResult.procedure || "";
 
-  for (const part of addedParts) {
+  // Switch to Services tab first — parts are listed under services in AutoLeap
+  await clickTab(page, "Services");
+  await sleep(2000);
+
+  // Take debug screenshot to see what's on the page
+  try {
+    await page.screenshot({ path: "/tmp/debug-phase5-services.png" });
+  } catch { /* optional */ }
+
+  // Debug: check what's visible in the services area
+  const pageState = await page.evaluate(() => {
+    const allText = document.body.innerText || "";
+    const lines = allText.split("\n").map(l => l.trim()).filter(l => l.length > 0);
+    // Find lines with "Select service", "$", or "PartsTech"
+    const relevantLines = lines.filter(l =>
+      l.includes("Select service") || l.includes("PartsTech") ||
+      l.includes("Catalytic") || l.includes("MOTOR") || l.includes("Catco")
+    ).slice(0, 15);
+
+    // Find all dropdowns/selects
+    const dropdowns = Array.from(document.querySelectorAll("p-dropdown, select, [class*='dropdown']"))
+      .filter(el => el.offsetParent !== null)
+      .slice(0, 10)
+      .map(el => ({
+        tag: el.tagName,
+        cls: (el.className || "").substring(0, 50),
+        text: (el.textContent || "").trim().substring(0, 40),
+        rect: (() => { const r = el.getBoundingClientRect(); return { x: Math.round(r.x), y: Math.round(r.y), w: Math.round(r.width) }; })(),
+      }));
+
+    // Find "Select service" text elements (the dropdown placeholder)
+    const selectServiceEls = Array.from(document.querySelectorAll("*")).filter(
+      el => el.offsetParent !== null && el.textContent.trim() === "Select service" && el.children.length === 0
+    ).slice(0, 5).map(el => ({
+      tag: el.tagName,
+      cls: (el.className || "").substring(0, 50),
+      rect: (() => { const r = el.getBoundingClientRect(); return { x: Math.round(r.x), y: Math.round(r.y) }; })(),
+    }));
+
+    return { relevantLines, dropdowns: dropdowns.length, selectServiceEls };
+  });
+  console.log(`${LOG} Phase 5 page state: ${JSON.stringify(pageState)}`);
+
+  // Now try Parts ordering tab
+  await clickTab(page, "Parts ordering");
+  await sleep(2000);
+
+  try {
+    await page.screenshot({ path: "/tmp/debug-phase5-parts.png" });
+  } catch { /* optional */ }
+
+  // Debug: dump parts tab content
+  const partsState = await page.evaluate(() => {
+    const allText = document.body.innerText || "";
+    const lines = allText.split("\n").map(l => l.trim()).filter(l => l.length > 0);
+    const relevantLines = lines.filter(l =>
+      l.includes("$") || l.includes("Select") || l.includes("Catalytic") ||
+      l.includes("Catco") || l.includes("PartsTech") || l.includes("service")
+    ).slice(0, 20);
+
+    // Find part rows — look for rows containing both a price and "Select service"
+    const rows = Array.from(document.querySelectorAll("tr")).filter(r => {
+      const text = r.textContent || "";
+      return text.includes("$") && r.offsetParent !== null;
+    }).slice(0, 5).map(r => ({
+      text: (r.textContent || "").trim().substring(0, 100),
+      cells: r.cells ? r.cells.length : 0,
+    }));
+
+    return { relevantLines, rows };
+  });
+  console.log(`${LOG} Phase 5 parts state: ${JSON.stringify(partsState)}`);
+
+  // Strategy: Find ALL "Select service" dropdowns (unlinked parts) and link them
+  // AutoLeap shows imported parts with a "Select service" dropdown
+  // When clicked, it shows a list of services including our MOTOR labor
+  const unlinkedCount = await page.evaluate(() => {
+    // Find "Select service" placeholder text elements
+    return Array.from(document.querySelectorAll("*")).filter(
+      el => el.offsetParent !== null &&
+        (el.textContent.trim() === "Select service" || el.textContent.trim() === "Select Service") &&
+        el.children.length <= 1
+    ).length;
+  });
+  console.log(`${LOG} Phase 5: Found ${unlinkedCount} unlinked "Select service" dropdowns`);
+
+  // Click each "Select service" dropdown and pick the MOTOR service
+  for (let i = 0; i < Math.min(unlinkedCount, addedParts.length); i++) {
     try {
-      const linkSuccess = await page.evaluate(
-        (partBrand, partNum, svcName) => {
-          // Find the part row
-          const rows = Array.from(document.querySelectorAll("tr, [class*='part-row'], [class*='line-item']"));
-          let targetRow = null;
+      // Click the first "Select service" dropdown (they shrink as we link them)
+      const clickedDropdown = await page.evaluate(() => {
+        const els = Array.from(document.querySelectorAll("*")).filter(
+          el => el.offsetParent !== null &&
+            (el.textContent.trim() === "Select service" || el.textContent.trim() === "Select Service") &&
+            el.children.length <= 1
+        );
+        if (els.length === 0) return false;
+        // Click the parent element (which is usually the dropdown trigger)
+        const trigger = els[0].closest("p-dropdown, [class*='dropdown'], [role='listbox']") || els[0];
+        trigger.click();
+        return true;
+      });
 
-          for (const row of rows) {
-            const text = (row.textContent || "").toLowerCase();
-            if (
-              (partBrand && text.includes(partBrand.toLowerCase())) ||
-              (partNum && text.includes(partNum.toLowerCase()))
-            ) {
-              targetRow = row;
-              break;
-            }
-          }
-
-          if (!targetRow) return false;
-
-          // Find the service dropdown in this row
-          const dropdown = targetRow.querySelector(
-            'select, [class*="dropdown"], [class*="service-select"], [class*="select"]'
-          );
-          if (!dropdown) return false;
-
-          // If it's a native select
-          if (dropdown.tagName === "SELECT") {
-            const options = Array.from(dropdown.options);
-            const match = options.find(
-              (o) => o.text.toLowerCase().includes(svcName.toLowerCase())
-            );
-            if (match) {
-              dropdown.value = match.value;
-              dropdown.dispatchEvent(new Event("change", { bubbles: true }));
-              return true;
-            }
-            // If no match, pick the first non-empty option (should be the just-added service)
-            if (options.length > 1) {
-              dropdown.value = options[1].value;
-              dropdown.dispatchEvent(new Event("change", { bubbles: true }));
-              return true;
-            }
-          }
-
-          // If it's a custom dropdown, click to open
-          dropdown.click();
-          return "clicked_dropdown";
-        },
-        part.brand || "",
-        part.partNumber || "",
-        serviceName
-      );
-
-      if (linkSuccess === true) {
-        linked++;
-        console.log(`${LOG} Linked: ${part.brand || ""} ${part.partNumber || ""} → ${serviceName}`);
-      } else if (linkSuccess === "clicked_dropdown") {
-        // Custom dropdown opened — need to select from options
-        await sleep(1000);
-        const selected = await page.evaluate((svcName) => {
-          const options = Array.from(
-            document.querySelectorAll('[role="option"], [role="listbox"] li, [class*="dropdown-item"], [class*="menu-item"]')
-          );
-          for (const opt of options) {
-            if ((opt.textContent || "").toLowerCase().includes(svcName.toLowerCase())) {
-              opt.click();
-              return true;
-            }
-          }
-          // Pick first option
-          if (options.length > 0) {
-            options[0].click();
-            return true;
-          }
-          return false;
-        }, serviceName);
-
-        if (selected) {
-          linked++;
-          console.log(`${LOG} Linked (dropdown): ${part.brand || ""} → ${serviceName}`);
-        }
+      if (!clickedDropdown) {
+        console.log(`${LOG} Phase 5: No more "Select service" dropdowns found`);
+        break;
       }
 
       await sleep(1000);
+
+      // Select the MOTOR service from the dropdown options
+      const selected = await page.evaluate((svcName) => {
+        // Look for dropdown overlay with options
+        const options = Array.from(document.querySelectorAll(
+          "[role='option'], [role='listbox'] li, .p-dropdown-item, [class*='dropdown-item'], " +
+          ".ui-dropdown-item, p-dropdownitem, .p-listbox-item"
+        )).filter(el => el.offsetParent !== null);
+
+        // Try exact match first, then partial
+        for (const opt of options) {
+          const text = (opt.textContent || "").trim();
+          if (text.toLowerCase() === svcName.toLowerCase()) {
+            opt.click();
+            return { matched: true, text };
+          }
+        }
+        for (const opt of options) {
+          const text = (opt.textContent || "").trim();
+          if (text.toLowerCase().includes(svcName.toLowerCase())) {
+            opt.click();
+            return { matched: true, text };
+          }
+        }
+        // Last resort: pick first non-empty option
+        for (const opt of options) {
+          const text = (opt.textContent || "").trim();
+          if (text.length > 0 && text !== "Select service" && text !== "Select Service") {
+            opt.click();
+            return { matched: true, text, fallback: true };
+          }
+        }
+        return { matched: false, optionCount: options.length, optionTexts: options.slice(0, 5).map(o => o.textContent.trim().substring(0, 40)) };
+      }, serviceName);
+
+      if (selected.matched) {
+        linked++;
+        console.log(`${LOG} Phase 5: Linked part ${i + 1} → "${selected.text}"${selected.fallback ? " (fallback)" : ""}`);
+      } else {
+        console.log(`${LOG} Phase 5: Dropdown opened but no matching option: ${JSON.stringify(selected)}`);
+        // Close the dropdown by pressing Escape
+        await page.keyboard.press("Escape");
+      }
+
+      await sleep(1500);
     } catch (err) {
-      console.log(`${LOG} Link failed for ${part.brand || "part"}: ${err.message}`);
+      console.log(`${LOG} Phase 5: Link attempt ${i + 1} failed: ${err.message}`);
     }
   }
 
