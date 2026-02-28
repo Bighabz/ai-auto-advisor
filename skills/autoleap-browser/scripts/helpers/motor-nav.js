@@ -540,17 +540,8 @@ async function navigateMotorTree(page, diagnosis, vehicle) {
   await page.screenshot({ path: "/tmp/debug-motor-after-add.png" });
 
   // ── Close the MOTOR Browse dialog by clicking "Done" ──
-  console.log(`${LOG} Clicking "Done" to close MOTOR dialog...`);
-  const doneClicked = await findInDialog(page, "Done");
-  if (doneClicked.found && doneClicked.rect) {
-    await page.mouse.click(doneClicked.rect.x, doneClicked.rect.y);
-    console.log(`${LOG} "Done" clicked ✓`);
-    await sleep(2000);
-  } else {
-    // Try pressing Escape as fallback
-    await page.keyboard.press("Escape");
-    await sleep(1000);
-  }
+  console.log(`${LOG} Closing MOTOR dialog...`);
+  await closeBrowseDialog(page);
 
   // ── Read hours from the estimate (GOLDEN RULE: NEVER modify) ──
   const hours = matchedProc.hours || (await readMotorHours(page));
@@ -865,6 +856,86 @@ async function hasAddButton(page) {
       b.textContent.trim() === "Add" && b.offsetParent !== null
     );
   });
+}
+
+/**
+ * Close the MOTOR Browse dialog reliably.
+ *
+ * The dialog has a "Done" button at bottom right and an "X" close button at top right.
+ * findInDialog may match a "Done" text span instead of the actual button.
+ * This function:
+ * 1. Clicks the actual "Done" BUTTON (not spans/divs with "Done" text)
+ * 2. Verifies the dialog closed
+ * 3. Falls back to X close button, then Escape key
+ */
+async function closeBrowseDialog(page) {
+  const maxAttempts = 3;
+
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    // Strategy 1: Find the actual "Done" button element
+    const doneBtn = await page.evaluate(() => {
+      const btns = Array.from(document.querySelectorAll("button"));
+      for (const btn of btns) {
+        const text = btn.textContent.trim();
+        if (text === "Done" && btn.offsetParent !== null) {
+          const rect = btn.getBoundingClientRect();
+          if (rect.width > 0 && rect.height > 0) {
+            return { found: true, x: rect.x + rect.width / 2, y: rect.y + rect.height / 2, tag: "button" };
+          }
+        }
+      }
+      // Strategy 2: Find X close button at top of dialog (fa-times icon)
+      const dialogs = document.querySelectorAll("[role='dialog'], [class*='modal-content']");
+      for (const dialog of dialogs) {
+        if (!dialog.offsetParent && dialog.offsetWidth === 0) continue;
+        // Check if this is the MOTOR browse dialog (has "MOTOR Primary" text)
+        if (!dialog.textContent.includes("MOTOR Primary") && !dialog.textContent.includes("Browse")) continue;
+        const closeIcons = dialog.querySelectorAll("i.fa-times, i.pi-times, button[class*='close']");
+        for (const icon of closeIcons) {
+          if (!icon.offsetParent) continue;
+          const r = icon.getBoundingClientRect();
+          if (r.width > 0) return { found: true, x: r.x + r.width / 2, y: r.y + r.height / 2, tag: "close-icon" };
+        }
+      }
+      return { found: false };
+    });
+
+    if (doneBtn.found) {
+      console.log(`${LOG} Clicking "${doneBtn.tag}" at (${Math.round(doneBtn.x)}, ${Math.round(doneBtn.y)})...`);
+      await page.mouse.click(doneBtn.x, doneBtn.y);
+      await sleep(2000);
+    } else {
+      console.log(`${LOG} No Done/close button found — pressing Escape...`);
+      await page.keyboard.press("Escape");
+      await sleep(1500);
+    }
+
+    // Verify dialog is closed
+    const dialogStillOpen = await page.evaluate(() => {
+      const dialogs = document.querySelectorAll("[role='dialog'], [class*='modal-content']");
+      for (const dialog of dialogs) {
+        if (!dialog.offsetParent && dialog.offsetWidth === 0) continue;
+        if (dialog.textContent.includes("MOTOR Primary") || dialog.textContent.includes("Operational")) {
+          return true;
+        }
+      }
+      return false;
+    });
+
+    if (!dialogStillOpen) {
+      console.log(`${LOG} MOTOR dialog closed ✓`);
+      return true;
+    }
+    console.log(`${LOG} Dialog still open after attempt ${attempt + 1} — retrying...`);
+  }
+
+  // Last resort: click the X at the very top-right of the modal overlay
+  console.log(`${LOG} Force-closing with page click outside dialog...`);
+  await page.mouse.click(10, 10); // click outside the dialog
+  await sleep(1000);
+  await page.keyboard.press("Escape");
+  await sleep(1000);
+  return false;
 }
 
 /**
