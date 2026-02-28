@@ -483,153 +483,6 @@ async function navigateMotorTree(page, diagnosis, vehicle) {
   console.log(`${LOG} Reading operational procedures from right panel...`);
   await page.screenshot({ path: "/tmp/debug-motor-procedures.png" });
 
-  // Debug: dump what's visible in the right panel area
-  const rightPanelDump = await page.evaluate(() => {
-    // Look for table-like structures or lists with $ amounts
-    const allBtns = Array.from(document.querySelectorAll("button")).filter(b =>
-      b.offsetParent !== null && (
-        b.className.includes("btn-success") || b.className.includes("add")
-      )
-    );
-    const btnInfo = allBtns.map(b => {
-      const row = b.closest("tr, [class*='row'], [class*='item']") || b.parentElement;
-      return {
-        btnText: b.textContent.trim().substring(0, 20),
-        btnClass: b.className.substring(0, 40),
-        rowText: (row?.textContent || "").trim().substring(0, 80),
-        inDialog: !!b.closest("[role='dialog']"),
-        parentTag: (row?.tagName || "?"),
-        parentClass: (row?.className || "").substring(0, 40),
-      };
-    });
-    // Also look for header text like "Operational", "Labor", "Parts", "Subtotal"
-    const headers = Array.from(document.querySelectorAll("th, [class*='header'], [class*='col-header']"))
-      .filter(el => el.offsetParent !== null)
-      .map(el => el.textContent.trim().substring(0, 30))
-      .filter(t => t.length > 0);
-    return { buttons: btnInfo.slice(0, 10), headers: [...new Set(headers)].slice(0, 15) };
-  });
-  console.log(`${LOG} Right panel dump: ${JSON.stringify(rightPanelDump)}`);
-
-  // ── Targeted DOM discovery: find MOTOR procedure row structure ──
-  // We know MOTOR procedures like "Cooling System" exist in the DOM.
-  // Find their exact structure, siblings, and any add/click mechanisms.
-  const motorRowDiscovery = await page.evaluate(() => {
-    // Find elements containing known MOTOR procedure keywords
-    const keywords = ["Cooling System", "Compression Test", "Emission Control", "Leak Inspection", "Catalytic"];
-    const results = [];
-    for (const kw of keywords) {
-      const els = Array.from(document.querySelectorAll("*")).filter(el =>
-        el.offsetParent !== null &&
-        el.textContent.includes(kw) &&
-        el.textContent.trim().length < 100 &&
-        el.children.length < 8
-      );
-      for (const el of els.slice(0, 3)) {
-        // Walk up to find the row container
-        let row = el;
-        for (let i = 0; i < 5; i++) {
-          if (row.parentElement) row = row.parentElement;
-          const tag = row.tagName.toLowerCase();
-          if (tag === "tr" || row.className?.includes("row") || row.className?.includes("item")) break;
-        }
-        // Find ALL clickable elements in this row
-        const clickables = Array.from(row.querySelectorAll("button, a, i, [role='button'], [class*='click'], [class*='add'], [class*='plus']"))
-          .filter(c => c.offsetParent !== null)
-          .map(c => ({
-            tag: c.tagName,
-            text: c.textContent.trim().substring(0, 20),
-            cls: (c.className || "").substring(0, 50),
-            cursor: getComputedStyle(c).cursor,
-            rect: (() => { const r = c.getBoundingClientRect(); return { x: Math.round(r.x), y: Math.round(r.y), w: Math.round(r.width), h: Math.round(r.height) }; })(),
-          }));
-        // Also find any elements with pointer cursor (clickable)
-        const pointers = Array.from(row.querySelectorAll("*"))
-          .filter(c => c.offsetParent !== null && getComputedStyle(c).cursor === "pointer" && c.children.length < 2)
-          .map(c => ({
-            tag: c.tagName,
-            text: c.textContent.trim().substring(0, 20),
-            cls: (c.className || "").substring(0, 50),
-          }));
-        results.push({
-          keyword: kw,
-          elTag: el.tagName,
-          elClass: (el.className || "").substring(0, 50),
-          elText: el.textContent.trim().substring(0, 60),
-          rowTag: row.tagName,
-          rowClass: (row.className || "").substring(0, 60),
-          rowHTML: row.innerHTML?.substring(0, 200),
-          clickables: clickables.slice(0, 5),
-          pointers: pointers.slice(0, 5),
-        });
-      }
-    }
-    return results;
-  });
-  console.log(`${LOG} MOTOR row discovery: ${JSON.stringify(motorRowDiscovery).substring(0, 500)}`);
-
-  // Find the green "+" circle buttons — they're at the far right of each procedure row
-  const greenPlusDisco = await page.evaluate(() => {
-    // Strategy 1: Look for any element with "plus" in class name
-    const plusEls = Array.from(document.querySelectorAll("[class*='plus'], [class*='fa-plus'], [class*='add-service'], [class*='add-motor']"))
-      .filter(el => el.offsetParent !== null)
-      .map(el => {
-        const rect = el.getBoundingClientRect();
-        const parent = el.parentElement;
-        return {
-          tag: el.tagName,
-          cls: (el.className || "").substring(0, 60),
-          parentTag: parent?.tagName,
-          parentCls: (parent?.className || "").substring(0, 60),
-          x: Math.round(rect.x), y: Math.round(rect.y),
-          w: Math.round(rect.width), h: Math.round(rect.height),
-          cursor: getComputedStyle(el).cursor,
-          bgColor: getComputedStyle(el.closest("button, div, span") || el).backgroundColor,
-        };
-      });
-
-    // Strategy 2: Look for clickable elements at x > 1100 (far right where green circles are)
-    const rightSideEls = Array.from(document.querySelectorAll("button, i, span, div, a"))
-      .filter(el => {
-        if (!el.offsetParent) return false;
-        const r = el.getBoundingClientRect();
-        return r.x > 1100 && r.x < 1250 && r.width > 10 && r.width < 50 && r.height > 10 && r.height < 50;
-      })
-      .map(el => {
-        const rect = el.getBoundingClientRect();
-        return {
-          tag: el.tagName,
-          cls: (el.className || "").substring(0, 60),
-          text: el.textContent.trim().substring(0, 10),
-          x: Math.round(rect.x), y: Math.round(rect.y),
-          w: Math.round(rect.width), h: Math.round(rect.height),
-          cursor: getComputedStyle(el).cursor,
-          bgColor: getComputedStyle(el).backgroundColor,
-          color: getComputedStyle(el).color,
-        };
-      });
-
-    // Strategy 3: Use elementFromPoint at known green circle positions
-    // From screenshots: green circles are at approximately x=1180
-    const yPositions = [338, 392, 446, 500, 554, 608, 690, 744];
-    const pointHits = yPositions.map(y => {
-      const el = document.elementFromPoint(1180, y);
-      if (!el) return { y, found: false };
-      return {
-        y,
-        found: true,
-        tag: el.tagName,
-        cls: (el.className || "").substring(0, 60),
-        text: el.textContent.trim().substring(0, 20),
-        parentTag: el.parentElement?.tagName,
-        parentCls: (el.parentElement?.className || "").substring(0, 60),
-      };
-    });
-
-    return { plus: plusEls.slice(0, 10), rightSide: rightSideEls.slice(0, 15), pointHits };
-  });
-  console.log(`${LOG} Green "+" discovery: ${JSON.stringify(greenPlusDisco)}`);
-
   const procedures = await readProcedures(page);
   console.log(`${LOG} Found ${procedures.length} procedures: ${procedures.slice(0, 5).map(p => p.name).join(", ")}${procedures.length > 5 ? "..." : ""}`);
 
@@ -1249,31 +1102,51 @@ async function readProcedures(page) {
         const priceMatch = rowText.match(/\$(\d+\.?\d*)/);
         const labor = priceMatch ? parseFloat(priceMatch[1]) : 0;
 
-        // Get the checkbox click target (custom-accordian-header-checkbox)
-        const checkbox = row.querySelector("[class*='accordian-header-checkbox'], [class*='accordion-header-checkbox']");
-        let checkboxRect = null;
-        if (checkbox && checkbox.offsetParent !== null) {
-          const r = checkbox.getBoundingClientRect();
-          checkboxRect = { x: r.x + r.width / 2, y: r.y + r.height / 2 };
-        }
+        // Get the green "+" circle button for this procedure.
+        // The green "+" is a div.pointer.font-primary inside div.m-estimate,
+        // positioned at the far right of each row (~x=1180).
+        // It may be inside the row, a sibling, or in a parallel column.
+        const rowRect = row.getBoundingClientRect();
+        const rowCenterY = rowRect.y + rowRect.height / 2;
 
-        // Fallback: get the accordion header itself (the whole row is clickable)
-        if (!checkboxRect) {
-          const header = row.querySelector("[class*='accordian-header'], [class*='accordion-header']");
-          if (header && header.offsetParent !== null) {
-            const r = header.getBoundingClientRect();
-            checkboxRect = { x: r.x + 20, y: r.y + r.height / 2 }; // Click near left edge (checkbox area)
+        // Strategy 1: Look for div.pointer.font-primary inside the row or its parent wrapper
+        let plusRect = null;
+        const wrapper = row.closest("[class*='motor-service-item-wrapper']") || row.parentElement;
+        const greenBtns = (wrapper || row).querySelectorAll("[class*='pointer'][class*='font-primary'], [class*='m-estimate'] [class*='pointer']");
+        for (const gb of greenBtns) {
+          if (!gb.offsetParent) continue;
+          const r = gb.getBoundingClientRect();
+          // Must be at approximately the same y as this row (±30px)
+          if (Math.abs(r.y + r.height / 2 - rowCenterY) < 30) {
+            plusRect = { x: r.x + r.width / 2, y: r.y + r.height / 2 };
+            break;
           }
         }
 
-        if (checkboxRect) {
-          results.push({
-            name,
-            hours,
-            labor,
-            plusRect: checkboxRect, // Reuse plusRect field for the checkbox click target
-          });
+        // Strategy 2: Find any div.pointer.font-primary on the page near this row's y
+        if (!plusRect) {
+          const allGreen = document.querySelectorAll("div[class*='pointer'][class*='font-primary']");
+          for (const gb of allGreen) {
+            if (!gb.offsetParent) continue;
+            const r = gb.getBoundingClientRect();
+            if (Math.abs(r.y + r.height / 2 - rowCenterY) < 30 && r.x > 1000) {
+              plusRect = { x: r.x + r.width / 2, y: r.y + r.height / 2 };
+              break;
+            }
+          }
         }
+
+        // Strategy 3: Use fixed x=1180 at the row's center y (known position from screenshots)
+        if (!plusRect) {
+          plusRect = { x: 1180, y: rowCenterY };
+        }
+
+        results.push({
+          name,
+          hours,
+          labor,
+          plusRect,
+        });
       }
 
       return results;
@@ -1318,11 +1191,11 @@ async function readProcedures(page) {
  * Uses the stored plusRect coordinates for native mouse click.
  */
 /**
- * Select a MOTOR procedure and add it to the estimate.
+ * Click the green "+" circle button for a specific MOTOR procedure.
  *
- * MOTOR uses checkbox + "Add" button pattern:
- * 1. Click the checkbox (or accordion header) to select the procedure
- * 2. Click the "Add" button at the bottom of the dialog
+ * The green "+" is a div.pointer.font-primary in a separate column (div.m-estimate),
+ * NOT inside the motor-service-item row. After clicking, the procedure is added
+ * directly to the estimate (no separate "Add" confirmation needed).
  *
  * @param {import('puppeteer-core').Page} page
  * @param {{ name: string, hours: number, labor: number, plusRect: { x: number, y: number } }} proc
@@ -1340,45 +1213,55 @@ async function clickProcedurePlus(page, proc) {
       els[0].scrollIntoView({ block: "center", behavior: "smooth" });
     }
   }, proc.name);
-  await sleep(500);
+  await sleep(800);
 
-  // Step 2: Re-find the checkbox for this procedure (coordinates may have shifted after scroll)
+  // Step 2: Re-find the green "+" button for this procedure (coordinates shift after scroll)
   const freshRect = await page.evaluate((name) => {
     const searchText = name.substring(0, 20);
     const rows = Array.from(document.querySelectorAll("[class*='motor-service-item']"))
       .filter(el => el.offsetParent !== null && el.textContent.includes(searchText));
+
     for (const row of rows) {
-      // Try checkbox first
-      const cb = row.querySelector("[class*='accordian-header-checkbox'], [class*='accordion-header-checkbox']");
-      if (cb && cb.offsetParent !== null) {
-        const r = cb.getBoundingClientRect();
-        if (r.width > 0) return { x: r.x + r.width / 2, y: r.y + r.height / 2 };
+      const rowRect = row.getBoundingClientRect();
+      const rowCenterY = rowRect.y + rowRect.height / 2;
+
+      // Look for green "+" button: div.pointer.font-primary near this row's y
+      const wrapper = row.closest("[class*='motor-service-item-wrapper']") || row.parentElement;
+      const greenBtns = (wrapper || document).querySelectorAll(
+        "div[class*='pointer'][class*='font-primary'], [class*='m-estimate'] [class*='pointer']"
+      );
+      for (const gb of greenBtns) {
+        if (!gb.offsetParent) continue;
+        const r = gb.getBoundingClientRect();
+        if (Math.abs(r.y + r.height / 2 - rowCenterY) < 30 && r.x > 900) {
+          return { x: r.x + r.width / 2, y: r.y + r.height / 2 };
+        }
       }
-      // Fallback: click the accordion header near its left edge
-      const header = row.querySelector("[class*='accordian-header'], [class*='accordion-header']");
-      if (header && header.offsetParent !== null) {
-        const r = header.getBoundingClientRect();
-        return { x: r.x + 20, y: r.y + r.height / 2 };
+
+      // Broader search: any div.pointer.font-primary on the page near this y
+      const allGreen = document.querySelectorAll("div[class*='pointer'][class*='font-primary']");
+      for (const gb of allGreen) {
+        if (!gb.offsetParent) continue;
+        const r = gb.getBoundingClientRect();
+        if (Math.abs(r.y + r.height / 2 - rowCenterY) < 30 && r.x > 900) {
+          return { x: r.x + r.width / 2, y: r.y + r.height / 2 };
+        }
       }
+
+      // Last resort: use the fixed x=1180 position at row center
+      return { x: 1180, y: rowCenterY };
     }
     return null;
   }, proc.name);
 
   const clickTarget = freshRect || proc.plusRect;
-  console.log(`${LOG} Clicking checkbox for "${proc.name}" at (${Math.round(clickTarget.x)}, ${Math.round(clickTarget.y)})`);
+  console.log(`${LOG} Clicking green "+" for "${proc.name}" at (${Math.round(clickTarget.x)}, ${Math.round(clickTarget.y)})`);
   await page.mouse.click(clickTarget.x, clickTarget.y);
-  await sleep(1000);
+  await sleep(2000);
 
-  // Step 3: Click the "Add" button to add the selected procedure to the estimate
-  console.log(`${LOG} Clicking "Add" button to confirm procedure...`);
-  const addClicked = await clickAddButton(page);
-  if (addClicked) {
-    console.log(`${LOG} "Add" button clicked ✓`);
-    return true;
-  }
+  // Take screenshot to verify the procedure was added
+  await page.screenshot({ path: "/tmp/debug-motor-after-plus-click.png" });
 
-  // Fallback: maybe the checkbox click already added it (some UI variants)
-  console.log(`${LOG} "Add" button not found — checkbox click may have been sufficient`);
   return true;
 }
 
