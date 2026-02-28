@@ -909,8 +909,8 @@ async function askClaudeForCategory(repairContext, options, levelLabel, parentCa
   const optionsList = options.map((o, i) => `${i + 1}. ${o}`).join("\n");
 
   const prompt = parentCategory
-    ? `You are navigating a MOTOR labor catalog. Current level: ${levelLabel}.\nParent category: ${parentCategory}\n\n${repairContext}\n\nOptions:\n${optionsList}\n\nPick the ONE best option for this repair. Reply with ONLY the option text, nothing else.`
-    : `You are navigating a MOTOR labor catalog. Current level: ${levelLabel}.\n\n${repairContext}\n\nOptions:\n${optionsList}\n\nPick the ONE best option for this repair. Reply with ONLY the option text, nothing else.`;
+    ? `You are navigating a MOTOR labor catalog. Current level: ${levelLabel}.\nParent category: ${parentCategory}\n\n${repairContext}\n\nOptions:\n${optionsList}\n\nPick the ONE best option that CONTAINS the component being REPAIRED/REPLACED (not the sensor or system that detected the fault). Reply with ONLY the option text, nothing else.`
+    : `You are navigating a MOTOR labor catalog. Current level: ${levelLabel}.\n\n${repairContext}\n\nOptions:\n${optionsList}\n\nPick the ONE best option that CONTAINS the component being REPAIRED/REPLACED (not the sensor or system that detected the fault). Reply with ONLY the option text, nothing else.`;
 
   const response = await callClaude(prompt);
   if (!response) return null;
@@ -1270,24 +1270,10 @@ async function clickProcedurePlus(page, proc) {
         return r.x > 900 && r.width > 5 && r.height > 5;
       }).sort((a, b) => a.getBoundingClientRect().y - b.getBoundingClientRect().y);
 
-      // Strategy A: Index-based match (nth row → nth green button)
-      if (targetIdx < greenBtns.length) {
-        const btn = greenBtns[targetIdx];
-        const r = btn.getBoundingClientRect();
-        const btnCenterY = r.y + r.height / 2;
-        if (btnCenterY > MIN_Y && btnCenterY < MAX_Y) {
-          return {
-            found: true, x: r.x + r.width / 2, y: btnCenterY,
-            strategy: "index-match", idx: targetIdx,
-            rows: allRows.length, btns: greenBtns.length,
-            targetY: Math.round(targetCenterY), btnY: Math.round(btnCenterY),
-          };
-        }
-      }
-
-      // Strategy B: Y-proximity match (closest green button to target row)
+      // Strategy A: Y-proximity match (closest green button to target row — most reliable)
+      // With 18 rows vs 17 buttons, index mapping is unreliable. Y-proximity wins.
       let closestBtn = null;
-      let closestDist = 60; // max 60px
+      let closestDist = Infinity;
       for (const btn of greenBtns) {
         const r = btn.getBoundingClientRect();
         const btnCenterY = r.y + r.height / 2;
@@ -1298,12 +1284,28 @@ async function clickProcedurePlus(page, proc) {
           closestBtn = { x: r.x + r.width / 2, y: btnCenterY };
         }
       }
-      if (closestBtn) {
+      if (closestBtn && closestDist < 40) {
         return {
           found: true, ...closestBtn,
           strategy: "y-proximity", dist: Math.round(closestDist),
           targetY: Math.round(targetCenterY), btns: greenBtns.length,
+          idx: targetIdx, rows: allRows.length,
         };
+      }
+
+      // Strategy B: Index-based fallback (only if y-proximity didn't find a close match)
+      if (targetIdx < greenBtns.length) {
+        const btn = greenBtns[targetIdx];
+        const r = btn.getBoundingClientRect();
+        const btnCenterY = r.y + r.height / 2;
+        if (btnCenterY > MIN_Y && btnCenterY < MAX_Y) {
+          return {
+            found: true, x: r.x + r.width / 2, y: btnCenterY,
+            strategy: "index-fallback", idx: targetIdx,
+            rows: allRows.length, btns: greenBtns.length,
+            targetY: Math.round(targetCenterY), btnY: Math.round(btnCenterY),
+          };
+        }
       }
 
       // Strategy C: elementFromPoint at the add column
