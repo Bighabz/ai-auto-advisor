@@ -556,6 +556,26 @@ async function runPlaybook({ customer, vehicle, diagnosis, parts, progressCallba
       result.laborHours = motorResult.hours || 0;
       const addOnStr = motorResult.addOns?.length > 0 ? `, add-ons: ${motorResult.addOns.join(", ")}` : "";
       console.log(`${LOG} Phase 3: MOTOR labor added: ${motorResult.hours}h (NEVER modifying Qty/Hrs)${addOnStr}`);
+
+      // Save estimate to commit MOTOR labor before PartsTech
+      // PartsTech button stays disabled until estimate has a saved service line
+      console.log(`${LOG} Phase 3b: Saving estimate to commit MOTOR labor...`);
+      await saveEstimate(page);
+      await sleep(2000);
+
+      // Verify MOTOR service appears in the estimate services list
+      const serviceCheck = await page.evaluate((procName) => {
+        const allText = document.body.innerText || "";
+        const hasService = allText.includes(procName);
+        // Check PartsTech button state after save
+        const ptBtns = Array.from(document.querySelectorAll(".ro-partstech-new button, [class*='partstech'] button"));
+        const ptEnabled = ptBtns.some(b => !b.className.includes("if-disabled") && b.offsetParent !== null);
+        return { hasService, ptEnabled, ptBtnCount: ptBtns.length };
+      }, motorResult.procedure);
+      console.log(`${LOG} Phase 3b: Service in estimate: ${serviceCheck.hasService}, PT enabled: ${serviceCheck.ptEnabled}`);
+
+      // Take a debug screenshot of the estimate page after MOTOR + save
+      await page.screenshot({ path: "/tmp/debug-after-motor-save.png" });
     } else {
       console.log(`${LOG} Phase 3: MOTOR navigation failed: ${motorResult.error}`);
       result.warnings.push({ code: "MOTOR_FAILED", msg: motorResult.error });
@@ -686,6 +706,7 @@ async function runPlaybook({ customer, vehicle, diagnosis, parts, progressCallba
 
     // Read totals from page DOM
     const totals = await readEstimateTotals(page);
+    console.log(`${LOG} Phase 6: Totals: ${JSON.stringify(totals)}`);
     result.totalLabor = totals.labor || 0;
     result.totalParts = totals.parts || 0;
     result.total = totals.grandTotal || (result.totalLabor + result.totalParts);
@@ -1198,30 +1219,59 @@ async function saveEstimate(page) {
 
 async function readEstimateTotals(page) {
   return page.evaluate(() => {
-    const result = { labor: 0, parts: 0, shopSupplies: 0, tax: 0, grandTotal: 0 };
+    const result = { labor: 0, parts: 0, shopSupplies: 0, tax: 0, grandTotal: 0, debug: {} };
 
-    // Try to read from summary section
+    // Strategy 1: Look for the "Labor summary" tab content
+    // AutoLeap shows labor/parts/total in a summary section at the bottom
+    const summaryTab = document.querySelector('[class*="labor-summary"], [class*="estimate-summary"]');
+    if (summaryTab) {
+      const text = summaryTab.innerText || "";
+      result.debug.summaryTabText = text.substring(0, 200);
+    }
+
+    // Strategy 2: Look for specific total elements (AutoLeap uses class-based totals)
+    const totalElements = document.querySelectorAll(
+      '[class*="total-amount"], [class*="grand-total"], [class*="estimate-total"], ' +
+      '[class*="totalAmount"], [class*="grandTotal"]'
+    );
+    for (const el of totalElements) {
+      const text = el.textContent.trim();
+      const match = text.match(/\$?([\d,.]+)/);
+      if (match) {
+        const val = parseFloat(match[1].replace(/,/g, ""));
+        if (val > result.grandTotal) result.grandTotal = val;
+        result.debug.totalEl = text.substring(0, 50);
+      }
+    }
+
+    // Strategy 3: Parse from page text with expanded patterns
     const allText = document.body.innerText;
-
-    // Parse totals from text patterns
     const patterns = [
-      { key: "labor", regex: /labor\s*(?:total)?[:\s$]*\$?([\d,.]+)/i },
-      { key: "parts", regex: /parts\s*(?:total)?[:\s$]*\$?([\d,.]+)/i },
+      { key: "labor", regex: /(?:total\s*)?labor[:\s$]*\$?([\d,.]+)/i },
+      { key: "parts", regex: /(?:total\s*)?parts[:\s$]*\$?([\d,.]+)/i },
       { key: "shopSupplies", regex: /shop\s*supplies?[:\s$]*\$?([\d,.]+)/i },
-      { key: "tax", regex: /tax[:\s$]*\$?([\d,.]+)/i },
-      { key: "grandTotal", regex: /(?:grand\s*total|total\s*amount|estimate\s*total)[:\s$]*\$?([\d,.]+)/i },
+      { key: "tax", regex: /(?:sales\s*)?tax[:\s$]*\$?([\d,.]+)/i },
+      { key: "grandTotal", regex: /(?:grand\s*total|total\s*amount|estimate\s*total|total\s*cost)[:\s$]*\$?([\d,.]+)/i },
     ];
 
     for (const { key, regex } of patterns) {
       const match = allText.match(regex);
-      if (match) {
+      if (match && result[key] === 0) {
         result[key] = parseFloat(match[1].replace(/,/g, "")) || 0;
       }
     }
 
-    // If no grand total found, try the largest dollar amount in the summary area
+    // Strategy 4: Look for the EXPECTED PROFITABILITY section which has totals
+    const profitMatch = allText.match(/EXPECTED PROFITABILITY\s*([\d.]+)%/);
+    if (profitMatch) {
+      result.debug.profitPercent = profitMatch[1];
+    }
+
+    // Strategy 5: Find grand total from summary elements
     if (result.grandTotal === 0) {
-      const summaryEls = document.querySelectorAll('[class*="total"], [class*="summary"], [class*="grand"]');
+      const summaryEls = document.querySelectorAll(
+        '[class*="total"], [class*="summary"], [class*="grand"], [class*="footer"] [class*="amount"]'
+      );
       for (const el of summaryEls) {
         const text = el.textContent || "";
         const amounts = text.match(/\$[\d,.]+/g) || [];
@@ -1230,6 +1280,13 @@ async function readEstimateTotals(page) {
           if (val > result.grandTotal) result.grandTotal = val;
         }
       }
+    }
+
+    // Debug: collect nearby totals text
+    const laborSummaryTab = Array.from(document.querySelectorAll("a, [role='tab']"))
+      .find(el => el.textContent.includes("Labor summary"));
+    if (laborSummaryTab) {
+      result.debug.laborSummaryTab = true;
     }
 
     return result;
