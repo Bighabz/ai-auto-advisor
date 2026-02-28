@@ -25,7 +25,7 @@ const LOG = "[playbook:motor]";
  * @param {object} vehicle - { year, make, model, engine, vin }
  * @returns {{ success: boolean, procedure?: string, hours?: number, addOns?: string[], error?: string }}
  */
-async function navigateMotorTree(page, diagnosis, vehicle) {
+async function navigateMotorTree(page, diagnosis, vehicle, query) {
   console.log(`${LOG} Opening MOTOR labor catalog...`);
 
   // ── Step 0: Close CUSTOMER sidebar (check for "Contact" text to ID it) ──
@@ -390,7 +390,7 @@ async function navigateMotorTree(page, diagnosis, vehicle) {
   await page.screenshot({ path: "/tmp/debug-motor-after-tab.png" });
 
   // Build repair context for Claude
-  const repairContext = buildRepairContext(diagnosis, vehicle);
+  const repairContext = buildRepairContext(diagnosis, vehicle, query);
   console.log(`${LOG} Repair context: ${repairContext.substring(0, 100)}...`);
 
   // ── Navigate MOTOR left tree (2 levels: System → Component) ──
@@ -1669,7 +1669,7 @@ function sleep(ms) {
   return new Promise((r) => setTimeout(r, ms));
 }
 
-function buildRepairContext(diagnosis, vehicle) {
+function buildRepairContext(diagnosis, vehicle, query) {
   const codes = diagnosis?.codes || [];
   const topDiag = diagnosis?.ai?.diagnoses?.[0];
   const repairPlan = diagnosis?.ai?.repair_plan;
@@ -1682,6 +1682,14 @@ function buildRepairContext(diagnosis, vehicle) {
   if (codes.length > 0) ctx += `DTC codes: ${codes.join(", ")}\n`;
   if (topDiag?.cause) ctx += `Diagnosis: ${topDiag.cause}\n`;
   if (repairPlan?.labor?.description) ctx += `Repair: ${repairPlan.labor.description}\n`;
+
+  // Include the original user query/complaint as context if no diagnosis details available
+  if (query && !topDiag?.cause && !repairPlan?.labor?.description) {
+    ctx += `Customer complaint: ${query}\n`;
+  } else if (query && !ctx.toLowerCase().includes(query.split(" ")[0].toLowerCase())) {
+    // Also include query if it adds info not already in context
+    ctx += `Repair request: ${query}\n`;
+  }
 
   return ctx;
 }

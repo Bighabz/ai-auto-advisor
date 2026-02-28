@@ -36,7 +36,7 @@ const AUTOLEAP_APP_URL = "https://app.myautoleap.com";
  * @param {function} [params.progressCallback] - Called with phase name for Telegram updates
  * @returns {Promise<object>} - { success, roNumber, estimateId, total, totalLabor, totalParts, laborHours, pdfPath, pricingSource, partsAdded, laborResult }
  */
-async function runPlaybook({ customer, vehicle, diagnosis, parts, progressCallback }) {
+async function runPlaybook({ customer, vehicle, diagnosis, query, parts, progressCallback }) {
   let puppeteer;
   try {
     puppeteer = require("puppeteer-core");
@@ -550,7 +550,7 @@ async function runPlaybook({ customer, vehicle, diagnosis, parts, progressCallba
     await progress(progressCallback, "adding_labor");
     console.log(`${LOG} Phase 3: Opening MOTOR catalog (runs before PartsTech to connect vehicle)...`);
 
-    const motorResult = await navigateMotorTree(page, diagnosis, vehicle);
+    const motorResult = await navigateMotorTree(page, diagnosis, vehicle, query);
 
     if (motorResult.success) {
       result.laborResult = motorResult;

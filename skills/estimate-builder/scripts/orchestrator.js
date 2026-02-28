@@ -1318,6 +1318,7 @@ async function buildEstimate(params) {
         customer: params.customer,
         vehicle: { year: vehicle.year, make: vehicle.make, model: vehicle.model, vin: vehicle.vin || null },
         diagnosis: results.diagnosis,
+        query: params.query || null,
         parts: estParts,
         progressCallback: params.progressCallback || null,
       });
