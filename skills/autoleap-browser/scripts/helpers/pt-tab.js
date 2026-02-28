@@ -275,69 +275,71 @@ async function searchAndAddToCart(ptPage, searchTerm) {
   }, PARTSTECH.PRODUCT_CARD.split(", "));
   console.log(`${LOG} Page debug: ${JSON.stringify(pageDebug)}`);
 
-  // Find cheapest in-stock and mark it
-  const found = await ptPage.evaluate(
-    (cardSels, priceSels, oosSelector, cartBtnTexts) => {
-      let cards = [];
-      for (const sel of cardSels) {
-        cards = Array.from(document.querySelectorAll(sel));
-        if (cards.length > 0) break;
-      }
-      if (cards.length === 0) return null;
+  // Find cheapest in-stock part using "Add to cart" buttons as anchors.
+  // PartsTech uses CSS-in-JS (css-xxxxx class names), so traditional selectors
+  // don't work. Instead: find all "Add to cart" buttons → walk up to find a
+  // container with a price → compare prices → pick cheapest.
+  const found = await ptPage.evaluate((cartBtnTexts) => {
+    // Step 1: Find all "Add to cart" buttons
+    const allBtns = Array.from(document.querySelectorAll("button")).filter(
+      b => b.offsetParent !== null && !b.disabled &&
+        cartBtnTexts.some(t => b.textContent.trim().includes(t))
+    );
+    if (allBtns.length === 0) return null;
 
-      let minPrice = Infinity;
-      let bestBtn = null;
-      let bestDetails = null;
+    let minPrice = Infinity;
+    let bestBtn = null;
+    let bestDetails = null;
 
-      for (const card of cards) {
-        const oos = card.querySelector(oosSelector);
-        if (oos) continue;
-
-        let btn = null;
-        for (const text of cartBtnTexts) {
-          btn = Array.from(card.querySelectorAll("button")).find(
-            (b) => b.textContent.trim().includes(text) && !b.disabled
-          );
-          if (btn) break;
+    for (const btn of allBtns) {
+      // Step 2: Walk up to find the product container (common ancestor with a price)
+      let container = btn.parentElement;
+      let price = 0;
+      let priceText = "";
+      // Walk up max 8 levels to find a container with a $ price
+      for (let depth = 0; depth < 8 && container; depth++) {
+        const text = container.textContent || "";
+        // Look for a price pattern ($xxx.xx) that's NOT a "List:" price
+        const priceMatches = text.match(/(?<!\bList:\s*)\$\s*([\d,]+\.\d{2})/g);
+        if (priceMatches && priceMatches.length > 0) {
+          // Take the first non-List price (typically the cost/wholesale price)
+          for (const pm of priceMatches) {
+            const val = parseFloat(pm.replace(/[$,\s]/g, ""));
+            if (val > 0) { price = val; priceText = pm; break; }
+          }
+          if (price > 0) break;
         }
-        if (!btn) continue;
-
-        let priceEl = null;
-        for (const sel of priceSels) {
-          priceEl = card.querySelector(sel);
-          if (priceEl) break;
-        }
-        if (!priceEl) {
-          priceEl = Array.from(card.querySelectorAll("*")).find(
-            (el) => el.children.length === 0 && el.textContent.includes("$")
-          );
-        }
-        if (!priceEl) continue;
-
-        const price = parseFloat(priceEl.textContent.replace(/[^0-9.]/g, ""));
-        if (!isNaN(price) && price > 0 && price < minPrice) {
-          minPrice = price;
-          bestBtn = btn;
-          bestDetails = {
-            price,
-            brand: (card.querySelector("h3.brand-name, [class*='brand'], .manufacturer") || {}).textContent?.trim() || "",
-            partNumber: (card.querySelector("span.part-number, [class*='part-number'], [class*='partNum']") || {}).textContent?.trim() || "",
-            description: (card.querySelector("h2, h3, [class*='title'], [class*='description']") || {}).textContent?.trim() || "",
-          };
-        }
+        container = container.parentElement;
       }
 
-      if (bestBtn && bestDetails) {
-        bestBtn.setAttribute("data-sam-cheapest", "true");
-        return bestDetails;
+      if (price <= 0 || !container) continue;
+
+      // Step 3: Check for out-of-stock indicators in the container
+      const containerText = container.textContent.toLowerCase();
+      if (containerText.includes("out of stock") || containerText.includes("unavailable")) continue;
+
+      // Step 4: Extract part details from the container
+      if (price < minPrice) {
+        minPrice = price;
+        bestBtn = btn;
+        // Try to extract brand, part number, description from the container
+        const allText = container.innerText || "";
+        const lines = allText.split("\n").map(l => l.trim()).filter(l => l.length > 0 && l.length < 80);
+        bestDetails = {
+          price,
+          brand: lines.find(l => !l.includes("$") && !l.includes("Add") && l.length < 30) || "",
+          partNumber: (allText.match(/\b[A-Z0-9]{4,20}\b/) || [""])[0],
+          description: lines.find(l => l.length > 15 && !l.includes("$")) || "",
+        };
       }
-      return null;
-    },
-    PARTSTECH.PRODUCT_CARD.split(", "),
-    PARTSTECH.PRICE.split(", "),
-    PARTSTECH.OUT_OF_STOCK.split(", ")[0],
-    PARTSTECH.CART_BTN_TEXTS
-  );
+    }
+
+    if (bestBtn && bestDetails) {
+      bestBtn.setAttribute("data-sam-cheapest", "true");
+      return bestDetails;
+    }
+    return null;
+  }, PARTSTECH.CART_BTN_TEXTS);
 
   if (!found) {
     return { success: false, error: "No in-stock parts with price found" };
