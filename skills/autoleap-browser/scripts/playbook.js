@@ -557,9 +557,20 @@ async function runPlaybook({ customer, vehicle, diagnosis, parts, progressCallba
       const addOnStr = motorResult.addOns?.length > 0 ? `, add-ons: ${motorResult.addOns.join(", ")}` : "";
       console.log(`${LOG} Phase 3: MOTOR labor added: ${motorResult.hours}h (NEVER modifying Qty/Hrs)${addOnStr}`);
 
-      // Save estimate to commit MOTOR labor before PartsTech
-      // PartsTech button stays disabled until estimate has a saved service line
-      console.log(`${LOG} Phase 3b: Saving estimate to commit MOTOR labor...`);
+      // Reload page to ensure Angular reflects MOTOR additions and save
+      console.log(`${LOG} Phase 3b: Reloading estimate to commit MOTOR labor...`);
+      const currentUrl = page.url();
+      await page.reload({ waitUntil: "networkidle2", timeout: 30000 }).catch(() => {});
+      await sleep(3000);
+
+      // Ensure we're on the estimate page (reload might redirect)
+      if (!page.url().includes("estimate")) {
+        console.log(`${LOG} Phase 3b: Page redirected after reload, navigating back...`);
+        await page.goto(currentUrl, { waitUntil: "networkidle2", timeout: 30000 }).catch(() => {});
+        await sleep(3000);
+      }
+
+      // Save after reload
       await saveEstimate(page);
       await sleep(2000);
 
@@ -570,11 +581,13 @@ async function runPlaybook({ customer, vehicle, diagnosis, parts, progressCallba
         // Check PartsTech button state after save
         const ptBtns = Array.from(document.querySelectorAll(".ro-partstech-new button, [class*='partstech'] button"));
         const ptEnabled = ptBtns.some(b => !b.className.includes("if-disabled") && b.offsetParent !== null);
-        return { hasService, ptEnabled, ptBtnCount: ptBtns.length };
+        // Count service lines on the page
+        const serviceCount = (allText.match(/\d+\.\d{2}\s*hrs?/gi) || []).length;
+        return { hasService, ptEnabled, ptBtnCount: ptBtns.length, serviceCount };
       }, motorResult.procedure);
-      console.log(`${LOG} Phase 3b: Service in estimate: ${serviceCheck.hasService}, PT enabled: ${serviceCheck.ptEnabled}`);
+      console.log(`${LOG} Phase 3b: Service in estimate: ${serviceCheck.hasService}, PT enabled: ${serviceCheck.ptEnabled}, services: ${serviceCheck.serviceCount}`);
 
-      // Take a debug screenshot of the estimate page after MOTOR + save
+      // Take a debug screenshot of the estimate page after reload + save
       await page.screenshot({ path: "/tmp/debug-after-motor-save.png" });
     } else {
       console.log(`${LOG} Phase 3: MOTOR navigation failed: ${motorResult.error}`);
