@@ -353,8 +353,30 @@ async function searchAndAddToCart(ptPage, searchTerm) {
   }
   await marked.click();
   await sleep(3000);
-  console.log(`${LOG} Part added to cart`);
 
+  // Verify cart was updated — check for cart badge/count or toast
+  const cartVerify = await ptPage.evaluate(() => {
+    const bodyText = document.body.innerText || "";
+    // Look for "added" confirmation toast
+    const hasToast = bodyText.toLowerCase().includes("added to cart") ||
+      bodyText.toLowerCase().includes("item added");
+    // Check cart icon badge
+    const cartBadge = document.querySelector("[class*='cart'] [class*='badge'], [class*='cart-count']");
+    const cartCount = cartBadge ? cartBadge.textContent.trim() : "no-badge";
+    // Check if "Add to cart" button changed to "In cart" or similar
+    const btns = Array.from(document.querySelectorAll("button")).filter(
+      b => b.offsetParent !== null && /in cart|added|remove/i.test(b.textContent)
+    ).map(b => b.textContent.trim().substring(0, 30));
+    return { hasToast, cartCount, changedBtns: btns };
+  });
+  console.log(`${LOG} Cart verify: ${JSON.stringify(cartVerify)}`);
+
+  // Also try taking a screenshot to see the page state after add-to-cart
+  try {
+    await ptPage.screenshot({ path: "/tmp/debug-pt-after-add-to-cart.png" });
+  } catch { /* optional */ }
+
+  console.log(`${LOG} Part added to cart`);
   return { success: true, partDetails: found };
 }
 
@@ -378,6 +400,26 @@ async function submitCartToAutoLeap(ptPage, alPage) {
       return { success: false, error: `Cart navigation failed: ${navErr.message}` };
     }
   }
+
+  // Debug: screenshot and dump cart page contents
+  try {
+    await ptPage.screenshot({ path: "/tmp/debug-pt-cart-page.png" });
+  } catch { /* optional */ }
+
+  const cartDebug = await ptPage.evaluate(() => {
+    const url = location.href;
+    const bodyText = document.body.innerText || "";
+    const lines = bodyText.split("\n").map(l => l.trim()).filter(l => l.length > 0 && l.length < 80);
+    // Find dollar amounts
+    const dollarLines = lines.filter(l => l.includes("$")).slice(0, 10);
+    // Find all buttons
+    const buttons = Array.from(document.querySelectorAll("button")).filter(b => b.offsetParent !== null)
+      .map(b => b.textContent.trim().substring(0, 30)).filter(t => t.length > 0).slice(0, 10);
+    // Check if cart is empty
+    const isEmpty = bodyText.toLowerCase().includes("empty") || bodyText.toLowerCase().includes("no items");
+    return { url, isEmpty, dollarLines, buttons, bodySnippet: bodyText.substring(0, 200) };
+  });
+  console.log(`${LOG} Cart page debug: ${JSON.stringify(cartDebug)}`);
 
   console.log(`${LOG} Clicking "Submit quote"...`);
 
