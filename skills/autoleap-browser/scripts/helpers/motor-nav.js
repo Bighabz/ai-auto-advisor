@@ -566,7 +566,69 @@ async function navigateMotorTree(page, diagnosis, vehicle) {
     }
     return results;
   });
-  console.log(`${LOG} MOTOR row discovery: ${JSON.stringify(motorRowDiscovery)}`);
+  console.log(`${LOG} MOTOR row discovery: ${JSON.stringify(motorRowDiscovery).substring(0, 500)}`);
+
+  // Find the green "+" circle buttons — they're at the far right of each procedure row
+  const greenPlusDisco = await page.evaluate(() => {
+    // Strategy 1: Look for any element with "plus" in class name
+    const plusEls = Array.from(document.querySelectorAll("[class*='plus'], [class*='fa-plus'], [class*='add-service'], [class*='add-motor']"))
+      .filter(el => el.offsetParent !== null)
+      .map(el => {
+        const rect = el.getBoundingClientRect();
+        const parent = el.parentElement;
+        return {
+          tag: el.tagName,
+          cls: (el.className || "").substring(0, 60),
+          parentTag: parent?.tagName,
+          parentCls: (parent?.className || "").substring(0, 60),
+          x: Math.round(rect.x), y: Math.round(rect.y),
+          w: Math.round(rect.width), h: Math.round(rect.height),
+          cursor: getComputedStyle(el).cursor,
+          bgColor: getComputedStyle(el.closest("button, div, span") || el).backgroundColor,
+        };
+      });
+
+    // Strategy 2: Look for clickable elements at x > 1100 (far right where green circles are)
+    const rightSideEls = Array.from(document.querySelectorAll("button, i, span, div, a"))
+      .filter(el => {
+        if (!el.offsetParent) return false;
+        const r = el.getBoundingClientRect();
+        return r.x > 1100 && r.x < 1250 && r.width > 10 && r.width < 50 && r.height > 10 && r.height < 50;
+      })
+      .map(el => {
+        const rect = el.getBoundingClientRect();
+        return {
+          tag: el.tagName,
+          cls: (el.className || "").substring(0, 60),
+          text: el.textContent.trim().substring(0, 10),
+          x: Math.round(rect.x), y: Math.round(rect.y),
+          w: Math.round(rect.width), h: Math.round(rect.height),
+          cursor: getComputedStyle(el).cursor,
+          bgColor: getComputedStyle(el).backgroundColor,
+          color: getComputedStyle(el).color,
+        };
+      });
+
+    // Strategy 3: Use elementFromPoint at known green circle positions
+    // From screenshots: green circles are at approximately x=1180
+    const yPositions = [338, 392, 446, 500, 554, 608, 690, 744];
+    const pointHits = yPositions.map(y => {
+      const el = document.elementFromPoint(1180, y);
+      if (!el) return { y, found: false };
+      return {
+        y,
+        found: true,
+        tag: el.tagName,
+        cls: (el.className || "").substring(0, 60),
+        text: el.textContent.trim().substring(0, 20),
+        parentTag: el.parentElement?.tagName,
+        parentCls: (el.parentElement?.className || "").substring(0, 60),
+      };
+    });
+
+    return { plus: plusEls.slice(0, 10), rightSide: rightSideEls.slice(0, 15), pointHits };
+  });
+  console.log(`${LOG} Green "+" discovery: ${JSON.stringify(greenPlusDisco)}`);
 
   const procedures = await readProcedures(page);
   console.log(`${LOG} Found ${procedures.length} procedures: ${procedures.slice(0, 5).map(p => p.name).join(", ")}${procedures.length > 5 ? "..." : ""}`);
