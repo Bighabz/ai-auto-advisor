@@ -200,6 +200,20 @@ async function openPartsTechTab(page, browser) {
   console.log(`${LOG} PT button located: ${JSON.stringify(ptBtnSelector)}`);
 
   if (ptBtnSelector.found) {
+    // Force-enable the button if Angular's if-disabled directive blocked it.
+    // The button IS bound to the correct handler, but Angular conditionally
+    // disables it. Removing the class + disabled attribute lets the click through.
+    await page.evaluate(() => {
+      const el = document.querySelector('[data-pt-plus="true"]');
+      if (el) {
+        el.classList.remove("if-disabled");
+        el.removeAttribute("disabled");
+        el.style.pointerEvents = "auto";
+        el.style.opacity = "1";
+      }
+    });
+    await sleep(200);
+
     // Use puppeteer native click instead of JS click for proper event dispatch
     try {
       const markedEl = await page.$('[data-pt-plus="true"]');

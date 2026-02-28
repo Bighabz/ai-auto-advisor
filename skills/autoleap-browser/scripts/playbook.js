@@ -561,13 +561,26 @@ async function runPlaybook({ customer, vehicle, diagnosis, parts, progressCallba
       console.log(`${LOG} Phase 3b: Reloading estimate to commit MOTOR labor...`);
       const currentUrl = page.url();
       await page.reload({ waitUntil: "networkidle2", timeout: 30000 }).catch(() => {});
-      await sleep(3000);
+      await sleep(5000);
 
       // Ensure we're on the estimate page (reload might redirect)
       if (!page.url().includes("estimate")) {
         console.log(`${LOG} Phase 3b: Page redirected after reload, navigating back...`);
         await page.goto(currentUrl, { waitUntil: "networkidle2", timeout: 30000 }).catch(() => {});
-        await sleep(3000);
+        await sleep(5000);
+      }
+
+      // Wait for Angular to render the estimate content (services section)
+      const procShort = (motorResult.procedure || "").substring(0, 15);
+      try {
+        await page.waitForFunction(
+          (text) => (document.body.innerText || "").includes(text),
+          { timeout: 15000 },
+          procShort
+        );
+        console.log(`${LOG} Phase 3b: Service "${procShort}" visible in DOM ✓`);
+      } catch {
+        console.log(`${LOG} Phase 3b: Service text not found in DOM after 15s — continuing`);
       }
 
       // Save after reload
@@ -575,17 +588,21 @@ async function runPlaybook({ customer, vehicle, diagnosis, parts, progressCallba
       await sleep(2000);
 
       // Verify MOTOR service appears in the estimate services list
-      const serviceCheck = await page.evaluate((procName) => {
+      const serviceCheck = await page.evaluate((procName, procShort) => {
         const allText = document.body.innerText || "";
-        const hasService = allText.includes(procName);
+        // Check both full name and shortened name
+        const hasService = allText.includes(procName) || allText.includes(procShort);
         // Check PartsTech button state after save
         const ptBtns = Array.from(document.querySelectorAll(".ro-partstech-new button, [class*='partstech'] button"));
         const ptEnabled = ptBtns.some(b => !b.className.includes("if-disabled") && b.offsetParent !== null);
-        // Count service lines on the page
-        const serviceCount = (allText.match(/\d+\.\d{2}\s*hrs?/gi) || []).length;
-        return { hasService, ptEnabled, ptBtnCount: ptBtns.length, serviceCount };
-      }, motorResult.procedure);
-      console.log(`${LOG} Phase 3b: Service in estimate: ${serviceCheck.hasService}, PT enabled: ${serviceCheck.ptEnabled}, services: ${serviceCheck.serviceCount}`);
+        // Count service lines: look for MOTOR tags or service amount patterns
+        const motorTags = document.querySelectorAll("[class*='motor-tag'], [class*='motor-badge'], span.badge");
+        const serviceLines = Array.from(motorTags).filter(el => el.textContent.includes("MOTOR")).length;
+        // Also count by hrs pattern in service rows
+        const hrsCount = (allText.match(/\d+\.\d{2}\s*hrs?/gi) || []).length;
+        return { hasService, ptEnabled, ptBtnCount: ptBtns.length, serviceLines, hrsCount };
+      }, motorResult.procedure, procShort);
+      console.log(`${LOG} Phase 3b: Service in estimate: ${serviceCheck.hasService}, PT enabled: ${serviceCheck.ptEnabled}, MOTOR lines: ${serviceCheck.serviceLines}, hrs patterns: ${serviceCheck.hrsCount}`);
 
       // Take a debug screenshot of the estimate page after reload + save
       await page.screenshot({ path: "/tmp/debug-after-motor-save.png" });
@@ -1233,74 +1250,94 @@ async function saveEstimate(page) {
 async function readEstimateTotals(page) {
   return page.evaluate(() => {
     const result = { labor: 0, parts: 0, shopSupplies: 0, tax: 0, grandTotal: 0, debug: {} };
+    const allText = document.body.innerText || "";
 
-    // Strategy 1: Look for the "Labor summary" tab content
-    // AutoLeap shows labor/parts/total in a summary section at the bottom
-    const summaryTab = document.querySelector('[class*="labor-summary"], [class*="estimate-summary"]');
-    if (summaryTab) {
-      const text = summaryTab.innerText || "";
-      result.debug.summaryTabText = text.substring(0, 200);
+    // Strategy 1: Parse "Service total" / "Service net total" patterns
+    // AutoLeap shows these near each service group and at the footer
+    const serviceTotalMatch = allText.match(/Service\s+(?:net\s+)?total[:\s]*\$?([\d,.]+)/i);
+    if (serviceTotalMatch) {
+      result.labor = parseFloat(serviceTotalMatch[1].replace(/,/g, "")) || 0;
+      result.debug.serviceTotalText = serviceTotalMatch[0];
     }
 
-    // Strategy 2: Look for specific total elements (AutoLeap uses class-based totals)
-    const totalElements = document.querySelectorAll(
-      '[class*="total-amount"], [class*="grand-total"], [class*="estimate-total"], ' +
-      '[class*="totalAmount"], [class*="grandTotal"]'
-    );
-    for (const el of totalElements) {
-      const text = el.textContent.trim();
-      const match = text.match(/\$?([\d,.]+)/);
-      if (match) {
-        const val = parseFloat(match[1].replace(/,/g, ""));
-        if (val > result.grandTotal) result.grandTotal = val;
-        result.debug.totalEl = text.substring(0, 50);
+    // Strategy 2: Look for individual service line amounts in the DOM
+    // AutoLeap service rows have: name, type, cost, qty/hrs, amount
+    // The amount column shows the line total (hrs × rate)
+    if (result.labor === 0) {
+      const serviceRows = document.querySelectorAll(
+        "[class*='service-line'], [class*='estimate-service'], tr[class*='service'], " +
+        "[class*='labor-line'], [class*='service-item']"
+      );
+      let laborSum = 0;
+      for (const row of serviceRows) {
+        if (!row.offsetParent) continue;
+        const text = row.textContent || "";
+        // Look for MOTOR tag to confirm this is a labor service
+        if (text.includes("MOTOR") || text.match(/\d+\.\d+\s*hrs?/i)) {
+          const amounts = text.match(/\$\s*([\d,.]+)/g) || [];
+          // Last dollar amount in the row is typically the line total
+          if (amounts.length > 0) {
+            const lastAmt = parseFloat(amounts[amounts.length - 1].replace(/[$,\s]/g, "")) || 0;
+            if (lastAmt > 0) laborSum += lastAmt;
+          }
+        }
+      }
+      if (laborSum > 0) {
+        result.labor = laborSum;
+        result.debug.laborSource = "service-rows";
       }
     }
 
-    // Strategy 3: Parse from page text with expanded patterns
-    const allText = document.body.innerText;
-    const patterns = [
-      { key: "labor", regex: /(?:total\s*)?labor[:\s$]*\$?([\d,.]+)/i },
-      { key: "parts", regex: /(?:total\s*)?parts[:\s$]*\$?([\d,.]+)/i },
-      { key: "shopSupplies", regex: /shop\s*supplies?[:\s$]*\$?([\d,.]+)/i },
-      { key: "tax", regex: /(?:sales\s*)?tax[:\s$]*\$?([\d,.]+)/i },
-      { key: "grandTotal", regex: /(?:grand\s*total|total\s*amount|estimate\s*total|total\s*cost)[:\s$]*\$?([\d,.]+)/i },
+    // Strategy 3: Parse specific text patterns from page content
+    // AutoLeap estimate page text patterns (not navigation tabs)
+    const textPatterns = [
+      { key: "parts", regex: /Parts?\s+(?:total|amount)[:\s]*\$?([\d,.]+)/i },
+      { key: "shopSupplies", regex: /Shop\s+suppl(?:y|ies)[:\s]*\$?([\d,.]+)/i },
+      { key: "tax", regex: /(?:Sales?\s+)?Tax[:\s]*\$?([\d,.]+)/i },
+      { key: "grandTotal", regex: /(?:Grand\s+total|Estimate\s+total|Total\s+amount|Net\s+total)[:\s]*\$?([\d,.]+)/i },
     ];
-
-    for (const { key, regex } of patterns) {
+    for (const { key, regex } of textPatterns) {
       const match = allText.match(regex);
       if (match && result[key] === 0) {
         result[key] = parseFloat(match[1].replace(/,/g, "")) || 0;
       }
     }
 
-    // Strategy 4: Look for the EXPECTED PROFITABILITY section which has totals
-    const profitMatch = allText.match(/EXPECTED PROFITABILITY\s*([\d.]+)%/);
-    if (profitMatch) {
-      result.debug.profitPercent = profitMatch[1];
-    }
-
-    // Strategy 5: Find grand total from summary elements
+    // Strategy 4: Look for footer/summary section with dollar amounts
+    // AutoLeap estimate footer typically has the grand total as the largest $ value
+    // in a dedicated footer/summary area (not navigation)
     if (result.grandTotal === 0) {
-      const summaryEls = document.querySelectorAll(
-        '[class*="total"], [class*="summary"], [class*="grand"], [class*="footer"] [class*="amount"]'
+      // Find elements that look like total displays (not nav tabs, not buttons)
+      const candidates = document.querySelectorAll(
+        "[class*='estimate-footer'], [class*='summary-row'], [class*='total-row'], " +
+        "[class*='grand-total'], [class*='net-total'], [class*='footer-total']"
       );
-      for (const el of summaryEls) {
+      for (const el of candidates) {
+        if (!el.offsetParent) continue;
+        // Skip nav elements
+        if (el.closest("nav, [role='tablist'], [class*='sidebar']")) continue;
         const text = el.textContent || "";
-        const amounts = text.match(/\$[\d,.]+/g) || [];
-        for (const amt of amounts) {
-          const val = parseFloat(amt.replace(/[$,]/g, ""));
-          if (val > result.grandTotal) result.grandTotal = val;
+        const match = text.match(/\$\s*([\d,.]+)/);
+        if (match) {
+          const val = parseFloat(match[1].replace(/,/g, ""));
+          if (val > result.grandTotal) {
+            result.grandTotal = val;
+            result.debug.grandTotalSource = text.substring(0, 60);
+          }
         }
       }
     }
 
-    // Debug: collect nearby totals text
-    const laborSummaryTab = Array.from(document.querySelectorAll("a, [role='tab']"))
-      .find(el => el.textContent.includes("Labor summary"));
-    if (laborSummaryTab) {
-      result.debug.laborSummaryTab = true;
+    // Strategy 5: Sum labor + parts as fallback grand total
+    if (result.grandTotal === 0 && (result.labor > 0 || result.parts > 0)) {
+      result.grandTotal = result.labor + result.parts + result.shopSupplies + result.tax;
+      result.debug.grandTotalSource = "calculated";
     }
+
+    // Debug: capture a snippet of the estimate area text for troubleshooting
+    // Look for the area around "Service total" or dollar amounts, not the full body
+    const dollarLines = allText.split("\n").filter(l => l.includes("$") || l.toLowerCase().includes("total"));
+    result.debug.dollarLines = dollarLines.slice(0, 10).map(l => l.trim().substring(0, 80));
 
     return result;
   });
