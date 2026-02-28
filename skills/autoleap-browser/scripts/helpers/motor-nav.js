@@ -1200,85 +1200,181 @@ async function readProcedures(page) {
 }
 
 /**
- * Click the green "+" button for a specific procedure.
- * Uses the stored plusRect coordinates for native mouse click.
- */
-/**
  * Click the green "+" circle button for a specific MOTOR procedure.
  *
- * The green "+" is a div.pointer.font-primary in a separate column (div.m-estimate),
- * NOT inside the motor-service-item row. After clicking, the procedure is added
- * directly to the estimate (no separate "Add" confirmation needed).
+ * APPROACH: Avoids scrollIntoView (which positions elements behind the dialog's
+ * sticky header at y≈38, making them unclickable). Instead:
+ * 1. Scroll the procedures container to top
+ * 2. Scan visible rows + green buttons at each scroll position
+ * 3. Match target row to its green button by INDEX (nth row → nth button)
+ * 4. Only click when both are confirmed in the viewport content area (y > 150)
  *
  * @param {import('puppeteer-core').Page} page
  * @param {{ name: string, hours: number, labor: number, plusRect: { x: number, y: number } }} proc
  * @returns {Promise<boolean>}
  */
 async function clickProcedurePlus(page, proc) {
-  if (!proc.plusRect) return false;
+  const searchText = proc.name.substring(0, 20);
 
-  // Step 1: Scroll the procedure into view
-  await page.evaluate((name) => {
-    const searchText = name.substring(0, 20);
-    const els = Array.from(document.querySelectorAll("[class*='motor-service-name'], [class*='motor-service-item']"))
-      .filter(el => el.offsetParent !== null && el.textContent.includes(searchText));
-    if (els.length > 0) {
-      els[0].scrollIntoView({ block: "center", behavior: "smooth" });
+  // Step 1: Scroll the MOTOR procedures container to the top
+  await page.evaluate(() => {
+    const items = document.querySelectorAll("[class*='motor-service-item']");
+    if (items.length === 0) return;
+    let container = items[0].parentElement;
+    while (container && container !== document.body) {
+      if (container.scrollHeight > container.clientHeight + 50) {
+        container.scrollTop = 0;
+        return;
+      }
+      container = container.parentElement;
     }
-  }, proc.name);
-  await sleep(800);
+  });
+  await sleep(600);
 
-  // Step 2: Get the EXACT position of the target row's accordion header.
-  // The green "+" circle is always at x≈1180, aligned with the header's vertical center.
-  // We use the HEADER rect (not the whole motor-service-item which may include expanded content).
-  const freshRect = await page.evaluate((name) => {
-    const searchText = name.substring(0, 20);
-    const rows = Array.from(document.querySelectorAll("[class*='motor-service-item']"))
-      .filter(el => el.offsetParent !== null && el.textContent.includes(searchText));
+  // Step 2: Scan + scroll loop — find target row and its green button
+  const maxAttempts = 15;
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    const result = await page.evaluate((searchText) => {
+      const MIN_Y = 150;  // below dialog header/tabs
+      const MAX_Y = window.innerHeight - 50;
 
-    for (const row of rows) {
-      // Use the accordion HEADER element for precise y — it's the compact single-line row
-      // (the motor-service-item can be much taller if expanded)
-      const header = row.querySelector("[class*='accordian-header'], [class*='accordion-header']")
-        || row.querySelector("[class*='custom-header-template']");
-      const target = header || row;
-      const rect = target.getBoundingClientRect();
-      const centerY = rect.y + rect.height / 2;
+      // All motor-service-item rows in DOM order
+      const allRows = Array.from(document.querySelectorAll("[class*='motor-service-item']"))
+        .filter(el => el.offsetParent !== null);
 
-      // First try to find the actual green "+" div at this y
-      const allGreen = document.querySelectorAll("div[class*='pointer'][class*='font-primary']");
-      for (const gb of allGreen) {
-        if (!gb.offsetParent) continue;
-        const r = gb.getBoundingClientRect();
-        // Must be very close to this row's header center (±20px) and at x > 1000
-        if (Math.abs(r.y + r.height / 2 - centerY) < 20 && r.x > 1000) {
-          return { x: r.x + r.width / 2, y: r.y + r.height / 2, strategy: "green-div" };
+      // Find target's index
+      let targetIdx = -1;
+      for (let i = 0; i < allRows.length; i++) {
+        const nameEl = allRows[i].querySelector("[class*='motor-service-name']");
+        const name = nameEl ? nameEl.textContent.trim() : "";
+        if (name.includes(searchText)) { targetIdx = i; break; }
+      }
+      if (targetIdx === -1) return { found: false, reason: "target-not-in-dom", rows: allRows.length };
+
+      // Check target row is in the viewport content area
+      const targetRow = allRows[targetIdx];
+      const headerEl = targetRow.querySelector("[class*='accordian-header']");
+      const targetRect = (headerEl || targetRow).getBoundingClientRect();
+      const targetCenterY = targetRect.y + targetRect.height / 2;
+
+      if (targetCenterY < MIN_Y || targetCenterY > MAX_Y) {
+        return { found: false, reason: "not-in-viewport", y: Math.round(targetCenterY), idx: targetIdx, rows: allRows.length };
+      }
+
+      // All green "+" buttons in the right column (sorted by y)
+      const greenBtns = Array.from(document.querySelectorAll(
+        "div[class*='pointer'][class*='font-primary']"
+      )).filter(el => {
+        if (!el.offsetParent) return false;
+        const r = el.getBoundingClientRect();
+        return r.x > 900 && r.width > 5 && r.height > 5;
+      }).sort((a, b) => a.getBoundingClientRect().y - b.getBoundingClientRect().y);
+
+      // Strategy A: Index-based match (nth row → nth green button)
+      if (targetIdx < greenBtns.length) {
+        const btn = greenBtns[targetIdx];
+        const r = btn.getBoundingClientRect();
+        const btnCenterY = r.y + r.height / 2;
+        if (btnCenterY > MIN_Y && btnCenterY < MAX_Y) {
+          return {
+            found: true, x: r.x + r.width / 2, y: btnCenterY,
+            strategy: "index-match", idx: targetIdx,
+            rows: allRows.length, btns: greenBtns.length,
+            targetY: Math.round(targetCenterY), btnY: Math.round(btnCenterY),
+          };
         }
       }
 
-      // Fallback: use elementFromPoint at fixed x=1180 at the header's center y
-      const el = document.elementFromPoint(1180, centerY);
-      if (el && (el.className || "").includes("pointer")) {
-        const r = el.getBoundingClientRect();
-        return { x: r.x + r.width / 2, y: r.y + r.height / 2, strategy: "elementFromPoint" };
+      // Strategy B: Y-proximity match (closest green button to target row)
+      let closestBtn = null;
+      let closestDist = 60; // max 60px
+      for (const btn of greenBtns) {
+        const r = btn.getBoundingClientRect();
+        const btnCenterY = r.y + r.height / 2;
+        if (btnCenterY < MIN_Y || btnCenterY > MAX_Y) continue;
+        const dist = Math.abs(btnCenterY - targetCenterY);
+        if (dist < closestDist) {
+          closestDist = dist;
+          closestBtn = { x: r.x + r.width / 2, y: btnCenterY };
+        }
+      }
+      if (closestBtn) {
+        return {
+          found: true, ...closestBtn,
+          strategy: "y-proximity", dist: Math.round(closestDist),
+          targetY: Math.round(targetCenterY), btns: greenBtns.length,
+        };
       }
 
-      // Last resort: fixed position
-      return { x: 1180, y: centerY, strategy: "fixed-position" };
+      // Strategy C: elementFromPoint at the add column
+      const pointEl = document.elementFromPoint(1180, targetCenterY);
+      if (pointEl) {
+        const pCls = (pointEl.className || "");
+        const parentCls = (pointEl.parentElement?.className || "");
+        if (pCls.includes("pointer") || pCls.includes("font-primary") ||
+            parentCls.includes("m-estimate") || parentCls.includes("pointer")) {
+          const r = pointEl.getBoundingClientRect();
+          return {
+            found: true, x: r.x + r.width / 2, y: r.y + r.height / 2,
+            strategy: "elementFromPoint", btns: greenBtns.length,
+          };
+        }
+      }
+
+      return {
+        found: false, reason: "no-button-match",
+        targetY: Math.round(targetCenterY), btns: greenBtns.length, idx: targetIdx,
+      };
+    }, searchText);
+
+    console.log(`${LOG} clickProcedurePlus attempt ${attempt}: ${JSON.stringify(result)}`);
+
+    if (result.found) {
+      console.log(`${LOG} Clicking green "+" for "${proc.name}" at (${Math.round(result.x)}, ${Math.round(result.y)}) [${result.strategy}]`);
+      await page.mouse.click(result.x, result.y);
+      await sleep(2000);
+      await page.screenshot({ path: "/tmp/debug-motor-after-plus-click.png" });
+      return true;
     }
-    return null;
-  }, proc.name);
 
-  const clickTarget = freshRect || proc.plusRect;
-  const strategy = freshRect?.strategy || "stored-rect";
-  console.log(`${LOG} Clicking green "+" for "${proc.name}" at (${Math.round(clickTarget.x)}, ${Math.round(clickTarget.y)}) [${strategy}]`);
-  await page.mouse.click(clickTarget.x, clickTarget.y);
-  await sleep(2000);
+    // Scroll the container to bring target into view
+    if (result.reason === "not-in-viewport" || result.reason === "no-button-match") {
+      await page.evaluate((searchText) => {
+        const el = Array.from(document.querySelectorAll("[class*='motor-service-name']"))
+          .find(e => e.offsetParent !== null && e.textContent.includes(searchText));
+        if (!el) return;
+        // Find scrollable container and scroll directly
+        let container = el.parentElement;
+        while (container && container !== document.body) {
+          if (container.scrollHeight > container.clientHeight + 50) {
+            const elRect = el.getBoundingClientRect();
+            const containerRect = container.getBoundingClientRect();
+            // Position element in the MIDDLE of the container
+            const elOffsetInContainer = (elRect.y - containerRect.y) + container.scrollTop;
+            container.scrollTop = Math.max(0, elOffsetInContainer - container.clientHeight / 2);
+            return;
+          }
+          container = container.parentElement;
+        }
+      }, searchText);
+      await sleep(600);
+      continue;
+    }
 
-  // Take screenshot to verify the procedure was added
-  await page.screenshot({ path: "/tmp/debug-motor-after-plus-click.png" });
+    // Target not in DOM — scroll container down to load more
+    await page.evaluate(() => {
+      const containers = Array.from(document.querySelectorAll(
+        "[class*='motor'], [class*='content'], [class*='panel-body'], [class*='scroll']"
+      )).filter(el => el.scrollHeight > el.clientHeight && el.offsetParent !== null);
+      for (const c of containers) {
+        if (c.scrollHeight > c.clientHeight + 50) { c.scrollTop += 200; return; }
+      }
+    });
+    await sleep(400);
+  }
 
-  return true;
+  console.log(`${LOG} Failed to find green "+" for "${proc.name}" after ${maxAttempts} attempts`);
+  return false;
 }
 
 // ─── DOM Readers ────────────────────────────────────────────────────────────
