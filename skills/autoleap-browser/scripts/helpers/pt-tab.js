@@ -241,6 +241,40 @@ async function searchAndAddToCart(ptPage, searchTerm) {
     return { success: false, error: `No results in PartsTech for: ${searchTerm}` };
   }
 
+  // Debug: take screenshot and dump DOM state before card search
+  try {
+    await ptPage.screenshot({ path: "/tmp/debug-pt-search-results.png" });
+  } catch { /* screenshot optional */ }
+
+  // Debug: check what's on the page
+  const pageDebug = await ptPage.evaluate((cardSels) => {
+    const url = location.href;
+    const bodyLen = document.body.innerText.length;
+    // Check each card selector
+    const cardCounts = {};
+    for (const sel of cardSels) {
+      cardCounts[sel] = document.querySelectorAll(sel).length;
+    }
+    // Find any elements with "$" in text (prices)
+    const priceEls = Array.from(document.querySelectorAll("*")).filter(
+      el => el.children.length === 0 && el.textContent.includes("$") && el.offsetParent !== null
+    ).slice(0, 10).map(el => ({
+      tag: el.tagName,
+      cls: (el.className || "").substring(0, 40),
+      text: el.textContent.trim().substring(0, 30),
+    }));
+    // Find any buttons with cart-related text
+    const cartBtns = Array.from(document.querySelectorAll("button")).filter(
+      b => b.offsetParent !== null && /add|cart/i.test(b.textContent)
+    ).slice(0, 5).map(b => ({
+      text: b.textContent.trim().substring(0, 30),
+      disabled: b.disabled,
+      cls: (b.className || "").substring(0, 40),
+    }));
+    return { url, bodyLen, cardCounts, priceEls, cartBtns };
+  }, PARTSTECH.PRODUCT_CARD.split(", "));
+  console.log(`${LOG} Page debug: ${JSON.stringify(pageDebug)}`);
+
   // Find cheapest in-stock and mark it
   const found = await ptPage.evaluate(
     (cardSels, priceSels, oosSelector, cartBtnTexts) => {

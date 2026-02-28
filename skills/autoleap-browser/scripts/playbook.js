@@ -737,44 +737,28 @@ async function runPlaybook({ customer, vehicle, diagnosis, parts, progressCallba
       if (token && result.estimateId) {
         const estData = await getEstimate(token, result.estimateId);
         if (estData) {
-          // AutoLeap estimate response has various total fields
-          // Try common field names
-          const svcTotal = estData.serviceTotal || estData.laborTotal || estData.totalLabor || 0;
-          const partsTotal = estData.partsTotal || estData.totalParts || 0;
-          const supplies = estData.shopSupplies || estData.shopSuppliesTotal || 0;
-          const tax = estData.tax || estData.taxTotal || estData.salesTax || 0;
-          const grand = estData.total || estData.grandTotal || estData.totalAmount ||
-            estData.netTotal || estData.estimateTotal || 0;
+          // AutoLeap API returns estData.total as an OBJECT:
+          // { parts: 0, labor: 150, total: 150, grand: 150, afterTax: 150, ... }
+          const t = estData.total || {};
+          if (typeof t === "object" && t !== null) {
+            totals.labor = t.labor || 0;
+            totals.parts = t.parts || 0;
+            totals.shopSupplies = t.shopFee || t.shopSupplyFee?.value || 0;
+            totals.tax = (typeof t.tax === "object") ? 0 : (t.tax || 0); // tax field is config, not amount
+            totals.grandTotal = t.grand || t.total || t.afterTax || 0;
+            // taxedAmount is the actual tax dollar amount
+            if (t.taxedAmount) totals.tax = t.taxedAmount;
+          } else if (typeof t === "number") {
+            totals.grandTotal = t;
+          }
 
-          // Also try nested: estData.totals.xxx or estData.summary.xxx
-          const nested = estData.totals || estData.summary || {};
-          totals.labor = svcTotal || nested.serviceTotal || nested.labor || 0;
-          totals.parts = partsTotal || nested.parts || nested.partsTotal || 0;
-          totals.shopSupplies = supplies || nested.shopSupplies || 0;
-          totals.tax = tax || nested.tax || 0;
-          totals.grandTotal = grand || nested.total || nested.grandTotal || 0;
-
-          // If no grand total but we have services, sum up service amounts
-          if (totals.grandTotal === 0 && estData.services && Array.isArray(estData.services)) {
-            let svcSum = 0;
-            for (const svc of estData.services) {
-              svcSum += (svc.amount || svc.total || svc.netTotal || 0);
-            }
-            if (svcSum > 0) { totals.labor = svcSum; totals.grandTotal = svcSum; }
+          // Also check billableHours
+          if (estData.billableHours) {
+            result.laborHours = estData.billableHours;
           }
 
           totals.source = "api";
-          console.log(`${LOG} Phase 6: API totals: ${JSON.stringify(totals)}`);
-
-          // Debug: log raw estimate fields for troubleshooting
-          const debugFields = {};
-          for (const k of Object.keys(estData)) {
-            const v = estData[k];
-            if (typeof v === "number" || (typeof v === "string" && v.includes("$"))) {
-              debugFields[k] = v;
-            }
-          }
-          console.log(`${LOG} Phase 6: Estimate numeric fields: ${JSON.stringify(debugFields)}`);
+          console.log(`${LOG} Phase 6: API totals — labor: $${totals.labor}, parts: $${totals.parts}, grand: $${totals.grandTotal}`);
         }
       }
     } catch (apiErr) {

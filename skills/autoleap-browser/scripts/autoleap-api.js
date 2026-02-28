@@ -393,7 +393,7 @@ async function downloadEstimatePDF(token, estimateId, outputPath) {
       page = await browser.newPage();
     }
 
-    const estimateUrl = `${AUTOLEAP_APP_URL}/#/estimates/${estimateId}`;
+    const estimateUrl = `${AUTOLEAP_APP_URL}/#/estimate/${estimateId}`;
     console.log(`${LOG} Puppeteer: navigating to ${estimateUrl}`);
     await page.goto(estimateUrl, { waitUntil: "networkidle2", timeout: 30000 });
     await new Promise(r => setTimeout(r, 5000)); // extra settle time for Angular SPA
