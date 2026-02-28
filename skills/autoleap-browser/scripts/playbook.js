@@ -683,18 +683,28 @@ async function runPlaybook({ customer, vehicle, diagnosis, parts, progressCallba
           const submitResult = await submitCartToAutoLeap(ptWorkPage, page);
           if (submitResult.success) {
             console.log(`${LOG} Phase 4: Parts synced to AutoLeap`);
+            // After submit, PartsTech redirects the PT tab to AutoLeap estimate page.
+            // That redirected page has the fresh parts data. Use it as our working page
+            // and close the stale original page.
+            if (submitResult.redirectedPage) {
+              console.log(`${LOG} Phase 4: Using redirected PT→AutoLeap page (has fresh parts)`);
+              const oldPage = page;
+              page = submitResult.redirectedPage;
+              try { await oldPage.close(); } catch { /* already closed or same page */ }
+              await page.bringToFront();
+            }
           } else {
             console.log(`${LOG} Phase 4: Cart submit issue: ${submitResult.error}`);
             result.warnings.push({ code: "PT_SUBMIT_FAILED", msg: submitResult.error });
           }
-        }
-
-        // Close PartsTech tab if still open (only for new tab mode)
-        if (ptPage && !isIframe) {
-          try {
-            if (!ptPage.isClosed()) await ptPage.close();
-          } catch { /* already closed */ }
-          await page.bringToFront();
+        } else {
+          // Close PartsTech tab if still open (only for new tab mode, no parts added)
+          if (ptPage && !isIframe) {
+            try {
+              if (!ptPage.isClosed()) await ptPage.close();
+            } catch { /* already closed */ }
+            await page.bringToFront();
+          }
         }
       } else {
         console.log(`${LOG} Phase 4: PartsTech did not open (no tab, no iframe) — skipping parts`);
@@ -712,12 +722,20 @@ async function runPlaybook({ customer, vehicle, diagnosis, parts, progressCallba
     // ═══════════════════════════════════════════════════════════════════════════
     if (result.partsAdded.length > 0 && motorResult.success) {
       await progress(progressCallback, "linking_parts");
-      console.log(`${LOG} Phase 5: Reloading estimate to pick up PartsTech parts...`);
 
-      // Reload estimate page to force Angular to fetch imported parts
-      const estUrl = `${AUTOLEAP_APP_URL}/#/estimate/${result.estimateId}`;
-      await page.goto(estUrl, { waitUntil: "domcontentloaded", timeout: 30000 });
-      await sleep(5000);
+      // Ensure we're on the estimate page with parts visible
+      // If we swapped to the redirected PT→AutoLeap page, parts should already be here.
+      // Otherwise, reload to pick them up.
+      const currentUrl = page.url();
+      if (!currentUrl.includes(result.estimateId)) {
+        console.log(`${LOG} Phase 5: Navigating to estimate...`);
+        const estUrl = `${AUTOLEAP_APP_URL}/#/estimate/${result.estimateId}`;
+        await page.goto(estUrl, { waitUntil: "domcontentloaded", timeout: 30000 });
+        await sleep(5000);
+      } else {
+        console.log(`${LOG} Phase 5: Already on estimate page (parts should be visible)`);
+        await sleep(2000);
+      }
 
       console.log(`${LOG} Phase 5: Linking parts to labor service...`);
       const linkResult = await linkPartsToServices(page, result.partsAdded, motorResult);
@@ -1187,132 +1205,103 @@ async function linkPartsToServices(page, addedParts, laborResult) {
   let linked = 0;
   const serviceName = laborResult.procedure || "";
 
-  // Switch to Services tab first — parts are listed under services in AutoLeap
-  await clickTab(page, "Services");
-  await sleep(2000);
-
-  // Take debug screenshot to see what's on the page
-  try {
-    await page.screenshot({ path: "/tmp/debug-phase5-services.png" });
-  } catch { /* optional */ }
-
-  // Debug: check what's visible in the services area
-  const pageState = await page.evaluate(() => {
-    const allText = document.body.innerText || "";
-    const lines = allText.split("\n").map(l => l.trim()).filter(l => l.length > 0);
-    // Find lines with "Select service", "$", or "PartsTech"
-    const relevantLines = lines.filter(l =>
-      l.includes("Select service") || l.includes("PartsTech") ||
-      l.includes("Catalytic") || l.includes("MOTOR") || l.includes("Catco")
-    ).slice(0, 15);
-
-    // Find all dropdowns/selects
-    const dropdowns = Array.from(document.querySelectorAll("p-dropdown, select, [class*='dropdown']"))
-      .filter(el => el.offsetParent !== null)
-      .slice(0, 10)
-      .map(el => ({
-        tag: el.tagName,
-        cls: (el.className || "").substring(0, 50),
-        text: (el.textContent || "").trim().substring(0, 40),
-        rect: (() => { const r = el.getBoundingClientRect(); return { x: Math.round(r.x), y: Math.round(r.y), w: Math.round(r.width) }; })(),
-      }));
-
-    // Find "Select service" text elements (the dropdown placeholder)
-    const selectServiceEls = Array.from(document.querySelectorAll("*")).filter(
-      el => el.offsetParent !== null && el.textContent.trim() === "Select service" && el.children.length === 0
-    ).slice(0, 5).map(el => ({
-      tag: el.tagName,
-      cls: (el.className || "").substring(0, 50),
-      rect: (() => { const r = el.getBoundingClientRect(); return { x: Math.round(r.x), y: Math.round(r.y) }; })(),
-    }));
-
-    return { relevantLines, dropdowns: dropdowns.length, selectServiceEls };
-  });
-  console.log(`${LOG} Phase 5 page state: ${JSON.stringify(pageState)}`);
-
-  // Now try Parts ordering tab
+  // Parts appear in the "Parts ordering" tab under "PartsTech's orders" section.
+  // Each imported part row has a "Select service" dropdown (PrimeNG p-dropdown).
   await clickTab(page, "Parts ordering");
-  await sleep(2000);
+  await sleep(3000);
 
   try {
     await page.screenshot({ path: "/tmp/debug-phase5-parts.png" });
   } catch { /* optional */ }
 
-  // Debug: dump parts tab content
-  const partsState = await page.evaluate(() => {
+  // Debug: check if PartsTech orders section is visible
+  const partsDebug = await page.evaluate(() => {
     const allText = document.body.innerText || "";
-    const lines = allText.split("\n").map(l => l.trim()).filter(l => l.length > 0);
-    const relevantLines = lines.filter(l =>
-      l.includes("$") || l.includes("Select") || l.includes("Catalytic") ||
-      l.includes("Catco") || l.includes("PartsTech") || l.includes("service")
-    ).slice(0, 20);
-
-    // Find part rows — look for rows containing both a price and "Select service"
-    const rows = Array.from(document.querySelectorAll("tr")).filter(r => {
-      const text = r.textContent || "";
-      return text.includes("$") && r.offsetParent !== null;
-    }).slice(0, 5).map(r => ({
-      text: (r.textContent || "").trim().substring(0, 100),
-      cells: r.cells ? r.cells.length : 0,
-    }));
-
-    return { relevantLines, rows };
+    const hasOrders = allText.includes("PartsTech's orders") || allText.includes("PartsTech");
+    const hasSelectService = allText.includes("Select service");
+    // Find "Select service" elements — these are PrimeNG dropdown labels
+    const selectSvcEls = Array.from(document.querySelectorAll("*")).filter(el => {
+      if (!el.offsetParent) return false;
+      const text = el.textContent.trim();
+      return (text === "Select service" || text === "Select Service") && el.children.length <= 2;
+    });
+    return {
+      hasOrders,
+      hasSelectService,
+      selectServiceCount: selectSvcEls.length,
+      selectServiceTags: selectSvcEls.slice(0, 3).map(el => ({
+        tag: el.tagName,
+        cls: (el.className || "").substring(0, 50),
+        parent: el.parentElement?.tagName || "none",
+        parentCls: (el.parentElement?.className || "").substring(0, 50),
+      })),
+    };
   });
-  console.log(`${LOG} Phase 5 parts state: ${JSON.stringify(partsState)}`);
+  console.log(`${LOG} Phase 5: ${JSON.stringify(partsDebug)}`);
 
-  // Strategy: Find ALL "Select service" dropdowns (unlinked parts) and link them
-  // AutoLeap shows imported parts with a "Select service" dropdown
-  // When clicked, it shows a list of services including our MOTOR labor
-  const unlinkedCount = await page.evaluate(() => {
-    // Find "Select service" placeholder text elements
-    return Array.from(document.querySelectorAll("*")).filter(
-      el => el.offsetParent !== null &&
-        (el.textContent.trim() === "Select service" || el.textContent.trim() === "Select Service") &&
-        el.children.length <= 1
-    ).length;
-  });
-  console.log(`${LOG} Phase 5: Found ${unlinkedCount} unlinked "Select service" dropdowns`);
+  if (partsDebug.selectServiceCount === 0) {
+    console.log(`${LOG} Phase 5: No "Select service" dropdowns found`);
+    return { linked: 0 };
+  }
 
   // Click each "Select service" dropdown and pick the MOTOR service
-  for (let i = 0; i < Math.min(unlinkedCount, addedParts.length); i++) {
+  for (let i = 0; i < Math.min(partsDebug.selectServiceCount, addedParts.length); i++) {
     try {
-      // Click the first "Select service" dropdown (they shrink as we link them)
-      const clickedDropdown = await page.evaluate(() => {
-        const els = Array.from(document.querySelectorAll("*")).filter(
-          el => el.offsetParent !== null &&
-            (el.textContent.trim() === "Select service" || el.textContent.trim() === "Select Service") &&
-            el.children.length <= 1
-        );
-        if (els.length === 0) return false;
-        // Click the parent element (which is usually the dropdown trigger)
-        const trigger = els[0].closest("p-dropdown, [class*='dropdown'], [role='listbox']") || els[0];
-        trigger.click();
-        return true;
+      // Find the "Select service" text and get its clickable parent (p-dropdown)
+      const dropdownInfo = await page.evaluate(() => {
+        const els = Array.from(document.querySelectorAll("*")).filter(el => {
+          if (!el.offsetParent) return false;
+          const text = el.textContent.trim();
+          return (text === "Select service" || text === "Select Service") && el.children.length <= 2;
+        });
+        if (els.length === 0) return { found: false };
+        // Walk up to find the PrimeNG dropdown container
+        let target = els[0];
+        for (let d = 0; d < 5; d++) {
+          const parent = target.parentElement;
+          if (!parent) break;
+          if (parent.tagName === "P-DROPDOWN" || parent.classList.contains("p-dropdown") ||
+              parent.classList.contains("ui-dropdown") || parent.getAttribute("role") === "listbox") {
+            target = parent;
+            break;
+          }
+          target = parent;
+        }
+        const rect = target.getBoundingClientRect();
+        return {
+          found: true,
+          x: rect.x + rect.width / 2,
+          y: rect.y + rect.height / 2,
+          tag: target.tagName,
+          cls: (target.className || "").substring(0, 50),
+        };
       });
 
-      if (!clickedDropdown) {
-        console.log(`${LOG} Phase 5: No more "Select service" dropdowns found`);
+      if (!dropdownInfo.found) {
+        console.log(`${LOG} Phase 5: No more "Select service" dropdowns`);
         break;
       }
 
-      await sleep(1000);
+      console.log(`${LOG} Phase 5: Clicking "Select service" at (${Math.round(dropdownInfo.x)}, ${Math.round(dropdownInfo.y)})`);
+      await page.mouse.click(dropdownInfo.x, dropdownInfo.y);
+      await sleep(1500);
 
-      // Select the MOTOR service from the dropdown options
+      // Select the MOTOR service from the dropdown overlay
       const selected = await page.evaluate((svcName) => {
-        // Look for dropdown overlay with options
+        // PrimeNG dropdown overlay with options
         const options = Array.from(document.querySelectorAll(
-          "[role='option'], [role='listbox'] li, .p-dropdown-item, [class*='dropdown-item'], " +
-          ".ui-dropdown-item, p-dropdownitem, .p-listbox-item"
+          ".p-dropdown-item, .ui-dropdown-item, li[role='option'], [class*='dropdown-item']"
         )).filter(el => el.offsetParent !== null);
 
-        // Try exact match first, then partial
-        for (const opt of options) {
-          const text = (opt.textContent || "").trim();
-          if (text.toLowerCase() === svcName.toLowerCase()) {
-            opt.click();
-            return { matched: true, text };
-          }
+        // Also try generic visible li elements in overlay panels
+        if (options.length === 0) {
+          const overlayLis = Array.from(document.querySelectorAll(
+            ".p-dropdown-panel li, .ui-dropdown-panel li, .cdk-overlay-container li"
+          )).filter(el => el.offsetParent !== null);
+          options.push(...overlayLis);
         }
+
+        // Try partial match (service name)
         for (const opt of options) {
           const text = (opt.textContent || "").trim();
           if (text.toLowerCase().includes(svcName.toLowerCase())) {
@@ -1320,23 +1309,22 @@ async function linkPartsToServices(page, addedParts, laborResult) {
             return { matched: true, text };
           }
         }
-        // Last resort: pick first non-empty option
+        // Fallback: first non-placeholder option
         for (const opt of options) {
           const text = (opt.textContent || "").trim();
-          if (text.length > 0 && text !== "Select service" && text !== "Select Service") {
+          if (text.length > 0 && !/select service/i.test(text)) {
             opt.click();
             return { matched: true, text, fallback: true };
           }
         }
-        return { matched: false, optionCount: options.length, optionTexts: options.slice(0, 5).map(o => o.textContent.trim().substring(0, 40)) };
+        return { matched: false, count: options.length, texts: options.slice(0, 5).map(o => o.textContent.trim().substring(0, 40)) };
       }, serviceName);
 
       if (selected.matched) {
         linked++;
         console.log(`${LOG} Phase 5: Linked part ${i + 1} → "${selected.text}"${selected.fallback ? " (fallback)" : ""}`);
       } else {
-        console.log(`${LOG} Phase 5: Dropdown opened but no matching option: ${JSON.stringify(selected)}`);
-        // Close the dropdown by pressing Escape
+        console.log(`${LOG} Phase 5: No matching service option: ${JSON.stringify(selected)}`);
         await page.keyboard.press("Escape");
       }
 

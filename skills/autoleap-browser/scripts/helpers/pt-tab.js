@@ -484,46 +484,34 @@ async function submitCartToAutoLeap(ptPage, alPage) {
     await ptPage.screenshot({ path: "/tmp/debug-pt-after-submit.png" });
   } catch { /* tab may be closed */ }
 
-  // Wait for tab to close OR timeout
-  console.log(`${LOG} Waiting for PartsTech tab to close...`);
+  // After submit, PartsTech redirects the PT tab back to AutoLeap estimate page.
+  // Wait for URL to change from partstech.com to myautoleap.com
+  console.log(`${LOG} Waiting for redirect to AutoLeap...`);
   try {
-    await Promise.race([
-      new Promise((resolve) => {
-        ptPage.once("close", resolve);
-      }),
-      sleep(15000),
-    ]);
-  } catch { /* tab may already be closed */ }
+    await ptPage.waitForNavigation({ waitUntil: "domcontentloaded", timeout: 20000 });
+  } catch { /* may have already navigated */ }
+  await sleep(3000);
 
-  // Check if tab actually closed
+  // Check where we ended up
+  let redirectedPage = null;
   try {
-    const stillOpen = !ptPage.isClosed();
-    console.log(`${LOG} PartsTech tab ${stillOpen ? "still open" : "closed"}: ${stillOpen ? ptPage.url().substring(0, 80) : "closed"}`);
-  } catch { /* tab closed */ }
+    const ptUrl = ptPage.url();
+    console.log(`${LOG} PT tab now at: ${ptUrl.substring(0, 80)}`);
+    if (ptUrl.includes("myautoleap.com")) {
+      // PT tab redirected to AutoLeap — this page has fresh parts data
+      redirectedPage = ptPage;
+      console.log(`${LOG} PartsTech redirected to AutoLeap — parts should be visible`);
+      await sleep(3000); // Let Angular settle
+    }
+  } catch { /* tab may be closed */ }
 
-  // Return focus to AutoLeap
+  // Return focus to original AutoLeap page
   try {
     await alPage.bringToFront();
   } catch { /* best effort */ }
 
-  // Wait for parts to sync into AutoLeap
-  console.log(`${LOG} Waiting for parts sync...`);
-  await sleep(5000);
-
-  try {
-    await Promise.race([
-      alPage.waitForResponse(
-        (r) =>
-          (r.url().includes("/parts/sync") || r.url().includes("/parts/import")) &&
-          r.status() === 200,
-        { timeout: 10000 }
-      ),
-      sleep(8000),
-    ]);
-  } catch { /* sync check optional */ }
-
   console.log(`${LOG} Parts submitted to AutoLeap`);
-  return { success: true };
+  return { success: true, redirectedPage };
 }
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
