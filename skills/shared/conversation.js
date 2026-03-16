@@ -167,7 +167,13 @@ ERROR TONE:
 FORMATTING:
 - *bold* for key numbers and headers (Telegram/WhatsApp Markdown)
 - Keep chat responses SHORT
-- Line breaks for readability`;
+- Line breaks for readability
+
+CLEANUP COMMANDS:
+- When a user says "delete that", "delete the estimate", "remove that test", or similar cleanup language, call the cleanup_estimate tool.
+- Before calling cleanup_estimate, ALWAYS ask: "Delete just the estimate, or also the customer record?" Wait for the user's answer before calling the tool.
+- Use their answer to set delete_customer_vehicle: true (if they say "customer too", "both", "everything") or false (if they say "just the estimate", "estimate only", "just that").
+- The tool will show a confirmation with full details (RO#, customer name, vehicle, total) before deleting. This confirmation happens inside the tool — do not add a separate preview.`;
 
   // Append last estimate context when available
   if (lastEstimate) {
