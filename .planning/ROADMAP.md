@@ -45,15 +45,15 @@ Plans:
 **Success Criteria** (what must be TRUE):
   1. When a tech asks "what's the going rate on a Civic water pump?", SAM answers conversationally without creating an AutoLeap RO or running any pipeline
   2. When a tech sends a job request without a customer name and phone, SAM asks for them conversationally and holds the request until they are provided — no estimate runs without both
-  3. During a running estimate, SAM sends at least three distinct progress messages ("Researching ProDemand...", "Pulling parts from PartsTech...", "Building estimate in AutoLeap...") so the tech knows the pipeline is alive
+  3. During a running estimate, SAM sends at most 2 messages: "Working on it..." at start, then the result — no step-by-step play-by-play
   4. When a pipeline step fails (MOTOR timeout, PartsTech unavailable), SAM shows the results that succeeded with a plain-language note on what failed — the tech never sees a raw error or a blank response
   5. Any message from any user receives a visible acknowledgment within 3 seconds, even if the full response takes minutes
-**Plans**: TBD
+**Plans**: 3 plans
 
 Plans:
-- [ ] 02-01: Write conversation.js shared module with SAM system prompt, intent classifier (estimate / chat / history / action), tool_result always in finally block
-- [ ] 02-02: Implement customer info slot-fill flow (name + phone gate before pipeline trigger), general automotive Q&A path
-- [ ] 02-03: Wire progress events from queue.js EventEmitter into gateway response layer; implement partial-results formatter with plain-language error translation
+- [ ] 02-01-PLAN.md — Test scaffold: test-conversation.js covering CONV-01 through CONV-06 and ERR-01 through ERR-03 (Nyquist Wave 0)
+- [ ] 02-02-PLAN.md — Create skills/shared/conversation.js: system prompt rewrite, processMessage, handleMessage, handleToolCall, translateError (tool_result finally fix + fast-path routing)
+- [ ] 02-03-PLAN.md — Wire conversation.js into telegram-gateway/server.js: strip duplicated SAM_SYSTEM/processMessage/handleToolCall, import shared module
 
 ### Phase 3: Multi-Platform Gateway
 **Goal**: Telegram and WhatsApp share the same conversation engine, session store, and queue through a unified gateway core; platform-specific formatting is isolated; delivery and cleanup commands work on both platforms
