@@ -3,14 +3,14 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: completed
-stopped_at: Completed 03-03-PLAN.md
-last_updated: "2026-03-16T22:45:02.295Z"
+stopped_at: Completed 03-02-PLAN.md
+last_updated: "2026-03-16T22:55:05.896Z"
 last_activity: 2026-03-16 — Plan 02-03 complete (Telegram gateway wired to conversation.js, server.js stripped from 709 to 250 lines)
 progress:
   total_phases: 4
-  completed_phases: 2
+  completed_phases: 3
   total_plans: 11
-  completed_plans: 10
+  completed_plans: 11
   percent: 100
 ---
 
@@ -58,6 +58,7 @@ Progress: [██████████] 100%
 | Phase 02-conversational-engine P03 | 7 | 1 tasks | 2 files |
 | Phase 03 P01 | 4 min | 2 tasks | 3 files |
 | Phase 03-multi-platform-gateway P03 | 4 | 1 tasks | 1 files |
+| Phase 03-multi-platform-gateway P02 | 12 | 1 tasks | 1 files |
 
 ## Accumulated Context
 
@@ -90,6 +91,8 @@ Recent decisions affecting current work:
 - [Phase 03]: PLAT-02 formatter tests are GREEN immediately (regression guards) — formatter.js was already WA-native
 - [Phase 03]: DLVR-03 cleanup prompt test checks for 'customer record' or 'delete_customer_vehicle' in buildSystemPrompt() text — RED until Plan 03
 - [Phase 03-multi-platform-gateway]: CLEANUP COMMANDS section appended to buildSystemPrompt() — shared engine ensures identical cleanup behavior on both Telegram and WhatsApp
+- [Phase 03-multi-platform-gateway]: require.main === module guard on server.js startup side effects — prevents test suite hang from open setInterval and server socket when module is required
+- [Phase 03-multi-platform-gateway]: setImmediate async pipeline for WhatsApp — Twilio 15s timeout risk eliminated; empty TwiML returned immediately, results sent via outbound REST
 
 ### Pending Todos
 
@@ -104,6 +107,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-03-16T22:45:02.292Z
-Stopped at: Completed 03-03-PLAN.md
+Last session: 2026-03-16T22:55:05.892Z
+Stopped at: Completed 03-02-PLAN.md
 Resume file: None
