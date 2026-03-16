@@ -3,14 +3,14 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: executing
-stopped_at: Completed 02-02-PLAN.md — shared conversation engine
-last_updated: "2026-03-16T18:47:00.000Z"
-last_activity: "2026-03-16 — Plan 02-02 complete (conversation.js: processMessage, handleMessage, buildSystemPrompt, buildTools, translateError)"
+stopped_at: Completed 02-03-PLAN.md — Telegram gateway wired to conversation.js
+last_updated: "2026-03-16T18:43:15.946Z"
+last_activity: "2026-03-16 — Plan 02-02 complete (conversation.js: deps-injectable Claude engine, professional advisor prompt, tool routing, ERR-03 finally-block history)"
 progress:
   total_phases: 4
-  completed_phases: 1
+  completed_phases: 2
   total_plans: 8
-  completed_plans: 7
+  completed_plans: 8
   percent: 87
 ---
 
@@ -26,11 +26,11 @@ See: .planning/PROJECT.md (updated 2026-03-15)
 ## Current Position
 
 Phase: 2 of 4 (Conversational Engine)
-Plan: 2 of 3 in current phase
-Status: In progress
-Last activity: 2026-03-16 — Plan 02-02 complete (conversation.js: deps-injectable Claude engine, professional advisor prompt, tool routing, ERR-03 finally-block history)
+Plan: 3 of 3 in current phase — COMPLETE
+Status: Phase 2 complete, ready for Phase 3
+Last activity: 2026-03-16 — Plan 02-03 complete (Telegram gateway wired to conversation.js, server.js stripped from 709 to 250 lines)
 
-Progress: [████████░░] 87%
+Progress: [██████████] 100%
 
 ## Performance Metrics
 
@@ -55,6 +55,7 @@ Progress: [████████░░] 87%
 | Phase 01-queue-and-session-foundation P05 | 8 | 2 tasks | 2 files |
 | Phase 02-conversational-engine P01 | 93s | 1 tasks | 1 files |
 | Phase 02-conversational-engine P02 | 12 min | 2 tasks | 1 files |
+| Phase 02-conversational-engine P03 | 7 | 1 tasks | 2 files |
 
 ## Accumulated Context
 
@@ -83,6 +84,7 @@ Recent decisions affecting current work:
 - [Phase 02-02]: Session adapter pattern — mock stores use platform::chatId single-key; real store uses (platform, chatId) two-arg; makeSessionAdapter() normalises both
 - [Phase 02-02]: Removed FEAT_PROGRESS and editMessage — progress model is just ACK before pipeline, result after (CONV-04 simplified)
 - [Phase 02-02]: finally-block history push — tool_result always written to session history regardless of pipeline throw (ERR-03 correctness)
+- [Phase 02-03]: test-model-ids.js CLAUDE_SONNET_MODEL check expanded to accept server.js OR conversation.js — model ID ownership moved to shared engine, test updated to reflect architecture
 
 ### Pending Todos
 
@@ -97,6 +99,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-03-16T18:47:00.000Z
-Stopped at: Completed 02-02-PLAN.md — shared conversation engine
+Last session: 2026-03-16T18:43:15.940Z
+Stopped at: Completed 02-03-PLAN.md — Telegram gateway wired to conversation.js
 Resume file: None
