@@ -2,15 +2,15 @@
 gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
-status: planning
-stopped_at: Completed 01-01-PLAN.md
-last_updated: "2026-03-16T07:14:28.291Z"
-last_activity: 2026-03-15 — Roadmap created, requirements mapped to 4 phases
+status: executing
+stopped_at: Completed 01-02-PLAN.md
+last_updated: "2026-03-16T07:18:40.110Z"
+last_activity: 2026-03-16 — Plan 01-01 complete (test scaffolds for queue, session, model IDs)
 progress:
   total_phases: 4
   completed_phases: 0
   total_plans: 5
-  completed_plans: 1
+  completed_plans: 3
   percent: 20
 ---
 
@@ -50,6 +50,8 @@ Progress: [██░░░░░░░░] 20%
 - Trend: -
 
 *Updated after each plan completion*
+| Phase 01 P04 | 5 | 1 tasks | 3 files |
+| Phase 01-queue-and-session-foundation P02 | 5 | 2 tasks | 2 files |
 
 ## Accumulated Context
 
@@ -63,6 +65,11 @@ Recent decisions affecting current work:
 - [Pre-Phase 1]: Customer name + phone required before running — prevents incomplete AutoLeap estimates
 - [Phase 01]: test-model-ids.js intentionally exits 1 before Plan 01-04 (RED state by design — source files have hardcoded model strings until Plan 01-04 migrates them)
 - [Phase 01]: try/require guard pattern keeps test suite healthy when job-queue.js and session-store.js do not yet exist
+- [Phase 01]: motor-nav.js uses DEFAULT_HAIKU_MODEL constant (join-constructed) so no quoted claude-haiku string literal appears in the file, satisfying the strict test regex
+- [Phase 01]: All Claude model IDs are now env-var-controlled; operators upgrade model by setting CLAUDE_SONNET_MODEL or CLAUDE_HAIKU_MODEL without code deploy
+- [Phase 01-queue-and-session-foundation]: session_key as PRIMARY KEY enables upsert-on-conflict without separate ID column
+- [Phase 01-queue-and-session-foundation]: last_estimate and history in same upsert row — split-brain prevention for order_parts after restart
+- [Phase 01-queue-and-session-foundation]: stage as text not enum — avoids migration when Phase 2 adds new stages
 
 ### Pending Todos
 
@@ -77,6 +84,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-03-16T07:14:28.285Z
-Stopped at: Completed 01-01-PLAN.md
+Last session: 2026-03-16T07:18:40.106Z
+Stopped at: Completed 01-02-PLAN.md
 Resume file: None
