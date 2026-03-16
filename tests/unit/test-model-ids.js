@@ -57,12 +57,20 @@ async function runTests() {
     );
   });
 
-  // MODEL-01: server.js must reference CLAUDE_SONNET_MODEL env var
-  test("server.js contains process.env.CLAUDE_SONNET_MODEL", () => {
+  // MODEL-01: CLAUDE_SONNET_MODEL env var referenced in server.js or shared conversation.js
+  // After Plan 02-03 refactor, processMessage moved to conversation.js which server.js imports.
+  // The model ID env var now lives in conversation.js — check either file.
+  test("server.js or conversation.js contains process.env.CLAUDE_SONNET_MODEL", () => {
     if (!server) throw new Error("FAIL: server.js not found at " + serverPath);
+    const conversationPath = path.join(process.cwd(), "skills/shared/conversation.js");
+    let conversation = null;
+    try { conversation = fs.readFileSync(conversationPath, "utf8"); } catch (_) {}
+    const serverHasRef = server.includes("process.env.CLAUDE_SONNET_MODEL");
+    const conversationHasRef = conversation && conversation.includes("process.env.CLAUDE_SONNET_MODEL");
+    // server.js imports conversation.js — model ID ownership is in the shared module
     assert(
-      server.includes("process.env.CLAUDE_SONNET_MODEL"),
-      "server.js should use process.env.CLAUDE_SONNET_MODEL instead of a hardcoded model string"
+      serverHasRef || conversationHasRef,
+      "process.env.CLAUDE_SONNET_MODEL must appear in server.js or conversation.js (shared engine)"
     );
   });
 
