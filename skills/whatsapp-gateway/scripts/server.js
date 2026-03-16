@@ -46,13 +46,24 @@ if (fs.existsSync(envPath)) {
 const { parseMessage, detectCommand } = require("./parser");
 const { formatForWhatsApp, formatHelp, formatStatus } = require("./formatter");
 const { buildEstimate, handleOrderRequest, handleApprovalAndOrder } = require("../../estimate-builder/scripts/orchestrator");
+const sessionStore = require("../../shared/session-store");
+const { enqueueEstimate, getStatus, queue } = require("../../shared/job-queue");
 
 const LOG = "[wa-gateway]";
 const PORT = parseInt(process.env.PORT, 10) || 3000;
 const PROVIDER = process.env.WHATSAPP_PROVIDER || "twilio";
 
-// In-memory session store (last estimate per phone number)
-const sessions = new Map();
+// Session cleanup on startup
+sessionStore.cleanupExpiredSessions().catch(() => {});
+setInterval(() => sessionStore.cleanupExpiredSessions().catch(() => {}), 6 * 60 * 60 * 1000);
+
+// Graceful shutdown — wait for active job to finish before exiting
+process.on("SIGTERM", async () => {
+  console.log("[whatsapp] SIGTERM — draining queue...");
+  queue.pause();
+  await queue.onIdle();
+  process.exit(0);
+});
 
 // ── Twilio Helpers ──
 
@@ -134,7 +145,7 @@ async function handleMessage(from, messageText) {
   }
 
   if (command?.type === "order") {
-    const lastResults = sessions.get(from);
+    const lastResults = (await sessionStore.getSession("whatsapp", from))?.lastEstimate || null;
     if (!lastResults) {
       return { messages: ["No recent estimate found. Send a vehicle + problem first."] };
     }
@@ -151,7 +162,7 @@ async function handleMessage(from, messageText) {
   }
 
   if (command?.type === "approved") {
-    const lastResults = sessions.get(from);
+    const lastResults = (await sessionStore.getSession("whatsapp", from))?.lastEstimate || null;
     if (!lastResults) {
       return { messages: ["No recent estimate found. Send a vehicle + problem first."] };
     }
@@ -179,7 +190,7 @@ async function handleMessage(from, messageText) {
   }
 
   if (command?.type === "send_estimate") {
-    const lastResults = sessions.get(from);
+    const lastResults = (await sessionStore.getSession("whatsapp", from))?.lastEstimate || null;
     if (!lastResults) {
       return { messages: ["No recent estimate found. Send a vehicle + problem first."] };
     }
@@ -200,17 +211,32 @@ async function handleMessage(from, messageText) {
     };
   }
 
-  // Run the pipeline
+  // Run the pipeline (serialised through job queue to prevent concurrent Chrome corruption)
   console.log(`${LOG} Running estimate pipeline...`);
   const startTime = Date.now();
 
+  const userId = `whatsapp:${from}`;
+  const existing = getStatus(userId);
+  if (existing) {
+    const pos = existing.position;
+    const waitMin = pos * 15;
+    return { messages: [`Got it! You're #${pos} in queue (~${waitMin} min). I'll send results when it's your turn.`] };
+  }
+
   try {
-    const results = await buildEstimate(params);
+    const results = await enqueueEstimate(userId, () => buildEstimate(params), {
+      notifyPosition: async (pos, waitMin) => {
+        // WhatsApp doesn't have easy mid-request messaging — log it for now
+        // Phase 3 will wire progress events properly via the gateway-core dispatcher
+        console.log(`${LOG} ${from} queued at position ${pos}, ~${waitMin} min wait`);
+      },
+    });
     const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
     console.log(`${LOG} Pipeline complete in ${elapsed}s`);
 
-    // Store session for follow-up commands
-    sessions.set(from, results);
+    // Persist estimate in session store for follow-up commands
+    const whSession = await sessionStore.getSession("whatsapp", from) || { lastEstimate: null, history: [], stage: "idle", collectedData: {} };
+    await sessionStore.setSession("whatsapp", from, { ...whSession, lastEstimate: results, stage: "done" });
 
     // Format for WhatsApp
     const messages = formatForWhatsApp(results);
@@ -231,7 +257,7 @@ const server = http.createServer(async (req, res) => {
   // Health check
   if (url.pathname === "/health" || url.pathname === "/") {
     res.writeHead(200, { "Content-Type": "application/json" });
-    res.end(JSON.stringify({ status: "ok", provider: PROVIDER, sessions: sessions.size }));
+    res.end(JSON.stringify({ status: "ok", provider: PROVIDER }));
     return;
   }
 
