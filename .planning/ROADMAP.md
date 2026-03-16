@@ -34,7 +34,7 @@ Decimal phases appear between their surrounding integers in numeric order.
 Plans:
 - [ ] 01-01-PLAN.md — Test scaffolds: test-job-queue.js, test-session-store.js, test-model-ids.js (Nyquist Wave 0)
 - [ ] 01-02-PLAN.md — session-store.js module + supabase/migrations/012_sam_sessions.sql
-- [ ] 01-03-PLAN.md — job-queue.js singleton with p-queue concurrency:1 and EventEmitter
+- [x] 01-03-PLAN.md — job-queue.js singleton with p-queue concurrency:1 and EventEmitter
 - [ ] 01-04-PLAN.md — Model ID migration: env var substitution in server.js, diagnose.js, motor-nav.js
 - [ ] 01-05-PLAN.md — Wire session-store + job-queue into both gateways; SIGTERM handler; cleanup interval
 
@@ -93,7 +93,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
-| 1. Queue and Session Foundation | 3/5 | In Progress|  |
+| 1. Queue and Session Foundation | 4/5 | In Progress|  |
 | 2. Conversational Engine | 0/3 | Not started | - |
 | 3. Multi-Platform Gateway | 0/3 | Not started | - |
 | 4. Smart Features and Delivery | 0/2 | Not started | - |

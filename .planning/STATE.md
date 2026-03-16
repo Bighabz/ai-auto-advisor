@@ -3,15 +3,15 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: executing
-stopped_at: Completed 01-02-PLAN.md
-last_updated: "2026-03-16T07:18:40.110Z"
-last_activity: 2026-03-16 — Plan 01-01 complete (test scaffolds for queue, session, model IDs)
+stopped_at: Completed 01-03-PLAN.md
+last_updated: "2026-03-16T07:21:00.000Z"
+last_activity: 2026-03-16 — Plan 01-03 complete (job-queue.js singleton serial queue with p-queue concurrency:1)
 progress:
   total_phases: 4
   completed_phases: 0
   total_plans: 5
-  completed_plans: 3
-  percent: 20
+  completed_plans: 4
+  percent: 80
 ---
 
 # Project State
@@ -26,11 +26,11 @@ See: .planning/PROJECT.md (updated 2026-03-15)
 ## Current Position
 
 Phase: 1 of 4 (Queue and Session Foundation)
-Plan: 1 of 4 in current phase
+Plan: 4 of 5 in current phase
 Status: In progress
-Last activity: 2026-03-16 — Plan 01-01 complete (test scaffolds for queue, session, model IDs)
+Last activity: 2026-03-16 — Plan 01-03 complete (job-queue.js singleton serial queue with p-queue concurrency:1)
 
-Progress: [██░░░░░░░░] 20%
+Progress: [████████░░] 80%
 
 ## Performance Metrics
 
@@ -70,6 +70,9 @@ Recent decisions affecting current work:
 - [Phase 01-queue-and-session-foundation]: session_key as PRIMARY KEY enables upsert-on-conflict without separate ID column
 - [Phase 01-queue-and-session-foundation]: last_estimate and history in same upsert row — split-brain prevention for order_parts after restart
 - [Phase 01-queue-and-session-foundation]: stage as text not enum — avoids migration when Phase 2 adds new stages
+- [Phase 01-03]: position = queue.size + queue.pending + 1 — accounts for running job (pending) when queue.size is 0
+- [Phase 01-03]: notifyPosition called when queue.pending > 0 || queue.size > 0, not just queue.size > 0
+- [Phase 01-03]: @esm2cjs/p-queue chosen for CJS explicitness; native p-queue kept as fallback
 
 ### Pending Todos
 
@@ -84,6 +87,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-03-16T07:18:40.106Z
-Stopped at: Completed 01-02-PLAN.md
+Last session: 2026-03-16T07:21:00.000Z
+Stopped at: Completed 01-03-PLAN.md
 Resume file: None
