@@ -367,6 +367,28 @@ async function runTests() {
     assert(hasToolResult, "history must contain a tool_result entry after pipeline failure");
   });
 
+  // ── DLVR-03: Cleanup system prompt instruction ────────────────────────────
+
+  test("DLVR-03: buildSystemPrompt contains instruction to ask about deleting customer record before cleanup", () => {
+    const prompt = buildSystemPrompt(null);
+    assert(typeof prompt === "string", "buildSystemPrompt() must return a string");
+    // Plan 03 must add this instruction to the system prompt so Claude asks:
+    // "Delete just the estimate, or also the customer record?" before calling cleanup_estimate.
+    const lower = prompt.toLowerCase();
+    assert(
+      lower.includes("customer record") || lower.includes("delete_customer_vehicle"),
+      "DLVR-03: system prompt must instruct Claude to ask whether to delete customer record before cleanup — WILL FAIL before Plan 03 updates the prompt"
+    );
+  });
+
+  test("DLVR-03: translateError on empty string returns a non-empty plain-language string", () => {
+    const result = translateError("");
+    assert(typeof result === "string", "translateError('') must return a string");
+    assert(result.length > 0, "translateError('') must return a non-empty string");
+    // Must not contain raw JS error text
+    assert(!result.includes("Error:"), "DLVR-03: translateError must not return raw JS error text");
+  });
+
   // ── buildTools: shape validation ──────────────────────────────────────────
 
   test("buildTools() returns array of 4 tools with correct names", () => {
