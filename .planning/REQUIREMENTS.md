@@ -7,22 +7,22 @@
 
 ### Queue & Serialization
 
-- [ ] **QUEUE-01**: Estimate requests are serialized — only one pipeline runs at a time
-- [ ] **QUEUE-02**: When a request arrives during an active pipeline, user is told their position and estimated wait
-- [ ] **QUEUE-03**: Queued requests automatically start when the previous pipeline completes
-- [ ] **QUEUE-04**: User can check status of their queued/running request mid-pipeline
+- [x] **QUEUE-01**: Estimate requests are serialized — only one pipeline runs at a time
+- [x] **QUEUE-02**: When a request arrives during an active pipeline, user is told their position and estimated wait
+- [x] **QUEUE-03**: Queued requests automatically start when the previous pipeline completes
+- [x] **QUEUE-04**: User can check status of their queued/running request mid-pipeline
 
 ### Session Persistence
 
-- [ ] **SESS-01**: Conversation history and estimate results persist across Pi/service restarts
-- [ ] **SESS-02**: "Delete that estimate" and "order parts" commands work after service restart
-- [ ] **SESS-03**: Sessions expire after 24 hours of inactivity (auto-cleanup)
+- [x] **SESS-01**: Conversation history and estimate results persist across Pi/service restarts
+- [x] **SESS-02**: "Delete that estimate" and "order parts" commands work after service restart
+- [x] **SESS-03**: Sessions expire after 24 hours of inactivity (auto-cleanup)
 
 ### Model Migration
 
-- [ ] **MODEL-01**: Gateway Claude calls upgraded from deprecated claude-3-haiku to claude-haiku-4-5 or claude-sonnet-4-6
-- [ ] **MODEL-02**: diagnose.js Claude calls upgraded from deprecated model
-- [ ] **MODEL-03**: MOTOR category selection Claude calls upgraded from deprecated model
+- [x] **MODEL-01**: Gateway Claude calls upgraded from deprecated claude-3-haiku to claude-haiku-4-5 or claude-sonnet-4-6
+- [x] **MODEL-02**: diagnose.js Claude calls upgraded from deprecated model
+- [x] **MODEL-03**: MOTOR category selection Claude calls upgraded from deprecated model
 
 ### Conversation Engine
 
@@ -90,16 +90,16 @@
 
 | Requirement | Phase | Status |
 |-------------|-------|--------|
-| QUEUE-01 | Phase 1 | Pending |
-| QUEUE-02 | Phase 1 | Pending |
-| QUEUE-03 | Phase 1 | Pending |
-| QUEUE-04 | Phase 1 | Pending |
-| SESS-01 | Phase 1 | Pending |
-| SESS-02 | Phase 1 | Pending |
-| SESS-03 | Phase 1 | Pending |
-| MODEL-01 | Phase 1 | Pending |
-| MODEL-02 | Phase 1 | Pending |
-| MODEL-03 | Phase 1 | Pending |
+| QUEUE-01 | Phase 1 | Complete |
+| QUEUE-02 | Phase 1 | Complete |
+| QUEUE-03 | Phase 1 | Complete |
+| QUEUE-04 | Phase 1 | Complete |
+| SESS-01 | Phase 1 | Complete |
+| SESS-02 | Phase 1 | Complete |
+| SESS-03 | Phase 1 | Complete |
+| MODEL-01 | Phase 1 | Complete |
+| MODEL-02 | Phase 1 | Complete |
+| MODEL-03 | Phase 1 | Complete |
 | CONV-01 | Phase 2 | Pending |
 | CONV-02 | Phase 2 | Pending |
 | CONV-03 | Phase 2 | Pending |

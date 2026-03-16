@@ -29,13 +29,14 @@ Decimal phases appear between their surrounding integers in numeric order.
   3. After the Pi or service restarts mid-estimate, the shop can still type "delete that estimate" or "order parts" and SAM recognizes the last estimate context
   4. Sessions older than 24 hours are cleaned up automatically — no manual intervention needed
   5. All Claude calls in the codebase reference non-deprecated model IDs (no claude-3-haiku-20240307 anywhere)
-**Plans**: TBD
+**Plans**: 5 plans
 
 Plans:
-- [ ] 01-01: Extract session-store.js and persist last-estimate JSON to Supabase; add platform:chatId composite key
-- [ ] 01-02: Build queue.js in-memory FIFO with p-queue (concurrency=1), position reporting, EventEmitter for progress
-- [ ] 01-03: Wire queue into orchestrator buildEstimate call; add immediate ACK before pipeline; add SIGTERM cleanup
-- [ ] 01-04: Migrate all model IDs to CLAUDE_SONNET_MODEL / CLAUDE_HAIKU_MODEL env vars across server.js, diagnose.js, motor-nav
+- [ ] 01-01-PLAN.md — Test scaffolds: test-job-queue.js, test-session-store.js, test-model-ids.js (Nyquist Wave 0)
+- [ ] 01-02-PLAN.md — session-store.js module + supabase/migrations/012_sam_sessions.sql
+- [ ] 01-03-PLAN.md — job-queue.js singleton with p-queue concurrency:1 and EventEmitter
+- [ ] 01-04-PLAN.md — Model ID migration: env var substitution in server.js, diagnose.js, motor-nav.js
+- [ ] 01-05-PLAN.md — Wire session-store + job-queue into both gateways; SIGTERM handler; cleanup interval
 
 ### Phase 2: Conversational Engine
 **Goal**: SAM has a consistent professional advisor personality, routes intents correctly, collects customer info before the pipeline, provides progress updates, and returns plain-language errors — extracted into a shared module usable by both gateways
@@ -92,7 +93,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
-| 1. Queue and Session Foundation | 0/4 | Not started | - |
+| 1. Queue and Session Foundation | 1/5 | In Progress|  |
 | 2. Conversational Engine | 0/3 | Not started | - |
 | 3. Multi-Platform Gateway | 0/3 | Not started | - |
 | 4. Smart Features and Delivery | 0/2 | Not started | - |
