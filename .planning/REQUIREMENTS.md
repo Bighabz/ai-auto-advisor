@@ -43,7 +43,7 @@
 
 - [ ] **DLVR-01**: Shop can send completed estimate PDF to customer via email or text from chat
 - [ ] **DLVR-02**: Shop can approve and order parts from the most recent estimate via chat
-- [ ] **DLVR-03**: Cleanup command deletes test estimates with confirmation showing customer name + RO#
+- [x] **DLVR-03**: Cleanup command deletes test estimates with confirmation showing customer name + RO#
 
 ### Smart Features
 
@@ -52,9 +52,9 @@
 
 ### Multi-Platform
 
-- [ ] **PLAT-01**: Shared conversation engine used by both Telegram and WhatsApp gateways
-- [ ] **PLAT-02**: Platform-specific formatting (Telegram Markdown vs WhatsApp plain text)
-- [ ] **PLAT-03**: Progress updates delivered via message editing (Telegram) or new messages (WhatsApp)
+- [x] **PLAT-01**: Shared conversation engine used by both Telegram and WhatsApp gateways
+- [x] **PLAT-02**: Platform-specific formatting (Telegram Markdown vs WhatsApp plain text)
+- [x] **PLAT-03**: Progress updates delivered via message editing (Telegram) or new messages (WhatsApp)
 
 ## v2 Requirements
 
@@ -109,10 +109,10 @@
 | ERR-01 | Phase 2 | Complete |
 | ERR-02 | Phase 2 | Complete |
 | ERR-03 | Phase 2 | Complete |
-| PLAT-01 | Phase 3 | Pending |
-| PLAT-02 | Phase 3 | Pending |
-| PLAT-03 | Phase 3 | Pending |
-| DLVR-03 | Phase 3 | Pending |
+| PLAT-01 | Phase 3 | Complete |
+| PLAT-02 | Phase 3 | Complete |
+| PLAT-03 | Phase 3 | Complete |
+| DLVR-03 | Phase 3 | Complete |
 | DLVR-01 | Phase 4 | Pending |
 | DLVR-02 | Phase 4 | Pending |
 | SMART-01 | Phase 4 | Pending |
