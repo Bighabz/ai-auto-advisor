@@ -13,6 +13,7 @@
   "author": "",
   "license": "ISC",
   "dependencies": {
+    "@esm2cjs/p-queue": "^7.3.0",
     "@supabase/supabase-js": "^2.95.3",
     "form-data": "^4.0.5",
     "node-fetch": "^3.3.2",

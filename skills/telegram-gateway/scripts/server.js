@@ -74,7 +74,7 @@ let lastUpdateId = 0;
 
 const ESTIMATE_TOOL = {
   name: "run_estimate",
-  description: "Run the SAM diagnostic and estimate pipeline for a vehicle problem. Call this when the user describes a specific vehicle with a specific problem, symptom, or DTC code. Do NOT call this for general automotive questions — only when they want an actual repair estimate built.",
+  description: "Run the SAM diagnostic and estimate pipeline for a vehicle problem. IMPORTANT: Do NOT call this until you have the customer's name AND phone number. If missing, ask the user first.",
   input_schema: {
     type: "object",
     properties: {
@@ -90,10 +90,10 @@ const ESTIMATE_TOOL = {
         description: "Any DTC/trouble codes mentioned (e.g. P0420, P0300)",
       },
       mileage: { type: "integer", description: "Vehicle mileage if mentioned" },
-      customer_name: { type: "string", description: "Customer name if mentioned" },
-      customer_phone: { type: "string", description: "Customer phone if mentioned" },
+      customer_name: { type: "string", description: "Customer's full name — REQUIRED before running" },
+      customer_phone: { type: "string", description: "Customer's phone number — REQUIRED before running" },
     },
-    required: ["make", "model", "symptoms"],
+    required: ["make", "model", "symptoms", "customer_name", "customer_phone"],
   },
 };
 
@@ -115,7 +115,20 @@ const APPROVE_TOOL = {
   },
 };
 
-const TOOLS = [ESTIMATE_TOOL, ORDER_TOOL, APPROVE_TOOL];
+const CLEANUP_TOOL = {
+  name: "cleanup_estimate",
+  description: "Delete the most recent estimate from AutoLeap. IMPORTANT: Before calling this, you MUST first tell the user exactly what will be deleted (customer name, vehicle, RO#) and ask them to confirm with YES. Only call this AFTER they confirm. Use confirmed=true only after explicit user confirmation.",
+  input_schema: {
+    type: "object",
+    properties: {
+      confirmed: { type: "boolean", description: "Set to true ONLY after user explicitly confirmed the deletion. If false or missing, returns what WOULD be deleted without actually deleting." },
+      delete_customer_vehicle: { type: "boolean", description: "Also delete the customer and vehicle records (default false)" },
+    },
+    required: ["confirmed"],
+  },
+};
+
+const TOOLS = [ESTIMATE_TOOL, ORDER_TOOL, APPROVE_TOOL, CLEANUP_TOOL];
 
 // ── SAM System Prompt ──
 
@@ -145,11 +158,18 @@ WHEN TO USE run_estimate TOOL:
 - You need at MINIMUM: make + model + some problem OR service description
 - If they give a problem but no vehicle, ASK what vehicle — don't guess
 - If they give a vehicle but no problem, ASK what's going on with it
-- IMPORTANT: When you have year + make + model + ANY problem or service, call run_estimate IMMEDIATELY. Engine size, mileage, and exact codes are optional — run with what you have. Do NOT ask clarifying questions before running.
+- IMPORTANT: You need year + make + model + problem/service + customer name + phone to build a full estimate.
+- If they give vehicle + problem but NO customer name/phone, ASK: "Got it — what's the customer's name and phone number?" Do NOT run the estimate yet.
+- Once you have all the info (vehicle + problem + customer name + phone), THEN call run_estimate with everything filled in.
+- Engine size, mileage, and exact codes are optional — run with what you have. But customer_name is REQUIRED before running.
 
-AFTER SHOWING AN ESTIMATE:
-- If no customer_name was provided, ask: "Want this built in AutoLeap? Just send me the customer's name."
-- If the user then sends a name, call run_estimate again with that customer_name filled in
+CLEANUP / TEST RUNS:
+- When user says "delete that", "clean up", "that was a test", etc.:
+  1. FIRST call cleanup_estimate with confirmed=false to see what would be deleted
+  2. Show the user: "I'll delete: RO#XXXX for [Customer Name] — [Vehicle]. Confirm YES to proceed."
+  3. ONLY after they reply YES/confirm, call cleanup_estimate with confirmed=true
+- NEVER skip the confirmation step. This is a live shop account.
+- If user wants customer+vehicle deleted too, set delete_customer_vehicle=true
 
 WHEN TO JUST CHAT (no tool):
 - General questions: "what does P0420 mean?" "what causes rough idle?"
@@ -196,7 +216,7 @@ User can say "order parts" or "customer approved" to take action on it.`;
     const client = new Anthropic({ apiKey: ANTHROPIC_API_KEY });
 
     const response = await client.messages.create({
-      model: "claude-sonnet-4-5-20250929",
+      model: process.env.CLAUDE_SONNET_MODEL || "claude-sonnet-4-6",
       max_tokens: 600,
       system,
       tools: TOOLS,
@@ -230,6 +250,16 @@ User can say "order parts" or "customer approved" to take action on it.`;
 async function handleToolCall(chatId, toolCall) {
   if (toolCall.name === "run_estimate") {
     const input = toolCall.input;
+
+    // Hard gate: refuse to run without customer name + phone
+    if (!input.customer_name || !input.customer_phone) {
+      const missing = [];
+      if (!input.customer_name) missing.push("customer name");
+      if (!input.customer_phone) missing.push("phone number");
+      console.log(`${LOG} Blocked estimate — missing: ${missing.join(", ")}`);
+      return { messages: [`I need the customer's ${missing.join(" and ")} before I can build the estimate. What's their info?`] };
+    }
+
     console.log(`${LOG} Claude triggered estimate: ${input.year || "?"} ${input.make} ${input.model} — ${input.symptoms}`);
 
     // Build params for the pipeline
@@ -284,17 +314,6 @@ async function handleToolCall(chatId, toolCall) {
 
       sessions.set(chatId, results);
 
-      // Add tool result to conversation
-      const history = conversations.get(chatId);
-      history.push({
-        role: "user",
-        content: [{
-          type: "tool_result",
-          tool_use_id: toolCall.id,
-          content: `Estimate built successfully for ${input.year || ""} ${input.make} ${input.model}. Diagnosis: ${results.diagnosis?.ai?.diagnoses?.[0]?.cause || "completed"}. Pricing: ${results.pricing_source || "unknown"} (gate: ${results.pricing_gate || "?"}). Results sent to user.`,
-        }],
-      });
-
       const messages = formatForWhatsApp(results);
       return { messages, pdfPath: results.pdfPath, wiringDiagrams: results.wiringDiagrams || [] };
     } catch (err) {
@@ -339,6 +358,56 @@ async function handleToolCall(chatId, toolCall) {
       return { messages: [`Order failed: ${result.error || fallback.error}`] };
     } catch (err) {
       return { messages: [`Order error: ${err.message}`] };
+    }
+  }
+
+  if (toolCall.name === "cleanup_estimate") {
+    const lastResults = sessions.get(chatId);
+    if (!lastResults || !lastResults.autoLeapEstimate?.estimateId) {
+      return { messages: ["No recent estimate to delete."] };
+    }
+    const alEst = lastResults.autoLeapEstimate;
+    const confirmed = toolCall.input?.confirmed === true;
+    const delCustVeh = toolCall.input?.delete_customer_vehicle || false;
+
+    try {
+      const { getToken, getEstimate, cleanupTestRun } = require("../../autoleap-browser/scripts/autoleap-api");
+      const token = await getToken();
+
+      // Step 1: Preview — fetch estimate details and show what would be deleted
+      if (!confirmed) {
+        let preview = `RO#${lastResults.estimate?.estimateCode || "?"} — `;
+        preview += `${alEst.customerName || lastResults.estimate?.customerName || "Unknown customer"}, `;
+        preview += `${alEst.vehicleDesc || lastResults.estimate?.vehicleDesc || "Unknown vehicle"}`;
+        preview += ` ($${lastResults.estimate?.total || "?"})`;
+        // Verify estimate still exists
+        try {
+          const estData = await getEstimate(token, alEst.estimateId);
+          if (!estData || estData.error) {
+            return { messages: ["That estimate no longer exists in AutoLeap."] };
+          }
+          const custName = estData.customer?.fullName || estData.customer?.firstName || alEst.customerName || "Unknown";
+          const vehDesc = estData.vehicleId?.name || estData.vehicleId?.vehicleName || alEst.vehicleDesc || "Unknown";
+          preview = `RO#${estData.code || lastResults.estimate?.estimateCode || "?"} — ${custName}, ${vehDesc}`;
+          if (estData.grandTotal) preview += ` ($${estData.grandTotal})`;
+        } catch { /* use cached info */ }
+
+        let willDelete = "estimate";
+        if (delCustVeh) willDelete += " + customer + vehicle";
+        return { messages: [`Will delete ${willDelete}: ${preview}. Reply YES to confirm.`] };
+      }
+
+      // Step 2: Confirmed — actually delete
+      const cleanup = await cleanupTestRun(token, alEst, delCustVeh);
+      sessions.delete(chatId);
+      const parts = [];
+      if (cleanup.estimate?.success) parts.push(`estimate RO#${lastResults.estimate?.estimateCode || "?"}`);
+      if (cleanup.vehicle?.success) parts.push("vehicle");
+      if (cleanup.customer?.success) parts.push("customer");
+      const custName = alEst.customerName || lastResults.estimate?.customerName || "";
+      return { messages: [`*Deleted:* ${parts.join(", ") || "nothing"}${custName ? ` (${custName})` : ""} from AutoLeap.`] };
+    } catch (err) {
+      return { messages: [`Cleanup error: ${err.message}`] };
     }
   }
 
@@ -495,6 +564,16 @@ async function handleMessage(chatId, messageText, username) {
     }
 
     const toolResult = await handleToolCall(chatId, toolCall);
+
+    // Add tool_result to conversation history so Claude can continue the conversation
+    const history = conversations.get(chatId);
+    if (history) {
+      const resultSummary = toolResult.messages ? toolResult.messages.join(" ").substring(0, 300) : "Done";
+      history.push({
+        role: "user",
+        content: [{ type: "tool_result", tool_use_id: toolCall.id, content: resultSummary }],
+      });
+    }
 
     if (toolResult.messages) {
       allMessages.push(...toolResult.messages);

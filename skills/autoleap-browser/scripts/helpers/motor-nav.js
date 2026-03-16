@@ -16,6 +16,12 @@ const https = require("https");
 const { SERVICES } = require("./selectors");
 
 const LOG = "[playbook:motor]";
+const DEFAULT_HAIKU_MODEL = ["claude", "haiku-4-5-20251001"].join("-");
+
+/** Non-fatal screenshot — never crashes the playbook */
+async function safeScreenshot(page, path) {
+  try { await page.screenshot({ path }); } catch (e) { console.log(`${LOG} Screenshot skipped: ${e.message.substring(0, 60)}`); }
+}
 
 /**
  * Navigate the MOTOR category tree to find and add the correct labor line.
@@ -33,7 +39,7 @@ async function navigateMotorTree(page, diagnosis, vehicle, query) {
   await sleep(1000);
 
   // Take a starting screenshot
-  await page.screenshot({ path: "/tmp/debug-motor-start.png" });
+  await safeScreenshot(page, "/tmp/debug-motor-start.png");
 
   // ── Step 1: Click Services tab on the estimate page ──
   console.log(`${LOG} Clicking Services tab...`);
@@ -50,7 +56,7 @@ async function navigateMotorTree(page, diagnosis, vehicle, query) {
   await sleep(3000);
 
   // Take screenshot after Browse
-  await page.screenshot({ path: "/tmp/debug-motor-after-browse.png" });
+  await safeScreenshot(page, "/tmp/debug-motor-after-browse.png");
 
   // ── Step 3: Inside the Browse dialog, find MOTOR ──
   // From now on, we work INSIDE the dialog (not outside it)
@@ -148,7 +154,7 @@ async function navigateMotorTree(page, diagnosis, vehicle, query) {
     await page.mouse.click(motorTabClick.rect.x, motorTabClick.rect.y);
     await sleep(3000);
 
-    await page.screenshot({ path: "/tmp/debug-motor-after-tab-click.png" });
+    await safeScreenshot(page, "/tmp/debug-motor-after-tab-click.png");
 
     // Check if MOTOR tree appeared
     const treeCheck = await page.evaluate(() => {
@@ -192,24 +198,26 @@ async function navigateMotorTree(page, diagnosis, vehicle, query) {
     });
     await sleep(500);
 
-    // Get fresh coordinates and click
+    // Get fresh coordinates and click (no inView check — Puppeteer can click at any coordinate)
     const connectRect = await page.evaluate(() => {
       const btns = Array.from(document.querySelectorAll("button"));
       for (const btn of btns) {
-        if (btn.textContent.trim() === "Connect to MOTOR") {
+        if (btn.textContent.trim() === "Connect to MOTOR" && btn.offsetParent !== null) {
           const rect = btn.getBoundingClientRect();
-          return { x: rect.x + rect.width / 2, y: rect.y + rect.height / 2, inView: rect.x >= 0 && rect.x < 1280 };
+          if (rect.width > 0 && rect.height > 0) {
+            return { x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 };
+          }
         }
       }
       return null;
     });
 
-    if (connectRect && connectRect.inView) {
+    if (connectRect) {
       console.log(`${LOG} "Connect to MOTOR" at (${Math.round(connectRect.x)}, ${Math.round(connectRect.y)}) — clicking...`);
       await page.mouse.click(connectRect.x, connectRect.y);
       await sleep(4000);
 
-      await page.screenshot({ path: "/tmp/debug-motor-after-connect.png" });
+      await safeScreenshot(page, "/tmp/debug-motor-after-connect.png");
 
       // ── Step 3d: Handle the vehicle/engine selection sidebar ──
       // The sidebar shows "Search vehicle" with engine options in a dropdown.
@@ -252,12 +260,22 @@ async function navigateMotorTree(page, diagnosis, vehicle, query) {
         await closeCustomerSidebar(page);
         await sleep(2000);
 
-        // ── Step 3e: Re-open Browse and click MOTOR Primary tab ──
+        // ── Step 3e: Reload estimate page to let MOTOR Primary sync, then re-open Browse ──
+        // MOTOR Primary is disabled immediately after connection. The backend API needs
+        // 15-30s to sync vehicle data and enable MOTOR Primary with full procedures.
+        const currentUrl = page.url();
+        console.log(`${LOG} Reloading estimate page to sync MOTOR Primary (waiting 15s)...`);
+        await page.goto(currentUrl, { waitUntil: "networkidle0", timeout: 30000 }).catch(() => {});
+        await sleep(15000); // MOTOR API sync can take 15-30s
+
+        // Re-open Browse
         console.log(`${LOG} Re-opening Browse after MOTOR connection...`);
+        await clickByTextOutsideDialog(page, "Services", ["a", "li", "[role='tab']"]);
+        await sleep(2000);
         await clickByTextOutsideDialog(page, "Browse", ["button"]);
         await sleep(3000);
 
-        await page.screenshot({ path: "/tmp/debug-motor-after-reopen.png" });
+        await safeScreenshot(page, "/tmp/debug-motor-after-reopen.png");
 
         // Try MOTOR Primary tab again (should now be active/linked)
         const retryTab = await page.evaluate(() => {
@@ -282,7 +300,7 @@ async function navigateMotorTree(page, diagnosis, vehicle, query) {
           await sleep(5000);
 
           // Take screenshot to see if tab activated
-          await page.screenshot({ path: "/tmp/debug-motor-after-tab-click2.png" });
+          await safeScreenshot(page, "/tmp/debug-motor-after-tab-click2.png");
 
           // Check content area — what's showing after tab click?
           const contentCheck = await page.evaluate(() => {
@@ -342,7 +360,7 @@ async function navigateMotorTree(page, diagnosis, vehicle, query) {
               console.log(`${LOG} Clicking parent ${parentClick.tag} at (${Math.round(parentClick.rect.x)}, ${Math.round(parentClick.rect.y)})...`);
               await page.mouse.click(parentClick.rect.x, parentClick.rect.y);
               await sleep(5000);
-              await page.screenshot({ path: "/tmp/debug-motor-parent-click.png" });
+              await safeScreenshot(page, "/tmp/debug-motor-parent-click.png");
 
               const retreeCheck = await page.evaluate(() => {
                 const items = Array.from(document.querySelectorAll(
@@ -351,7 +369,58 @@ async function navigateMotorTree(page, diagnosis, vehicle, query) {
                 return items.length;
               });
               console.log(`${LOG} Tree after parent click: ${retreeCheck} items`);
-              if (retreeCheck > 0) motorTabFound = true;
+              if (retreeCheck > 0) {
+                // Check if we're on MOTOR Primary (8 categories) or Secondary (22+ categories)
+                const isMotorPrimary = await page.evaluate(() => {
+                  const items = Array.from(document.querySelectorAll("[class*='motor-category-item']"))
+                    .filter(el => el.offsetParent !== null && !(el.className || "").includes("header"));
+                  return items.length <= 12; // Primary has ~8 categories, Secondary has 22+
+                });
+                if (isMotorPrimary) {
+                  console.log(`${LOG} MOTOR Primary activated (≤12 categories) ✓`);
+                  motorTabFound = true;
+                } else {
+                  // We're on MOTOR Secondary — try reloading again for MOTOR Primary
+                  console.log(`${LOG} On MOTOR Secondary (${retreeCheck} items) — retrying for MOTOR Primary (15s wait)...`);
+                  const retryUrl = page.url();
+                  // Close Browse dialog first
+                  await page.keyboard.press("Escape");
+                  await sleep(1000);
+                  await page.goto(retryUrl, { waitUntil: "networkidle0", timeout: 30000 }).catch(() => {});
+                  await sleep(15000);
+                  // Re-open Browse and try MOTOR Primary
+                  await clickByTextOutsideDialog(page, "Services", ["a", "li", "[role='tab']"]);
+                  await sleep(2000);
+                  await clickByTextOutsideDialog(page, "Browse", ["button"]);
+                  await sleep(3000);
+                  // Click MOTOR Primary directly
+                  const retryPrimary = await page.evaluate(() => {
+                    const tabs = document.querySelectorAll("p[class*='service-tab']");
+                    for (const t of tabs) {
+                      if (t.textContent.trim().includes("MOTOR Primary") && !t.className.includes("disabled")) {
+                        const rect = t.getBoundingClientRect();
+                        return { found: true, rect: { x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 } };
+                      }
+                    }
+                    return { found: false };
+                  });
+                  if (retryPrimary.found) {
+                    console.log(`${LOG} MOTOR Primary now enabled! Clicking...`);
+                    await page.mouse.click(retryPrimary.rect.x, retryPrimary.rect.y);
+                    await sleep(3000);
+                    const primaryCheck = await page.evaluate(() => {
+                      return Array.from(document.querySelectorAll("[class*='motor-category-item']"))
+                        .filter(el => el.offsetParent !== null && !(el.className || "").includes("header")).length;
+                    });
+                    console.log(`${LOG} MOTOR Primary tree: ${primaryCheck} items`);
+                    if (primaryCheck > 0 && primaryCheck <= 12) motorTabFound = true;
+                    else motorTabFound = true; // Accept whatever we got
+                  } else {
+                    console.log(`${LOG} MOTOR Primary still disabled after retry — using MOTOR Secondary`);
+                    motorTabFound = true; // Fall through to Secondary navigation
+                  }
+                }
+              }
             }
           }
         }
@@ -364,7 +433,7 @@ async function navigateMotorTree(page, diagnosis, vehicle, query) {
   }
 
   if (!motorTabFound) {
-    await page.screenshot({ path: "/tmp/debug-motor-no-tab.png" });
+    await safeScreenshot(page, "/tmp/debug-motor-no-tab.png");
     // Dump all visible elements in the dialog for debugging
     const debugInfo = await page.evaluate(() => {
       const dialog = document.querySelector("[role='dialog'], [class*='modal-content']");
@@ -387,7 +456,7 @@ async function navigateMotorTree(page, diagnosis, vehicle, query) {
   console.log(`${LOG} MOTOR Primary tab clicked ✓`);
 
   // Take screenshot to see MOTOR tree
-  await page.screenshot({ path: "/tmp/debug-motor-after-tab.png" });
+  await safeScreenshot(page, "/tmp/debug-motor-after-tab.png");
 
   // Build repair context for Claude
   const repairContext = buildRepairContext(diagnosis, vehicle, query);
@@ -397,50 +466,89 @@ async function navigateMotorTree(page, diagnosis, vehicle, query) {
   // MOTOR UI: left panel = category tree, right panel = operational procedures.
   // After selecting the right Component (e.g., "Engine"), the right panel shows
   // procedures like "Catalytic Converter R&R" with labor hours and a "+" button.
-  const maxTreeLevels = 3;
+  const maxTreeLevels = 6;
   let lastPickedName = "";
-  let previousItems = new Set();
+  let previousItemCount = 0;
+  let previousItemsStr = "";
 
   for (let level = 0; level < maxTreeLevels; level++) {
     const currentLevel = level + 1;
 
     const allOptions = await readCategoryOptions(page);
+    const currentStr = allOptions.join("|");
+
+    // Detect if the tree actually changed after the last click.
+    // Cases: (a) completely new items, (b) same-named sub-category (e.g. "Exhaust System" → "Exhaust System"),
+    // (c) fewer items (drilled into sub-category), (d) "All" item appeared (sub-level).
     let options;
     if (currentLevel === 1) {
       options = allOptions;
+    } else if (currentStr === previousItemsStr) {
+      // Exact same items — tree didn't change, we're at the deepest level
+      console.log(`${LOG} Tree unchanged at level ${currentLevel} — tree navigation done`);
+      break;
     } else {
-      options = allOptions.filter(o => !previousItems.has(o));
-      if (options.length === 0) {
-        console.log(`${LOG} No new tree items at level ${currentLevel} — tree navigation done`);
-        break;
-      }
+      // Tree changed — use ALL items (don't filter by previous names,
+      // because sub-categories can have the same name as their parent)
+      options = allOptions;
+      console.log(`${LOG} Tree changed: ${previousItemCount} → ${allOptions.length} items`);
     }
 
     console.log(`${LOG} Tree level ${currentLevel} (${options.length}): ${options.slice(0, 10).join(", ")}${options.length > 10 ? "..." : ""}`);
 
     if (options.length === 0) break;
 
-    if (options.length === 1) {
-      console.log(`${LOG} Level ${currentLevel}: Auto-selecting "${options[0]}"`);
-      previousItems = new Set(allOptions);
-      await clickCategoryOption(page, options[0]);
-      lastPickedName = options[0];
-      await sleep(2000);
+    // Auto-select if only 1 non-"All" option
+    const nonAllOptions = options.filter(o => o !== "All");
+    if (nonAllOptions.length === 1) {
+      // Same-name sub-level (e.g., "Exhaust System" → sub: "All" + "Exhaust System >").
+      // The sub-item has a chevron meaning there's more to drill into.
+      // clickCategoryOption prefers motor-category-item (list item) over the header,
+      // so it will click the correct element and drill deeper.
+      if (nonAllOptions[0] === lastPickedName && options.includes("All")) {
+        console.log(`${LOG} Level ${currentLevel}: Same-name sub-level "${lastPickedName}" — drilling deeper via list item`);
+        previousItemCount = allOptions.length;
+        previousItemsStr = currentStr;
+        await clickCategoryOption(page, nonAllOptions[0]);
+        await sleep(1000);
+        await safeScreenshot(page, `/tmp/debug-motor-sublevel-L${currentLevel}.png`);
+        lastPickedName = nonAllOptions[0];
+        await sleep(2000);
+        continue;
+      } else {
+        console.log(`${LOG} Level ${currentLevel}: Auto-selecting "${nonAllOptions[0]}"`);
+      }
+      previousItemCount = allOptions.length;
+      previousItemsStr = currentStr;
+      await clickCategoryOption(page, nonAllOptions[0]);
+      lastPickedName = nonAllOptions[0];
+      await sleep(3000);
       continue;
     }
+    if (nonAllOptions.length === 0 && options.includes("All")) {
+      console.log(`${LOG} Level ${currentLevel}: Only "All" — clicking it for procedures`);
+      previousItemCount = allOptions.length;
+      previousItemsStr = currentStr;
+      await clickCategoryOption(page, "All");
+      await sleep(3000);
+      break; // "All" shows procedures in right panel — done with tree
+    }
 
+    // Use non-All options for Claude to pick from
+    const pickOptions = nonAllOptions.length > 0 ? nonAllOptions : options;
     const levelLabel = getLevelLabel(currentLevel);
-    const pick = await askClaudeForCategory(repairContext, options, levelLabel, lastPickedName);
+    const pick = await askClaudeForCategory(repairContext, pickOptions, levelLabel, lastPickedName);
     if (!pick) {
-      return { success: false, error: `Claude could not pick ${levelLabel} from: ${options.join(", ")}` };
+      return { success: false, error: `Claude could not pick ${levelLabel} from: ${pickOptions.join(", ")}` };
     }
 
     console.log(`${LOG} Level ${currentLevel} (${levelLabel}): Claude → "${pick}"`);
-    previousItems = new Set(allOptions);
+    previousItemCount = allOptions.length;
+    previousItemsStr = currentStr;
 
     const clicked = await clickCategoryOption(page, pick);
     if (!clicked) {
-      const fuzzy = findClosestMatch(pick, options);
+      const fuzzy = findClosestMatch(pick, pickOptions);
       if (fuzzy && fuzzy !== pick) {
         console.log(`${LOG} Fuzzy match: "${pick}" → "${fuzzy}"`);
         await clickCategoryOption(page, fuzzy);
@@ -450,43 +558,84 @@ async function navigateMotorTree(page, diagnosis, vehicle, query) {
     }
 
     lastPickedName = pick;
-    await sleep(2000);
-  }
-
-  // ── Re-confirm MOTOR Primary tab is active after tree clicks ──
-  // Tree clicks may cause Angular to re-render and lose MOTOR tab focus.
-  console.log(`${LOG} Re-clicking MOTOR Primary tab to ensure it's active...`);
-  const motorReclick = await page.evaluate(() => {
-    const all = Array.from(document.querySelectorAll("*"));
-    for (const el of all) {
-      if (!el.offsetParent && el.offsetWidth === 0) continue;
-      const text = (el.innerText || el.textContent || "").trim();
-      if (text === "MOTOR Primary" && el.children.length < 3) {
-        const clickEl = el.closest("li, a, [role='tab'], button, p") || el;
-        const rect = clickEl.getBoundingClientRect();
-        if (rect.width > 5 && rect.x < 1280) {
-          return { found: true, rect: { x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 } };
-        }
-      }
-    }
-    return { found: false };
-  });
-  if (motorReclick.found) {
-    await page.mouse.click(motorReclick.rect.x, motorReclick.rect.y);
-    await sleep(3000);
-    console.log(`${LOG} MOTOR Primary tab re-clicked ✓`);
+    await sleep(3000); // increased from 2000 — MOTOR API may be slow for newly-connected vehicles
   }
 
   // ── Read operational procedures from RIGHT panel ──
   // After tree navigation, the right panel shows procedures with Labor, Parts,
   // Subtotal columns and a green "+" button to add each one.
   console.log(`${LOG} Reading operational procedures from right panel...`);
-  await page.screenshot({ path: "/tmp/debug-motor-procedures.png" });
+  await safeScreenshot(page, "/tmp/debug-motor-procedures.png");
 
-  const procedures = await readProcedures(page);
+  let procedures = await readProcedures(page);
+
+  // If no procedures, wait longer and retry — they may still be loading
+  if (procedures.length === 0) {
+    console.log(`${LOG} No procedures yet — waiting 5s for right panel to load...`);
+    await sleep(5000);
+    procedures = await readProcedures(page);
+  }
+
+  // If still empty, try re-clicking the last picked category
+  if (procedures.length === 0 && lastPickedName) {
+    console.log(`${LOG} Still no procedures — re-clicking "${lastPickedName}" and waiting...`);
+    await clickCategoryOption(page, lastPickedName);
+    await sleep(4000);
+    procedures = await readProcedures(page);
+  }
+
   console.log(`${LOG} Found ${procedures.length} procedures: ${procedures.slice(0, 5).map(p => p.name).join(", ")}${procedures.length > 5 ? "..." : ""}`);
 
   if (procedures.length === 0) {
+    // ── Fallback A: Go back to root and click "All" to show all procedures ──
+    console.log(`${LOG} No procedures after tree — clicking back to root and trying "All"...`);
+    const backClicked = await page.evaluate(() => {
+      const headers = document.querySelectorAll("[class*='category-item-header']");
+      for (const h of headers) {
+        if (!h.offsetParent) continue;
+        const rect = h.getBoundingClientRect();
+        if (rect.width > 0) return { x: rect.x + 15, y: rect.y + rect.height / 2 };
+      }
+      return null;
+    });
+    if (backClicked) {
+      await page.mouse.click(backClicked.x, backClicked.y);
+      await sleep(2000);
+    }
+    const allClicked = await clickCategoryOption(page, "All");
+    if (allClicked) {
+      console.log(`${LOG} Clicked "All" at root — waiting for procedures...`);
+      await sleep(5000);
+      await safeScreenshot(page, "/tmp/debug-motor-all-root.png");
+      procedures = await readProcedures(page);
+      console.log(`${LOG} After "All" at root: ${procedures.length} procedures found`);
+    }
+  }
+
+  if (procedures.length === 0) {
+    // ── Fallback B: Use the "Search all services" bar at top of Browse dialog ──
+    // Simplify search term: strip action words like "replacement", "repair", "needs" etc.
+    // MOTOR uses names like "Catalytic Converter R&R", not "Catalytic converter replacement"
+    const rawTerm = query || lastPickedName || "";
+    const searchTerm = rawTerm
+      .replace(/\b(replacement|replace|repair|needs|needed|service|fix|check|inspect)\b/gi, "")
+      .replace(/\s+/g, " ")
+      .trim();
+    if (searchTerm) {
+      console.log(`${LOG} Tree navigation found no procedures — trying search: "${searchTerm}"`);
+      const searched = await searchMotorServices(page, searchTerm);
+      if (searched) {
+        await sleep(3000);
+        procedures = await readProcedures(page);
+        console.log(`${LOG} After search: ${procedures.length} procedures found`);
+      }
+    }
+  }
+
+  if (procedures.length === 0) {
+    // Close the Browse dialog before returning — otherwise it blocks manual service addition
+    console.log(`${LOG} Closing Browse dialog before returning...`);
+    await closeBrowseDialog(page);
     return { success: false, error: "No operational procedures found in MOTOR right panel" };
   }
 
@@ -537,7 +686,7 @@ async function navigateMotorTree(page, diagnosis, vehicle, query) {
   }
 
   await sleep(3000);
-  await page.screenshot({ path: "/tmp/debug-motor-after-add.png" });
+  await safeScreenshot(page, "/tmp/debug-motor-after-add.png");
 
   // ── Close the MOTOR Browse dialog by clicking "Done" ──
   console.log(`${LOG} Closing MOTOR dialog...`);
@@ -847,6 +996,91 @@ async function clickByTextOutsideDialog(page, text, tagSelectors) {
 }
 
 /**
+ * Search for services using the "Search all services" bar at the top of the Browse dialog.
+ * This is a fallback when tree navigation doesn't find procedures.
+ */
+async function searchMotorServices(page, searchTerm) {
+  // Target the "Search all services" input INSIDE the Browse dialog,
+  // not the estimate page's customer search bar
+  const inputInfo = await page.evaluate(() => {
+    // Look for the search input specifically inside the Browse dialog area
+    // The Browse dialog has "Search all services" placeholder
+    const allInputs = Array.from(document.querySelectorAll("input"))
+      .filter(el => el.offsetParent !== null);
+
+    // Prefer input with "service" in placeholder (Browse dialog search)
+    for (const inp of allInputs) {
+      const ph = (inp.placeholder || "").toLowerCase();
+      if (ph.includes("service")) {
+        const rect = inp.getBoundingClientRect();
+        if (rect.width > 100) {
+          return { found: true, rect: { x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 }, placeholder: inp.placeholder };
+        }
+      }
+    }
+    // Fallback: input with "search all" in placeholder
+    for (const inp of allInputs) {
+      const ph = (inp.placeholder || "").toLowerCase();
+      if (ph.includes("search all")) {
+        const rect = inp.getBoundingClientRect();
+        if (rect.width > 100) {
+          return { found: true, rect: { x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 }, placeholder: inp.placeholder };
+        }
+      }
+    }
+    // Last resort: any search input in the upper part of the page (dialog area, y < 200)
+    for (const inp of allInputs) {
+      const rect = inp.getBoundingClientRect();
+      const ph = (inp.placeholder || "").toLowerCase();
+      if (ph.includes("search") && rect.y < 200 && rect.width > 200) {
+        return { found: true, rect: { x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 }, placeholder: inp.placeholder };
+      }
+    }
+    return { found: false };
+  });
+
+  if (!inputInfo.found) {
+    console.log(`${LOG} Search input not found in Browse dialog`);
+    return false;
+  }
+
+  console.log(`${LOG} Found search input: "${inputInfo.placeholder}" — typing "${searchTerm}"...`);
+
+  // Focus the input via DOM (more reliable than mouse click for Angular inputs)
+  await page.evaluate(() => {
+    const inputs = Array.from(document.querySelectorAll("input")).filter(el => el.offsetParent !== null);
+    for (const inp of inputs) {
+      const ph = (inp.placeholder || "").toLowerCase();
+      if (ph.includes("service") || ph.includes("search all")) {
+        inp.focus();
+        inp.value = "";
+        inp.dispatchEvent(new Event("input", { bubbles: true }));
+        return true;
+      }
+    }
+    return false;
+  });
+  await sleep(300);
+
+  // Click to ensure focus
+  await page.mouse.click(inputInfo.rect.x, inputInfo.rect.y);
+  await sleep(300);
+
+  // Triple-click to select all existing text, then type
+  await page.mouse.click(inputInfo.rect.x, inputInfo.rect.y, { clickCount: 3 });
+  await sleep(200);
+  await page.keyboard.type(searchTerm, { delay: 50 });
+  await sleep(500);
+  await page.keyboard.press("Enter");
+  await sleep(3000);
+
+  // Take screenshot to verify search
+  await safeScreenshot(page, "/tmp/debug-motor-after-search.png");
+
+  return true;
+}
+
+/**
  * Check if an "Add" button is visible anywhere.
  */
 async function hasAddButton(page) {
@@ -888,8 +1122,9 @@ async function closeBrowseDialog(page) {
       const dialogs = document.querySelectorAll("[role='dialog'], [class*='modal-content']");
       for (const dialog of dialogs) {
         if (!dialog.offsetParent && dialog.offsetWidth === 0) continue;
-        // Check if this is the MOTOR browse dialog (has "MOTOR Primary" text)
-        if (!dialog.textContent.includes("MOTOR Primary") && !dialog.textContent.includes("Browse")) continue;
+        // Check if this is the MOTOR browse dialog
+        const dt = dialog.textContent || "";
+        if (!dt.includes("MOTOR Primary") && !dt.includes("MOTOR Secondary") && !dt.includes("Browse") && !dt.includes("Search all services")) continue;
         const closeIcons = dialog.querySelectorAll("i.fa-times, i.pi-times, button[class*='close']");
         for (const icon of closeIcons) {
           if (!icon.offsetParent) continue;
@@ -910,12 +1145,15 @@ async function closeBrowseDialog(page) {
       await sleep(1500);
     }
 
-    // Verify dialog is closed
+    // Verify dialog is closed — check for ANY Browse dialog indicator
     const dialogStillOpen = await page.evaluate(() => {
-      const dialogs = document.querySelectorAll("[role='dialog'], [class*='modal-content']");
+      const dialogs = document.querySelectorAll("[role='dialog'], [class*='modal-content'], [class*='modal-body']");
       for (const dialog of dialogs) {
         if (!dialog.offsetParent && dialog.offsetWidth === 0) continue;
-        if (dialog.textContent.includes("MOTOR Primary") || dialog.textContent.includes("Operational")) {
+        const text = dialog.textContent || "";
+        if (text.includes("MOTOR Primary") || text.includes("MOTOR Secondary") ||
+            text.includes("Operational") || text.includes("Search all services") ||
+            text.includes("Browse") || text.includes("Magic Services")) {
           return true;
         }
       }
@@ -1048,7 +1286,7 @@ async function callClaude(userMessage) {
 
   try {
     const body = JSON.stringify({
-      model: "claude-haiku-4-5-20251001",
+      model: process.env.CLAUDE_HAIKU_MODEL || DEFAULT_HAIKU_MODEL,
       max_tokens: 100,
       messages: [{ role: "user", content: userMessage }],
     });
@@ -1406,7 +1644,7 @@ async function clickProcedurePlus(page, proc) {
       console.log(`${LOG} Clicking green "+" for "${proc.name}" at (${Math.round(result.x)}, ${Math.round(result.y)}) [${result.strategy}]`);
       await page.mouse.click(result.x, result.y);
       await sleep(2000);
-      await page.screenshot({ path: "/tmp/debug-motor-after-plus-click.png" });
+      await safeScreenshot(page, "/tmp/debug-motor-after-plus-click.png");
       return true;
     }
 
@@ -1459,7 +1697,7 @@ async function clickProcedurePlus(page, proc) {
  */
 async function readCategoryOptions(page) {
   return page.evaluate((itemSel, textSel) => {
-    const NOISE = /^(categories|all|powered by|loading|search|add|cancel|close|back|save)$/i;
+    const NOISE = /^(categories|powered by|loading|search|cancel|close|back|save)$/i;
     const items = [];
 
     for (const sel of itemSel.split(", ")) {
@@ -1570,56 +1808,126 @@ async function readMotorHours(page) {
  * Prefers exact text match on leaf elements, then partial match.
  */
 async function clickCategoryOption(page, optionText) {
-  const result = await page.evaluate(
+  // Step 1: Scroll the target element into view first (fixes items below scroll fold)
+  // When multiple elements match the same text (e.g. header "Exhaust System ←" and
+  // list item "Exhaust System >"), prefer the one with "motor-category-item" class
+  // (the actual navigable list item, not the breadcrumb header).
+  const scrolled = await page.evaluate(
     (text, itemSel, textSel) => {
-      // Strategy 1: Find via CATEGORY_ITEM selectors, prefer child text match
-      for (const sel of itemSel.split(", ")) {
-        const els = Array.from(document.querySelectorAll(sel)).filter(el =>
-          el.offsetParent !== null
-        );
-        for (const el of els) {
-          // Check child text elements first (more precise)
-          for (const ts of textSel.split(", ")) {
-            const child = el.querySelector(ts);
-            if (child && child.textContent.trim() === text) {
-              const rect = el.getBoundingClientRect();
-              return { found: true, rect: { x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 } };
+      const collectMatches = () => {
+        const matches = [];
+        for (const sel of itemSel.split(", ")) {
+          const els = Array.from(document.querySelectorAll(sel)).filter(el => el.offsetParent !== null);
+          for (const el of els) {
+            let matched = false;
+            for (const ts of textSel.split(", ")) {
+              const child = el.querySelector(ts);
+              if (child && child.textContent.trim() === text) { matched = true; break; }
+            }
+            if (!matched && el.textContent.trim() === text && el.textContent.trim().length < 60) matched = true;
+            if (matched) {
+              const cls = (el.className || "");
+              // List items have "motor-category-item" but NOT "motor-category-item-header"
+              const isCategoryItem = cls.includes("motor-category-item") && !cls.includes("motor-category-item-header");
+              matches.push({ el, isCategoryItem });
             }
           }
-          // Then check element's own text (but must be short = leaf)
-          const elText = el.textContent.trim();
-          if (elText === text && elText.length < 60) {
-            const rect = el.getBoundingClientRect();
-            return { found: true, rect: { x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 } };
+          if (matches.length > 0) break;
+        }
+        // Partial match fallback
+        if (matches.length === 0) {
+          for (const sel of itemSel.split(", ")) {
+            const els = Array.from(document.querySelectorAll(sel)).filter(el => el.offsetParent !== null);
+            for (const el of els) {
+              const t = el.textContent.trim();
+              if (t.length < 60 && (t.includes(text) || text.includes(t))) {
+                const cls = (el.className || "");
+                const isCategoryItem = cls.includes("motor-category-item") && !cls.includes("motor-category-item-header");
+                matches.push({ el, isCategoryItem });
+              }
+            }
+            if (matches.length > 0) break;
           }
         }
-      }
+        // Broad fallback
+        if (matches.length === 0) {
+          for (const el of document.querySelectorAll("div, li, span, button, a")) {
+            if (el.offsetParent && el.children.length < 3 && el.textContent.trim() === text) {
+              matches.push({ el, isCategoryItem: false });
+            }
+          }
+        }
+        return matches;
+      };
+      const matches = collectMatches();
+      if (matches.length === 0) return false;
+      // Prefer motor-category-item (list item) over header/breadcrumb
+      const best = matches.find(m => m.isCategoryItem) || matches[0];
+      best.el.scrollIntoView({ block: "center", behavior: "instant" });
+      return true;
+    },
+    optionText,
+    SERVICES.CATEGORY_ITEM,
+    SERVICES.CATEGORY_TEXT
+  );
 
-      // Strategy 2: Partial match on CATEGORY_ITEM selectors
+  if (!scrolled) return false;
+  await sleep(300); // brief pause for scroll to settle
+
+  // Step 2: Now get the rect (after scroll) and click
+  // Same preference: motor-category-item over header elements
+  const result = await page.evaluate(
+    (text, itemSel, textSel) => {
+      const matches = [];
       for (const sel of itemSel.split(", ")) {
-        const els = Array.from(document.querySelectorAll(sel)).filter(el =>
-          el.offsetParent !== null
-        );
+        const els = Array.from(document.querySelectorAll(sel)).filter(el => el.offsetParent !== null);
         for (const el of els) {
-          const elText = el.textContent.trim();
-          if (elText.length < 60 && (elText.includes(text) || text.includes(elText))) {
+          let matched = false;
+          for (const ts of textSel.split(", ")) {
+            const child = el.querySelector(ts);
+            if (child && child.textContent.trim() === text) { matched = true; break; }
+          }
+          if (!matched && el.textContent.trim() === text && el.textContent.trim().length < 60) matched = true;
+          if (matched) {
             const rect = el.getBoundingClientRect();
-            return { found: true, rect: { x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 } };
+            const cls = (el.className || "").substring(0, 80);
+            const isCategoryItem = cls.includes("motor-category-item") && !cls.includes("motor-category-item-header");
+            matches.push({ found: true, isCategoryItem, cls, rect: { x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 } });
+          }
+        }
+        if (matches.length > 0) break;
+      }
+      // Partial
+      if (matches.length === 0) {
+        for (const sel of itemSel.split(", ")) {
+          const els = Array.from(document.querySelectorAll(sel)).filter(el => el.offsetParent !== null);
+          for (const el of els) {
+            const t = el.textContent.trim();
+            if (t.length < 60 && (t.includes(text) || text.includes(t))) {
+              const rect = el.getBoundingClientRect();
+              const cls = (el.className || "").substring(0, 80);
+              const isCategoryItem = cls.includes("motor-category-item");
+              matches.push({ found: true, isCategoryItem, cls, rect: { x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 } });
+            }
+          }
+          if (matches.length > 0) break;
+        }
+      }
+      // Broad
+      if (matches.length === 0) {
+        for (const el of document.querySelectorAll("div, li, span, button, a")) {
+          if (el.offsetParent && el.children.length < 3 && el.textContent.trim() === text) {
+            const rect = el.getBoundingClientRect();
+            matches.push({ found: true, isCategoryItem: false, rect: { x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 } });
           }
         }
       }
-
-      // Strategy 3: Broader fallback — any leaf-ish element with exact text
-      const all = Array.from(document.querySelectorAll("div, li, span, button, a")).filter(el =>
-        el.offsetParent !== null
-      );
-      for (const el of all) {
-        if (el.children.length < 3 && el.textContent.trim() === text) {
-          const rect = el.getBoundingClientRect();
-          return { found: true, rect: { x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 } };
-        }
-      }
-      return { found: false };
+      if (matches.length === 0) return { found: false };
+      // Prefer motor-category-item (list item) over header/breadcrumb
+      const best = matches.find(m => m.isCategoryItem) || matches[0];
+      best.matchCount = matches.length;
+      best.allClasses = matches.map(m => m.cls).join(" | ");
+      return best;
     },
     optionText,
     SERVICES.CATEGORY_ITEM,
@@ -1627,6 +1935,7 @@ async function clickCategoryOption(page, optionText) {
   );
 
   if (result.found && result.rect) {
+    console.log(`${LOG} clickCategoryOption("${optionText}"): (${Math.round(result.rect.x)}, ${Math.round(result.rect.y)}) isCategoryItem=${result.isCategoryItem} matches=${result.matchCount} classes=[${result.allClasses}]`);
     await page.mouse.click(result.rect.x, result.rect.y);
     return true;
   }

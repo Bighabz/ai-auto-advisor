@@ -31,7 +31,7 @@ if (process.env.ARI_URL) {
 }
 
 const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
-const CLAUDE_MODEL = "claude-sonnet-4-5-20250929";
+const CLAUDE_MODEL = process.env.CLAUDE_SONNET_MODEL || "claude-sonnet-4-6";
 const MAX_TOKENS = 4096;
 
 const SYSTEM_PROMPT = `You are an expert automotive diagnostic AI. Given a vehicle, DTC code(s), symptoms, similar past cases from our database, and any relevant TSBs/recalls, provide a structured diagnosis.
