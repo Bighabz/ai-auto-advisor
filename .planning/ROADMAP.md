@@ -51,8 +51,8 @@ Plans:
 **Plans**: 3 plans
 
 Plans:
-- [ ] 02-01-PLAN.md — Test scaffold: test-conversation.js covering CONV-01 through CONV-06 and ERR-01 through ERR-03 (Nyquist Wave 0)
-- [ ] 02-02-PLAN.md — Create skills/shared/conversation.js: system prompt rewrite, processMessage, handleMessage, handleToolCall, translateError (tool_result finally fix + fast-path routing)
+- [x] 02-01-PLAN.md — Test scaffold: test-conversation.js covering CONV-01 through CONV-06 and ERR-01 through ERR-03 (Nyquist Wave 0)
+- [x] 02-02-PLAN.md — Create skills/shared/conversation.js: system prompt rewrite, processMessage, handleMessage, handleToolCall, translateError (tool_result finally fix + fast-path routing)
 - [ ] 02-03-PLAN.md — Wire conversation.js into telegram-gateway/server.js: strip duplicated SAM_SYSTEM/processMessage/handleToolCall, import shared module
 
 ### Phase 3: Multi-Platform Gateway
@@ -94,6 +94,6 @@ Phases execute in numeric order: 1 → 2 → 3 → 4
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
 | 1. Queue and Session Foundation | 5/5 | Complete   | 2026-03-16 |
-| 2. Conversational Engine | 1/3 | In Progress|  |
+| 2. Conversational Engine | 2/3 | In Progress|  |
 | 3. Multi-Platform Gateway | 0/3 | Not started | - |
 | 4. Smart Features and Delivery | 0/2 | Not started | - |
