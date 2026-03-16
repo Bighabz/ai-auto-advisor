@@ -64,12 +64,12 @@ Plans:
   2. Telegram messages use Markdown formatting; WhatsApp messages use plain text — no asterisks or underscores appear raw in WhatsApp chats
   3. Progress updates during a running pipeline appear as edited messages on Telegram and as new sequential messages on WhatsApp — both feel natural on their respective platforms
   4. Typing "delete test" on either platform shows a confirmation with customer name and RO number before deleting — no silent deletions
-**Plans**: TBD
+**Plans**: 3 plans
 
 Plans:
-- [ ] 03-01: Build gateway-core.js dispatcher; refactor telegram-gateway/server.js as thin platform adapter importing from shared modules
-- [ ] 03-02: Refactor whatsapp-gateway to use gateway-core.js; replace raw http body parser with Express; add platform-specific formatters
-- [ ] 03-03: Wire progress update delivery — Telegram message editing, WhatsApp new message sequence; add typing indicator interval
+- [ ] 03-01-PLAN.md — Wave 0 test scaffolds: test-whatsapp-gateway.js (PLAT-01, PLAT-03), test-whatsapp-format.js (PLAT-02), cleanup test in test-conversation.js (DLVR-03)
+- [ ] 03-02-PLAN.md — Refactor whatsapp-gateway/server.js: thin adapter pattern, async Twilio response, sendAck outbound REST, phone normalization, PDF delivery
+- [ ] 03-03-PLAN.md — Add cleanup customer-ask instruction to conversation.js system prompt (DLVR-03, PLAT-02)
 
 ### Phase 4: Smart Features and Delivery
 **Goal**: Shop staff can send estimates to customers and order parts from chat; SAM proactively surfaces vehicle history and prominent warnings on every estimate
