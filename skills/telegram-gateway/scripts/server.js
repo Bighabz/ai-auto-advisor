@@ -33,6 +33,8 @@ if (fs.existsSync(envPath)) {
 const { validateEnv, checkHealth, cleanupArtifacts } = require("../../shared/health");
 const { createLogger } = require("../../shared/logger");
 const log = createLogger("telegram-gateway");
+const sessionStore = require("../../shared/session-store");
+const { enqueueEstimate, getStatus, queue } = require("../../shared/job-queue");
 
 // Validate required env vars
 const envCheck = validateEnv(["TELEGRAM_BOT_TOKEN", "SUPABASE_URL", "SUPABASE_ANON_KEY"]);
@@ -53,6 +55,27 @@ setInterval(() => {
   if (c.artifacts > 0 || c.screenshots > 0) log.info("periodic cleanup", c);
 }, 6 * 60 * 60 * 1000);
 
+// Session cleanup on startup
+sessionStore.cleanupExpiredSessions().then(({ deleted }) => {
+  if (deleted > 0) log.info("startup session cleanup", { deleted });
+});
+
+// Periodic session cleanup (every 6 hours)
+setInterval(() => {
+  sessionStore.cleanupExpiredSessions().catch(err =>
+    log.error("session cleanup error", { error: err.message })
+  );
+}, 6 * 60 * 60 * 1000);
+
+// Graceful shutdown — wait for active job to finish before exiting
+process.on("SIGTERM", async () => {
+  log.info("SIGTERM received — waiting for active job to finish...");
+  queue.pause();
+  await queue.onIdle();
+  log.info("Queue drained — exiting");
+  process.exit(0);
+});
+
 const { formatForWhatsApp, formatHelp, formatStatus } = require("../../whatsapp-gateway/scripts/formatter");
 const { buildEstimate, handleOrderRequest, handleApprovalAndOrder } = require("../../estimate-builder/scripts/orchestrator");
 
@@ -63,9 +86,6 @@ const FEAT_PROGRESS = process.env.TELEGRAM_PROGRESS_UPDATES === "true";
 
 const API_BASE = `https://api.telegram.org/bot${BOT_TOKEN}`;
 
-// In-memory stores per chat
-const sessions = new Map();     // last estimate results
-const conversations = new Map(); // Claude message history
 const MAX_HISTORY = 20;
 
 let lastUpdateId = 0;
@@ -191,15 +211,15 @@ async function processMessage(chatId, userMessage) {
     return { text: "My AI brain isn't connected. Send a vehicle + problem and I'll try the estimate pipeline directly.", toolCall: null };
   }
 
-  // Get or init history
-  if (!conversations.has(chatId)) conversations.set(chatId, []);
-  const history = conversations.get(chatId);
+  // Get or init session (history + lastEstimate in one store)
+  const session = await sessionStore.getSession("telegram", chatId) || { lastEstimate: null, history: [], stage: "idle", collectedData: {} };
+  const history = session.history;
   history.push({ role: "user", content: userMessage });
   while (history.length > MAX_HISTORY) history.shift();
 
   // Build system prompt with estimate context
   let system = SAM_SYSTEM;
-  const lastEstimate = sessions.get(chatId);
+  const lastEstimate = session.lastEstimate;
   if (lastEstimate) {
     const v = lastEstimate.vehicle || {};
     const topCause = lastEstimate.diagnosis?.ai?.diagnoses?.[0]?.cause;
@@ -237,6 +257,9 @@ User can say "order parts" or "customer approved" to take action on it.`;
 
     // Add assistant response to history
     history.push({ role: "assistant", content: response.content });
+
+    // Persist updated history to session store
+    await sessionStore.setSession("telegram", chatId, { ...session, history });
 
     return { text, toolCall, stopReason: response.stop_reason };
   } catch (err) {
@@ -306,13 +329,31 @@ async function handleToolCall(chatId, toolCall) {
       };
     }
 
+    // Check if this user already has an active/queued job
+    const userId = `telegram:${chatId}`;
+    const existing = getStatus(userId);
+    if (existing) {
+      const pos = existing.position;
+      const waitMin = pos * 15;
+      return { messages: [`Already working on an estimate for you — you're #${pos} in queue (~${waitMin} min). I'll send results when it's your turn.`] };
+    }
+
     const startTime = Date.now();
     try {
-      const results = await buildEstimate(params);
+      const results = await enqueueEstimate(userId, () => buildEstimate(params), {
+        notifyPosition: async (pos, waitMin) => {
+          await telegramAPI("sendMessage", {
+            chat_id: chatId,
+            text: `Got it! You're #${pos} in queue — one estimate is running now. Yours starts in ~${waitMin} min.`,
+          });
+        },
+      });
       const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
       console.log(`${LOG} Pipeline complete in ${elapsed}s`);
 
-      sessions.set(chatId, results);
+      // Persist estimate result in session
+      const currentSession = await sessionStore.getSession("telegram", chatId) || { lastEstimate: null, history: [], stage: "idle", collectedData: {} };
+      await sessionStore.setSession("telegram", chatId, { ...currentSession, lastEstimate: results, stage: "done" });
 
       const messages = formatForWhatsApp(results);
       return { messages, pdfPath: results.pdfPath, wiringDiagrams: results.wiringDiagrams || [] };
@@ -323,7 +364,7 @@ async function handleToolCall(chatId, toolCall) {
   }
 
   if (toolCall.name === "order_parts") {
-    const lastResults = sessions.get(chatId);
+    const lastResults = (await sessionStore.getSession("telegram", chatId))?.lastEstimate || null;
     if (!lastResults) return { messages: ["No recent estimate to order from. Send me a vehicle + problem first."] };
     try {
       const result = await handleOrderRequest(lastResults);
@@ -337,7 +378,7 @@ async function handleToolCall(chatId, toolCall) {
   }
 
   if (toolCall.name === "customer_approved") {
-    const lastResults = sessions.get(chatId);
+    const lastResults = (await sessionStore.getSession("telegram", chatId))?.lastEstimate || null;
     if (!lastResults) return { messages: ["No recent estimate. Send me a vehicle + problem first."] };
     try {
       const result = await handleApprovalAndOrder(lastResults);
@@ -362,7 +403,7 @@ async function handleToolCall(chatId, toolCall) {
   }
 
   if (toolCall.name === "cleanup_estimate") {
-    const lastResults = sessions.get(chatId);
+    const lastResults = (await sessionStore.getSession("telegram", chatId))?.lastEstimate || null;
     if (!lastResults || !lastResults.autoLeapEstimate?.estimateId) {
       return { messages: ["No recent estimate to delete."] };
     }
@@ -399,7 +440,7 @@ async function handleToolCall(chatId, toolCall) {
 
       // Step 2: Confirmed — actually delete
       const cleanup = await cleanupTestRun(token, alEst, delCustVeh);
-      sessions.delete(chatId);
+      await sessionStore.deleteSession("telegram", chatId);
       const parts = [];
       if (cleanup.estimate?.success) parts.push(`estimate RO#${lastResults.estimate?.estimateCode || "?"}`);
       if (cleanup.vehicle?.success) parts.push("vehicle");
@@ -566,13 +607,15 @@ async function handleMessage(chatId, messageText, username) {
     const toolResult = await handleToolCall(chatId, toolCall);
 
     // Add tool_result to conversation history so Claude can continue the conversation
-    const history = conversations.get(chatId);
-    if (history) {
+    const sessionAfter = await sessionStore.getSession("telegram", chatId);
+    const history = sessionAfter?.history || [];
+    if (history.length > 0) {
       const resultSummary = toolResult.messages ? toolResult.messages.join(" ").substring(0, 300) : "Done";
       history.push({
         role: "user",
         content: [{ type: "tool_result", tool_use_id: toolCall.id, content: resultSummary }],
       });
+      await sessionStore.setSession("telegram", chatId, { ...sessionAfter, history });
     }
 
     if (toolResult.messages) {
