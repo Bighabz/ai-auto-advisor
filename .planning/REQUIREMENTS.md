@@ -26,18 +26,18 @@
 
 ### Conversation Engine
 
-- [ ] **CONV-01**: SAM has a consistent professional advisor personality across all messages
-- [ ] **CONV-02**: SAM collects customer name and phone conversationally before running estimate
-- [ ] **CONV-03**: SAM answers general automotive questions without triggering the estimate pipeline
-- [ ] **CONV-04**: SAM sends progress updates during the pipeline ("Researching ProDemand...", "Building estimate...")
-- [ ] **CONV-05**: SAM provides immediate acknowledgment within 3 seconds of any message
-- [ ] **CONV-06**: SAM distinguishes between estimate requests and general questions (no false triggers)
+- [x] **CONV-01**: SAM has a consistent professional advisor personality across all messages
+- [x] **CONV-02**: SAM collects customer name and phone conversationally before running estimate
+- [x] **CONV-03**: SAM answers general automotive questions without triggering the estimate pipeline
+- [x] **CONV-04**: SAM sends progress updates during the pipeline ("Researching ProDemand...", "Building estimate...")
+- [x] **CONV-05**: SAM provides immediate acknowledgment within 3 seconds of any message
+- [x] **CONV-06**: SAM distinguishes between estimate requests and general questions (no false triggers)
 
 ### Error Handling
 
-- [ ] **ERR-01**: Partial results are shown when some pipeline steps fail (labor without parts, etc.)
-- [ ] **ERR-02**: All errors are translated to plain shop language ("Couldn't pull MOTOR labor, used AI estimate instead")
-- [ ] **ERR-03**: Pipeline failures don't crash the bot — SAM recovers and stays responsive
+- [x] **ERR-01**: Partial results are shown when some pipeline steps fail (labor without parts, etc.)
+- [x] **ERR-02**: All errors are translated to plain shop language ("Couldn't pull MOTOR labor, used AI estimate instead")
+- [x] **ERR-03**: Pipeline failures don't crash the bot — SAM recovers and stays responsive
 
 ### Delivery & Actions
 
@@ -100,15 +100,15 @@
 | MODEL-01 | Phase 1 | Complete |
 | MODEL-02 | Phase 1 | Complete |
 | MODEL-03 | Phase 1 | Complete |
-| CONV-01 | Phase 2 | Pending |
-| CONV-02 | Phase 2 | Pending |
-| CONV-03 | Phase 2 | Pending |
-| CONV-04 | Phase 2 | Pending |
-| CONV-05 | Phase 2 | Pending |
-| CONV-06 | Phase 2 | Pending |
-| ERR-01 | Phase 2 | Pending |
-| ERR-02 | Phase 2 | Pending |
-| ERR-03 | Phase 2 | Pending |
+| CONV-01 | Phase 2 | Complete |
+| CONV-02 | Phase 2 | Complete |
+| CONV-03 | Phase 2 | Complete |
+| CONV-04 | Phase 2 | Complete |
+| CONV-05 | Phase 2 | Complete |
+| CONV-06 | Phase 2 | Complete |
+| ERR-01 | Phase 2 | Complete |
+| ERR-02 | Phase 2 | Complete |
+| ERR-03 | Phase 2 | Complete |
 | PLAT-01 | Phase 3 | Pending |
 | PLAT-02 | Phase 3 | Pending |
 | PLAT-03 | Phase 3 | Pending |

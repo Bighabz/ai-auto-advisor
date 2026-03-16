@@ -3,14 +3,14 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: executing
-stopped_at: Phase 2 context gathered
-last_updated: "2026-03-16T18:04:49.684Z"
+stopped_at: Completed 02-01-PLAN.md — conversation engine test scaffold
+last_updated: "2026-03-16T18:30:49.905Z"
 last_activity: "2026-03-16 — Plan 01-03 complete (job-queue.js singleton serial queue with p-queue concurrency:1)"
 progress:
   total_phases: 4
   completed_phases: 1
-  total_plans: 5
-  completed_plans: 5
+  total_plans: 8
+  completed_plans: 6
   percent: 80
 ---
 
@@ -53,6 +53,7 @@ Progress: [████████░░] 80%
 | Phase 01 P04 | 5 | 1 tasks | 3 files |
 | Phase 01-queue-and-session-foundation P02 | 5 | 2 tasks | 2 files |
 | Phase 01-queue-and-session-foundation P05 | 8 | 2 tasks | 2 files |
+| Phase 02-conversational-engine P01 | 93s | 1 tasks | 1 files |
 
 ## Accumulated Context
 
@@ -76,6 +77,8 @@ Recent decisions affecting current work:
 - [Phase 01-03]: @esm2cjs/p-queue chosen for CJS explicitness; native p-queue kept as fallback
 - [Phase 01-05]: Telegram gateway was already wired from prior uncommitted session — Task 1 was verify + commit, not a modification
 - [Phase 01-05]: WhatsApp conversation history wiring deferred to Phase 2 — only buildEstimate path wired in Phase 1
+- [Phase 02-01]: try/require guard pattern: exit 0 when conversation.js absent so test suite stays green; exit 1 when behavior is wrong once implementation exists
+- [Phase 02-01]: Dependency injection via deps param on handleMessage() — claudeClient, sessionStore, enqueueEstimate, sendAck all injectable for unit testing without real API calls
 
 ### Pending Todos
 
@@ -90,6 +93,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-03-16T18:04:49.678Z
-Stopped at: Phase 2 context gathered
-Resume file: .planning/phases/02-conversational-engine/02-CONTEXT.md
+Last session: 2026-03-16T18:30:49.898Z
+Stopped at: Completed 02-01-PLAN.md — conversation engine test scaffold
+Resume file: None
