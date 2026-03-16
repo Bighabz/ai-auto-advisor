@@ -109,14 +109,14 @@
 | ERR-01 | Phase 2 | Pending |
 | ERR-02 | Phase 2 | Pending |
 | ERR-03 | Phase 2 | Pending |
-| SMART-01 | Phase 3 | Pending |
-| SMART-02 | Phase 3 | Pending |
-| DLVR-01 | Phase 3 | Pending |
-| DLVR-02 | Phase 3 | Pending |
-| DLVR-03 | Phase 3 | Pending |
 | PLAT-01 | Phase 3 | Pending |
 | PLAT-02 | Phase 3 | Pending |
 | PLAT-03 | Phase 3 | Pending |
+| DLVR-03 | Phase 3 | Pending |
+| DLVR-01 | Phase 4 | Pending |
+| DLVR-02 | Phase 4 | Pending |
+| SMART-01 | Phase 4 | Pending |
+| SMART-02 | Phase 4 | Pending |
 
 **Coverage:**
 - v1 requirements: 27 total
@@ -125,4 +125,4 @@
 
 ---
 *Requirements defined: 2026-03-15*
-*Last updated: 2026-03-15 after initial definition*
+*Last updated: 2026-03-15 — traceability updated to 4-phase roadmap*
