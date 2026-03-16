@@ -3,14 +3,14 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: executing
-stopped_at: Completed 01-03-PLAN.md
-last_updated: "2026-03-16T07:21:00.000Z"
-last_activity: 2026-03-16 — Plan 01-03 complete (job-queue.js singleton serial queue with p-queue concurrency:1)
+stopped_at: Completed 01-05-PLAN.md
+last_updated: "2026-03-16T17:33:36.430Z"
+last_activity: "2026-03-16 — Plan 01-03 complete (job-queue.js singleton serial queue with p-queue concurrency:1)"
 progress:
   total_phases: 4
-  completed_phases: 0
+  completed_phases: 1
   total_plans: 5
-  completed_plans: 4
+  completed_plans: 5
   percent: 80
 ---
 
@@ -52,6 +52,7 @@ Progress: [████████░░] 80%
 *Updated after each plan completion*
 | Phase 01 P04 | 5 | 1 tasks | 3 files |
 | Phase 01-queue-and-session-foundation P02 | 5 | 2 tasks | 2 files |
+| Phase 01-queue-and-session-foundation P05 | 8 | 2 tasks | 2 files |
 
 ## Accumulated Context
 
@@ -73,6 +74,8 @@ Recent decisions affecting current work:
 - [Phase 01-03]: position = queue.size + queue.pending + 1 — accounts for running job (pending) when queue.size is 0
 - [Phase 01-03]: notifyPosition called when queue.pending > 0 || queue.size > 0, not just queue.size > 0
 - [Phase 01-03]: @esm2cjs/p-queue chosen for CJS explicitness; native p-queue kept as fallback
+- [Phase 01-05]: Telegram gateway was already wired from prior uncommitted session — Task 1 was verify + commit, not a modification
+- [Phase 01-05]: WhatsApp conversation history wiring deferred to Phase 2 — only buildEstimate path wired in Phase 1
 
 ### Pending Todos
 
@@ -87,6 +90,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-03-16T07:21:00.000Z
-Stopped at: Completed 01-03-PLAN.md
+Last session: 2026-03-16T17:33:36.425Z
+Stopped at: Completed 01-05-PLAN.md
 Resume file: None

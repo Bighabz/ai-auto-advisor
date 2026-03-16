@@ -12,7 +12,7 @@ The estimate pipeline is complete and working. This milestone builds the convers
 
 Decimal phases appear between their surrounding integers in numeric order.
 
-- [ ] **Phase 1: Queue and Session Foundation** - Serial queue prevents Chrome corruption; session persistence survives restarts; deprecated model IDs replaced
+- [x] **Phase 1: Queue and Session Foundation** - Serial queue prevents Chrome corruption; session persistence survives restarts; deprecated model IDs replaced (completed 2026-03-16)
 - [ ] **Phase 2: Conversational Engine** - SAM personality, intent routing, customer info collection, progress updates, plain-language errors — shared module extracted
 - [ ] **Phase 3: Multi-Platform Gateway** - Unified gateway core wires Telegram and WhatsApp to the same brain; platform-specific formatting; delivery actions
 - [ ] **Phase 4: Smart Features and Delivery** - History-aware context, proactive warnings, estimate delivery to customer, parts ordering on approval
@@ -93,7 +93,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
-| 1. Queue and Session Foundation | 4/5 | In Progress|  |
+| 1. Queue and Session Foundation | 5/5 | Complete   | 2026-03-16 |
 | 2. Conversational Engine | 0/3 | Not started | - |
 | 3. Multi-Platform Gateway | 0/3 | Not started | - |
 | 4. Smart Features and Delivery | 0/2 | Not started | - |
