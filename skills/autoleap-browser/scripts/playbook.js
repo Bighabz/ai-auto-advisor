@@ -17,9 +17,9 @@ const os = require("os");
 const fs = require("fs");
 const path = require("path");
 const { LOGIN, CUSTOMER, ESTIMATE, PARTS_TAB, SERVICES } = require("./helpers/selectors");
-const { openPartsTechTab, searchAndAddToCart, submitCartToAutoLeap } = require("./helpers/pt-tab");
+const { openPartsTechTab, clearCart, searchAndAddToCart, submitCartToAutoLeap } = require("./helpers/pt-tab");
 const { navigateMotorTree } = require("./helpers/motor-nav");
-const { getToken, searchCustomer, createCustomer, createVehicle, createEstimate, getEstimate } = require("./autoleap-api");
+const { getToken, searchCustomer, createCustomer, createVehicle, createEstimate, getEstimate, addServiceToEstimate } = require("./autoleap-api");
 
 const LOG = "[playbook]";
 const CHROME_CDP_URL = "http://127.0.0.1:18800";
@@ -94,6 +94,7 @@ async function runPlaybook({ customer, vehicle, diagnosis, query, parts, progres
 
     result.estimateId = createResult.estimateId;
     result.roNumber = createResult.roNumber;
+    result.customerId = createResult.customerId;
     result.vehicleId = createResult.vehicleId;
     console.log(`${LOG} Phase 2: "Save & Create Estimate" → ${result.roNumber || result.estimateId}`);
 
@@ -112,12 +113,26 @@ async function runPlaybook({ customer, vehicle, diagnosis, query, parts, progres
     await sleep(3000);
 
     // ═══════════════════════════════════════════════════════════════════════════
-    // PHASE 2b: Select CUSTOMER then VEHICLE in Angular UI
+    // PHASE 2b: Ensure vehicle is visible in the Angular UI
     //
-    // From screenshots: clicking #estimate-customer opens a SIDEBAR (not dropdown).
-    // The sidebar triggers Angular to load customer data including vehicles.
-    // The vehicle autocomplete only works AFTER the customer data is loaded.
-    // Strategy: Clear customer × → re-search → re-select → vehicle populates
+    // The estimate is already API-created with the correct customer + vehicle.
+    // The problem is Angular's SPA state — on initial page load, the vehicle
+    // field shows "Select vehicle" placeholder even though the vehicle IS
+    // API-linked. We need Angular to render the vehicle from the API data.
+    //
+    // Root cause of previous failures:
+    // 1. vehicleInPage detection was false even when vehicle was API-linked,
+    //    because Angular renders the vehicle as a PrimeNG chip/token (not
+    //    input.value), and the page may not have fully initialized.
+    // 2. When Phase 2b ran, the customer × clear always failed, falling into
+    //    an else-branch that clicked + Escaped without actually re-selecting
+    //    the customer — so vehicle dropdown always returned 0 items.
+    //
+    // Fix: When vehicleId is known from the API, do a FRESH navigate
+    // (workboard → estimate via page.goto) to force Angular's router to load
+    // the estimate from scratch with full API data. This reliably populates
+    // both customer and vehicle fields. Only fall back to autocomplete if the
+    // vehicle is still not visible after the fresh load.
     // ═══════════════════════════════════════════════════════════════════════════
     const vehicleStr = `${vehicle.year || ""} ${vehicle.make || ""} ${vehicle.model || ""}`.trim();
     const vehicleAlreadyInPage = createResult.vehicleInPage;
@@ -126,374 +141,78 @@ async function runPlaybook({ customer, vehicle, diagnosis, query, parts, progres
       console.log(`${LOG} Vehicle "${vehicleStr}" already visible in page ✓`);
     } else if (vehicle.year || vehicle.make || vehicle.vin) {
       try {
-        console.log(`${LOG} Phase 2b: Customer/vehicle not in UI — selecting via autocomplete...`);
+        console.log(`${LOG} Phase 2b: Vehicle not visible in UI — ensuring it loads from API...`);
 
-        // ── Step A: Clear the customer × button and re-select via autocomplete ──
-        // The customer shows "undefined -" (broken display). Clear it and re-search.
-        console.log(`${LOG}   Step A: Clearing customer selection to trigger fresh load...`);
+        // ── Strategy A: Fresh navigate to force Angular to load vehicle from API ──
+        // When the vehicle is API-linked, a fresh page.goto to the estimate URL
+        // (via workboard route first to reset Angular router state) reliably
+        // renders the vehicle in the UI. Hash navigation (#/estimate/id) is NOT
+        // reliable because Angular may reuse a stale route component instance.
+        if (result.vehicleId) {
+          console.log(`${LOG}   Step A: Fresh navigate to reload estimate with API-linked vehicle...`);
+          const estUrl = `${AUTOLEAP_APP_URL}/#/estimate/${result.estimateId}`;
 
-        // Find the × button near the customer field to clear it
-        const clearResult = await page.evaluate(() => {
-          const custInput = document.querySelector("#estimate-customer");
-          if (!custInput) return { cleared: false, reason: "no input" };
+          // Navigate to workboard first (resets Angular router state)
+          await page.goto(`${AUTOLEAP_APP_URL}/#/workboard`, { waitUntil: "domcontentloaded", timeout: 30000 });
+          await sleep(3000);
 
-          // Search up the DOM tree for a close/clear button
-          let container = custInput;
-          for (let i = 0; i < 5; i++) {
-            container = container.parentElement;
-            if (!container) break;
+          // Now do a full goto to the estimate URL (triggers fresh Angular route)
+          await page.goto(estUrl, { waitUntil: "domcontentloaded", timeout: 30000 });
+          await sleep(6000); // Give Angular extra time to resolve vehicle from API
 
-            // Look for × / close icons
-            const closeEls = Array.from(container.querySelectorAll(
-              "i.pi-times, i.fa-times, i[class*='close'], i[class*='times'], " +
-              "span[class*='close'], span[class*='times'], span[class*='clear'], " +
-              "button[class*='close'], [class*='remove-icon']"
-            )).filter(el => el.offsetParent !== null || el.offsetWidth > 0);
+          try { await page.screenshot({ path: "/tmp/debug-after-fresh-nav.png" }); } catch { /* optional */ }
 
-            for (const el of closeEls) {
-              // Skip elements that are far from the customer field (in sidebar, etc.)
-              const inputRect = custInput.getBoundingClientRect();
-              const elRect = el.getBoundingClientRect();
-              const distance = Math.abs(elRect.top - inputRect.top);
-              if (distance < 30) {
-                el.click();
-                return { cleared: true, class: (el.className || "").substring(0, 40), tag: el.tagName };
-              }
-            }
-          }
+          // Re-check vehicle visibility with the richer detection
+          const freshCheck = await page.evaluate((year, make, model) => {
+            const text = document.body?.innerText || "";
+            const vStr = `${year} ${make} ${model}`.trim();
+            const chipEls = Array.from(document.querySelectorAll(
+              ".p-autocomplete-token-label, .p-autocomplete-multiple-container li .p-autocomplete-token-label, " +
+              "[class*='autocomplete'] [class*='token-label'], [class*='autocomplete'] [class*='chip']"
+            ));
+            const chipText = chipEls.map(el => el.textContent.trim()).join(" ");
+            const vInput = document.querySelector("#estimate-vehicle");
+            const inputVal = vInput?.value?.trim() || "";
+            const placeholder = (vInput?.placeholder || vInput?.getAttribute("placeholder") || "").trim();
+            const vehicleInText = vStr.length > 3 ? (text.includes(vStr) || chipText.includes(year)) : false;
+            const hasChip = chipText.length > 3;
+            const notDefaultPlaceholder = placeholder !== "Select vehicle" && placeholder !== "";
+            return {
+              vehicleInText, hasChip, chipText: chipText.substring(0, 80),
+              inputValue: inputVal.substring(0, 60), placeholder, notDefaultPlaceholder,
+            };
+          }, String(vehicle.year || ""), vehicle.make || "", vehicle.model || "");
+          console.log(`${LOG}   Fresh nav check: ${JSON.stringify(freshCheck)}`);
 
-          // Alternative: look for × text in nearby elements
-          const row = custInput.closest("[class*='row'], [class*='header'], [class*='customer']") || custInput.parentElement?.parentElement?.parentElement;
-          if (row) {
-            const allEls = row.querySelectorAll("*");
-            for (const el of allEls) {
-              if (el.textContent.trim() === "×" && el.children.length === 0 && el.offsetParent !== null) {
-                el.click();
-                return { cleared: true, text: "×" };
-              }
-            }
-          }
-
-          return { cleared: false, reason: "no close button found" };
-        });
-        console.log(`${LOG}   Clear customer result: ${JSON.stringify(clearResult)}`);
-
-        if (clearResult.cleared) {
-          await sleep(2000);
-          // Now search for the customer by phone or name
-          const custInput = await page.$("#estimate-customer");
-          if (custInput) {
-            // Phone digits are more unique than first name — search phone first
-            const phoneDigits = (customer.phone || "").replace(/\D/g, "");
-            const lastName = (customer.name || "").split(/\s+/).slice(1).join(" ") || "";
-            const firstName = (customer.name || "").split(/\s+/)[0] || "";
-            // Pick search term: last 4+ phone digits > last name > first name
-            const searchTerm = phoneDigits.length >= 4
-              ? phoneDigits.slice(-4)
-              : (lastName || firstName);
-            console.log(`${LOG}   Searching for customer "${searchTerm}" (phone: ${phoneDigits || "none"}, name: "${customer.name}")...`);
-            await custInput.click();
-            await sleep(300);
-            await custInput.type(searchTerm, { delay: 100 });
-            await sleep(3000);
-
-            await page.screenshot({ path: "/tmp/debug-customer-autocomplete.png" });
-
-            // Check for dropdown results (not sidebar)
-            const NAV_TEXTS = ["Dashboard", "Work Board", "Calendar", "Customers", "Catalog", "Inventory", "CRM", "Reviews", "Reports", "User Center"];
-            const custDropdown = await page.evaluate((fullName, phoneDigitsStr, navTexts) => {
-              const items = Array.from(document.querySelectorAll(
-                ".p-autocomplete-panel li, .p-autocomplete-items li, " +
-                "[class*='autocomplete'] [class*='list'] li, [role='option']"
-              )).filter(li => {
-                if (!li.offsetParent) return false;
-                const t = li.textContent.trim();
-                if (!t || t.length < 3) return false;
-                if (navTexts.includes(t)) return false;
-                const inNav = li.closest("nav, [class*='sidebar-nav'], [class*='nav-menu']");
-                return !inNav;
-              });
-              const texts = items.map(li => li.textContent.trim().substring(0, 80));
-
-              // Strip all non-digits from text for phone comparison
-              const stripDigits = (s) => (s || "").replace(/\D/g, "");
-
-              // Find best match index — phone digits is the most reliable
-              let bestIdx = -1;
-              let matchType = "";
-              for (let i = 0; i < items.length; i++) {
-                const t = items[i].textContent;
-                const tDigits = stripDigits(t);
-                const tLower = t.toLowerCase();
-
-                // 1. Phone match: compare digits-only (last 7+ digits to avoid country code issues)
-                if (phoneDigitsStr && phoneDigitsStr.length >= 4) {
-                  const phoneEnd = phoneDigitsStr.slice(-7);
-                  if (tDigits.includes(phoneEnd) || phoneEnd.includes(tDigits.slice(-7))) {
-                    bestIdx = i; matchType = "phone"; break;
-                  }
-                }
-
-                // 2. Full name match (both first AND last name in text)
-                if (fullName) {
-                  const nameParts = fullName.toLowerCase().split(/\s+/).filter(p => p.length > 1);
-                  const allMatch = nameParts.length >= 2 && nameParts.every(p => tLower.includes(p));
-                  if (allMatch) { bestIdx = i; matchType = "fullName"; break; }
-                }
-              }
-
-              // 3. Last resort: only result
-              if (bestIdx === -1 && items.length === 1) {
-                bestIdx = 0;
-                matchType = "onlyResult";
-              }
-
-              // Return index + rect for puppeteer-native click (NOT DOM click)
-              if (bestIdx >= 0) {
-                const rect = items[bestIdx].getBoundingClientRect();
-                return {
-                  selected: true, matchType, bestIdx,
-                  rect: { x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 },
-                  text: items[bestIdx].textContent.trim().substring(0, 80),
-                  count: items.length, all: texts,
-                };
-              }
-              return { selected: false, count: items.length, all: texts };
-            }, customer.name, phoneDigits, NAV_TEXTS);
-
-            // Use puppeteer-native click (dispatches proper mouse events for Angular)
-            if (custDropdown.selected && custDropdown.rect) {
-              await page.mouse.click(custDropdown.rect.x, custDropdown.rect.y);
-            }
-
-            console.log(`${LOG}   Customer search result: ${JSON.stringify(custDropdown)}`);
-            if (custDropdown.selected) {
-              console.log(`${LOG}   Customer re-selected (${custDropdown.matchType}): "${custDropdown.text}"`);
-              await sleep(5000); // Wait for Angular to load customer data + vehicles
-            } else if (custDropdown.count > 0) {
-              // Had results but no confident match — try searching with last name instead
-              console.log(`${LOG}   No confident match among ${custDropdown.count} results — trying last name...`);
-              await custInput.click({ clickCount: 3 });
-              await sleep(200);
-              const fallbackTerm = lastName || firstName;
-              if (fallbackTerm && fallbackTerm !== searchTerm) {
-                await custInput.type(fallbackTerm, { delay: 100 });
-                await sleep(3000);
-                // Re-check dropdown with full name match — return rect for native click
-                const retry = await page.evaluate((fullName, phoneDigitsStr, navTexts) => {
-                  const items = Array.from(document.querySelectorAll(
-                    ".p-autocomplete-panel li, .p-autocomplete-items li, " +
-                    "[class*='autocomplete'] [class*='list'] li, [role='option']"
-                  )).filter(li => {
-                    if (!li.offsetParent) return false;
-                    const t = li.textContent.trim();
-                    return t.length >= 3 && !navTexts.includes(t) &&
-                      !li.closest("nav, [class*='sidebar-nav'], [class*='nav-menu']");
-                  });
-                  const stripDigits = (s) => (s || "").replace(/\D/g, "");
-                  let best = null;
-                  for (const item of items) {
-                    const tDigits = stripDigits(item.textContent);
-                    if (phoneDigitsStr.length >= 4 && tDigits.includes(phoneDigitsStr.slice(-7))) {
-                      best = item; break;
-                    }
-                    if (fullName) {
-                      const parts = fullName.toLowerCase().split(/\s+/).filter(p => p.length > 1);
-                      if (parts.length >= 2 && parts.every(p => item.textContent.toLowerCase().includes(p))) {
-                        best = item; break;
-                      }
-                    }
-                  }
-                  if (!best && items.length === 1) best = items[0];
-                  if (best) {
-                    const rect = best.getBoundingClientRect();
-                    return { selected: true, text: best.textContent.trim().substring(0, 80), rect: { x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 } };
-                  }
-                  return { selected: false, count: items.length };
-                }, customer.name, phoneDigits, NAV_TEXTS);
-                if (retry.selected && retry.rect) {
-                  await page.mouse.click(retry.rect.x, retry.rect.y);
-                }
-                console.log(`${LOG}   Retry result: ${JSON.stringify(retry)}`);
-                if (retry.selected) await sleep(5000);
-              }
-            }
+          if (freshCheck.vehicleInText || freshCheck.hasChip || freshCheck.inputValue || freshCheck.notDefaultPlaceholder) {
+            console.log(`${LOG}   Vehicle visible after fresh navigate ✓ — skipping autocomplete`);
+          } else {
+            // Fresh navigate still didn't show vehicle — fall back to autocomplete
+            console.log(`${LOG}   Vehicle still not visible — falling back to autocomplete re-select...`);
+            await selectVehicleViaAutocomplete(page, customer, vehicle, result);
           }
         } else {
-          // Couldn't clear via × button — try clicking customer field to trigger sidebar/data load
-          console.log(`${LOG}   Could not clear via × — clicking customer to trigger data load...`);
-          const custInput = await page.$("#estimate-customer");
-          if (custInput) {
-            await custInput.click();
-            await sleep(3000);
-            // Close any sidebar that opened (Escape key)
-            await page.keyboard.press("Escape");
-            await sleep(2000);
-          }
+          // No vehicleId from API — must use autocomplete
+          console.log(`${LOG}   No vehicleId — using autocomplete to select vehicle...`);
+          await selectVehicleViaAutocomplete(page, customer, vehicle, result);
         }
 
-        // ── Close any sidebar/overlay that's blocking the vehicle field ──
-        await page.keyboard.press("Escape");
-        await sleep(1000);
-
-        // Click somewhere neutral to close any popups
-        await page.mouse.click(600, 500);
-        await sleep(1000);
-
-        await page.screenshot({ path: "/tmp/debug-before-vehicle-select.png" });
-
-        // ── Step B: Select VEHICLE from autocomplete (puppeteer-native clicks) ──
-        // After customer data is loaded, the vehicle autocomplete should have options
-        console.log(`${LOG}   Step B: Selecting vehicle "${vehicleStr}"...`);
-
-        const vehInput = await page.$("#estimate-vehicle");
-        let vehicleSelected = false;
-
-        if (vehInput) {
-          // Click vehicle input to open dropdown
-          await vehInput.click();
-          await sleep(2000);
-
-          const NAV_TEXTS = ["Dashboard", "Work Board", "Calendar", "Customers", "Catalog", "Inventory", "CRM", "Reviews", "Reports", "User Center"];
-
-          // Get dropdown items with coordinates for puppeteer-native click
-          const vehDropdown = await page.evaluate((yr, mk, navTexts) => {
-            const items = Array.from(document.querySelectorAll(
-              ".p-autocomplete-panel li, .p-autocomplete-items li, " +
-              "[class*='autocomplete'] [class*='list'] li, [role='option']"
-            )).filter(li => {
-              if (!li.offsetParent) return false;
-              const t = li.textContent.trim();
-              return t.length > 0 && !navTexts.includes(t) &&
-                !li.closest("nav, [class*='sidebar-nav'], [class*='nav-menu']");
-            });
-            const texts = items.map(li => li.textContent.trim().substring(0, 60));
-
-            let bestIdx = -1;
-            for (let i = 0; i < items.length; i++) {
-              const t = items[i].textContent.toLowerCase();
-              if ((yr && t.includes(String(yr))) && (mk && t.includes(mk.toLowerCase()))) {
-                bestIdx = i; break;
-              }
-            }
-            // Fall back to first item only if 1-2 results (safe)
-            if (bestIdx === -1 && items.length > 0 && items.length <= 2) bestIdx = 0;
-
-            if (bestIdx >= 0) {
-              const rect = items[bestIdx].getBoundingClientRect();
-              return {
-                found: true, bestIdx,
-                rect: { x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 },
-                text: items[bestIdx].textContent.trim().substring(0, 60),
-                count: items.length, all: texts,
-              };
-            }
-            return { found: false, count: items.length, all: texts };
-          }, vehicle.year, vehicle.make, NAV_TEXTS);
-          console.log(`${LOG}   Vehicle dropdown: ${JSON.stringify(vehDropdown)}`);
-
-          if (vehDropdown.found && vehDropdown.rect) {
-            // Use puppeteer-native click for proper Angular event dispatch
-            await page.mouse.click(vehDropdown.rect.x, vehDropdown.rect.y);
-            console.log(`${LOG}   Vehicle clicked (native): "${vehDropdown.text}"`);
-            await sleep(2000);
-
-            // AutoLeap shows "Update vehicle for this Order" confirmation modal
-            await clickVehicleConfirmModal(page);
-            vehicleSelected = true;
-          } else if (vehDropdown.count === 0) {
-            // No items from clicking — try typing to search
-            console.log(`${LOG}   No dropdown items — typing "${vehicle.year}" to search...`);
-            await vehInput.click({ clickCount: 3 });
-            await sleep(200);
-            await vehInput.type(String(vehicle.year || ""), { delay: 80 });
-            await sleep(3000);
-
-            const typedVeh = await page.evaluate((yr, mk, navTexts) => {
-              const items = Array.from(document.querySelectorAll(
-                ".p-autocomplete-panel li, .p-autocomplete-items li, " +
-                "[class*='autocomplete'] [class*='list'] li, [role='option']"
-              )).filter(li => {
-                if (!li.offsetParent) return false;
-                const t = li.textContent.trim();
-                return t.length > 0 && !navTexts.includes(t) &&
-                  !li.closest("nav, [class*='sidebar-nav'], [class*='nav-menu']");
-              });
-              let bestIdx = -1;
-              for (let i = 0; i < items.length; i++) {
-                const t = items[i].textContent.toLowerCase();
-                if ((yr && t.includes(String(yr))) && (mk && t.includes(mk.toLowerCase()))) {
-                  bestIdx = i; break;
-                }
-              }
-              if (bestIdx === -1 && items.length > 0 && items.length <= 2) bestIdx = 0;
-              if (bestIdx >= 0) {
-                const rect = items[bestIdx].getBoundingClientRect();
-                return { found: true, rect: { x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 }, text: items[bestIdx].textContent.trim().substring(0, 60), count: items.length };
-              }
-              return { found: false, count: items.length };
-            }, vehicle.year, vehicle.make, NAV_TEXTS);
-            console.log(`${LOG}   Vehicle type search: ${JSON.stringify(typedVeh)}`);
-            if (typedVeh.found && typedVeh.rect) {
-              await page.mouse.click(typedVeh.rect.x, typedVeh.rect.y);
-              await sleep(2000);
-              await clickVehicleConfirmModal(page);
-              vehicleSelected = true;
-              await sleep(3000);
-            }
-          }
-
-          if (!vehicleSelected) {
-            // Last resort: ArrowDown + Enter (PrimeNG keyboard selection)
-            console.log(`${LOG}   Trying keyboard selection (ArrowDown + Enter)...`);
-            await vehInput.click();
-            await sleep(1000);
-            await page.keyboard.press("ArrowDown");
-            await sleep(500);
-            await page.keyboard.press("Enter");
-            await sleep(2000);
-            await clickVehicleConfirmModal(page);
-            await sleep(3000);
-          }
-        }
-
-        // ── Step C: SAVE estimate to commit vehicle selection ──
-        // DON'T reload the page after save — screenshots prove vehicle IS linked
-        // after Confirm, but reloading destroys the Angular state.
-        console.log(`${LOG}   Step C: Saving estimate...`);
-        const saveBtn = await page.evaluate(() => {
-          const btns = Array.from(document.querySelectorAll("button"));
-          const save = btns.find(b =>
-            b.textContent.trim() === "Save" &&
-            b.classList.contains("btn-primary") &&
-            !b.disabled
-          );
-          if (save) {
-            const rect = save.getBoundingClientRect();
-            return { found: true, rect: { x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 } };
-          }
-          return { found: false };
-        });
-        if (saveBtn.found) {
-          await page.mouse.click(saveBtn.rect.x, saveBtn.rect.y);
-          console.log(`${LOG}   Save clicked — waiting...`);
-          await sleep(4000);
-        }
-
-        // ── Verify vehicle is showing (no page reload — that destroys Angular state) ──
-        await page.screenshot({ path: "/tmp/debug-after-vehicle.png" });
+        // ── Verify vehicle is showing ──
+        try { await page.screenshot({ path: "/tmp/debug-after-vehicle.png" }); } catch { /* optional */ }
         const finalCheck = await page.evaluate((yr, mk) => {
           const vInput = document.querySelector("#estimate-vehicle");
           const vehicleRow = vInput?.closest("[class*='row']") || vInput?.closest("div")?.parentElement;
           const vehicleText = vehicleRow?.textContent?.trim() || "";
-          // Check the vehicle-specific area, not the whole wrapper
           const vehicleInField = vehicleText.includes(yr) && vehicleText.includes(mk);
-          // Check both PT buttons (there are 2 ro-partstech-new containers)
           const ptButtons = Array.from(document.querySelectorAll(".ro-partstech-new button"));
           const ptClasses = ptButtons.map(b => b.className.substring(0, 60));
+          // Also check PrimeNG chip
+          const chipEls = Array.from(document.querySelectorAll(".p-autocomplete-token-label"));
+          const chipText = chipEls.map(el => el.textContent.trim()).join(" ");
           return {
-            vehicleInField,
+            vehicleInField: vehicleInField || (chipText.includes(yr) && chipText.includes(mk)),
             vehicleText: vehicleText.substring(0, 80),
+            chipText: chipText.substring(0, 80),
             ptButtons: ptClasses,
           };
         }, String(vehicle.year || ""), vehicle.make || "");
@@ -506,7 +225,7 @@ async function runPlaybook({ customer, vehicle, diagnosis, query, parts, progres
           result.warnings.push({ code: "NO_VEHICLE_UI", msg: "Vehicle not visible after confirm" });
         }
 
-        // ── Step E: Ensure clean state for Phase 3/4 ──
+        // ── Ensure clean state for Phase 3/4 ──
         // Close customer sidebar if open — it blocks Services panel / MOTOR
         const sidebarClosed = await page.evaluate(() => {
           const dialogs = document.querySelectorAll("[role='dialog'], [class*='sidebar-right'], [class*='drawer']");
@@ -550,7 +269,7 @@ async function runPlaybook({ customer, vehicle, diagnosis, query, parts, progres
     await progress(progressCallback, "adding_labor");
     console.log(`${LOG} Phase 3: Opening MOTOR catalog (runs before PartsTech to connect vehicle)...`);
 
-    const motorResult = await navigateMotorTree(page, diagnosis, vehicle, query);
+    let motorResult = await navigateMotorTree(page, diagnosis, vehicle, query);
 
     if (motorResult.success) {
       result.laborResult = motorResult;
@@ -600,10 +319,37 @@ async function runPlaybook({ customer, vehicle, diagnosis, query, parts, progres
       });
       console.log(`${LOG} Phase 3b: PT buttons after tab nav: ${JSON.stringify(ptCheck)}`);
 
-      await page.screenshot({ path: "/tmp/debug-after-motor-save.png" });
+      try { await page.screenshot({ path: "/tmp/debug-after-motor-save.png" }); } catch { /* optional */ }
     } else {
       console.log(`${LOG} Phase 3: MOTOR navigation failed: ${motorResult.error}`);
       result.warnings.push({ code: "MOTOR_FAILED", msg: motorResult.error });
+
+      // ── Fallback: Add manual service line when MOTOR fails ──
+      // Extract labor hours from ProDemand (research phase) or use default
+      const fallbackHours = diagnosis?.prodemand?.laborTimes?.[0]?.hours || 1.5;
+      const repairName = getRepairName(diagnosis, query);
+      const laborRate = Number(process.env.AUTOLEAP_LABOR_RATE) || 120;
+      console.log(`${LOG} Phase 3: Attempting manual service: "${repairName}" (${fallbackHours}h @ $${laborRate}/h)...`);
+
+      const manualResult = await addManualServiceLine(page, result.estimateId, repairName, fallbackHours, laborRate);
+      if (manualResult.success) {
+        motorResult = { success: true, procedure: repairName, hours: fallbackHours, manual: true };
+        result.laborResult = motorResult;
+        result.laborHours = fallbackHours;
+        result.warnings.push({ code: "MANUAL_SERVICE", msg: `Manual: ${repairName} (${fallbackHours}h) — ProDemand/AI labor` });
+        console.log(`${LOG} Phase 3: Manual service added via ${manualResult.method} ✓`);
+
+        // Save and prepare for PartsTech
+        await saveEstimate(page);
+        await sleep(3000);
+        await clickTab(page, "Services");
+        await sleep(2000);
+        await clickTab(page, "Parts ordering");
+        await sleep(2000);
+      } else {
+        console.log(`${LOG} Phase 3: Manual service also failed: ${manualResult.error}`);
+        result.warnings.push({ code: "NO_SERVICE", msg: "Neither MOTOR nor manual service could be added" });
+      }
     }
 
     // ═══════════════════════════════════════════════════════════════════════════
@@ -654,6 +400,10 @@ async function runPlaybook({ customer, vehicle, diagnosis, query, parts, progres
       }
 
       if (ptWorkPage) {
+        // Clear any leftover cart items from previous runs to prevent duplicates
+        console.log(`${LOG} Phase 4: Clearing PartsTech cart before adding new parts...`);
+        await clearCart(ptWorkPage);
+
         for (const partItem of partsToAdd) {
           const searchTerm = partItem.requested?.searchTerms?.[0] ||
             partItem.requested?.partType ||
@@ -748,6 +498,67 @@ async function runPlaybook({ customer, vehicle, diagnosis, query, parts, progres
     }
 
     // ═══════════════════════════════════════════════════════════════════════════
+    // QUALITY CHECK — validate estimate before finalizing
+    // ═══════════════════════════════════════════════════════════════════════════
+    console.log(`${LOG} Quality check: Validating estimate...`);
+    try {
+      await saveEstimate(page);
+      await sleep(2000);
+
+      const token = await getToken();
+      if (token && result.estimateId) {
+        const estData = await getEstimate(token, result.estimateId);
+        if (estData) {
+          const t = estData.total || {};
+          const grandTotal = (typeof t === "object") ? (t.grand || t.total || 0) : (typeof t === "number" ? t : 0);
+          const laborTotal = (typeof t === "object") ? (t.labor || 0) : 0;
+          const partsTotal = (typeof t === "object") ? (t.parts || 0) : 0;
+          const serviceCount = (estData.services || []).length;
+          const serviceNames = (estData.services || []).map(s => s.name || s.title || "unnamed");
+
+          console.log(`${LOG} QC: Services(${serviceCount}): ${serviceNames.join(", ")}`);
+          console.log(`${LOG} QC: Labor=$${laborTotal}, Parts=$${partsTotal}, Grand=$${grandTotal}`);
+
+          // Flag issues
+          if (grandTotal === 0) {
+            console.log(`${LOG} QC WARNING: Grand total is $0 — estimate may be empty`);
+            result.warnings.push({ code: "QC_ZERO_TOTAL", msg: "Estimate total is $0" });
+          }
+          if (serviceCount === 0) {
+            console.log(`${LOG} QC WARNING: No services on estimate`);
+            result.warnings.push({ code: "QC_NO_SERVICES", msg: "No services on estimate" });
+          }
+          if (partsTotal > 0 && laborTotal === 0) {
+            console.log(`${LOG} QC WARNING: Parts but no labor — check service line`);
+            result.warnings.push({ code: "QC_NO_LABOR", msg: "Parts added but labor is $0" });
+          }
+
+          // Store for Phase 6 (avoid re-fetching)
+          result._qcTotals = { labor: laborTotal, parts: partsTotal, grandTotal, source: "api" };
+          result._qcEstData = estData;
+        }
+      }
+    } catch (qcErr) {
+      console.log(`${LOG} Quality check failed (non-fatal): ${qcErr.message}`);
+    }
+
+    // Take QC screenshot — show the estimate Services view
+    try {
+      const estUrl = `${AUTOLEAP_APP_URL}/#/estimate/${result.estimateId}`;
+      const currentUrl = page.url();
+      if (!currentUrl.includes(result.estimateId)) {
+        await page.goto(estUrl, { waitUntil: "domcontentloaded", timeout: 30000 });
+        await sleep(4000);
+      }
+      await clickTab(page, "Services");
+      await sleep(2000);
+      await page.screenshot({ path: "/tmp/debug-qc-estimate.png" });
+      console.log(`${LOG} QC screenshot saved`);
+    } catch (ssErr) {
+      console.log(`${LOG} QC screenshot failed: ${ssErr.message}`);
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════
     // PHASE 6: Save + PDF (Steps 13-14)
     // ═══════════════════════════════════════════════════════════════════════════
     await progress(progressCallback, "generating_pdf");
@@ -757,39 +568,49 @@ async function runPlaybook({ customer, vehicle, diagnosis, query, parts, progres
     await saveEstimate(page);
     await sleep(3000);
 
-    // Strategy 1: Read totals from AutoLeap REST API (most reliable)
+    // Strategy 1: Use QC totals if already fetched, otherwise read from API
     let totals = { labor: 0, parts: 0, shopSupplies: 0, tax: 0, grandTotal: 0, source: "none" };
-    try {
-      const token = await getToken();
-      if (token && result.estimateId) {
-        const estData = await getEstimate(token, result.estimateId);
+    if (result._qcTotals && result._qcTotals.grandTotal > 0) {
+      totals = { ...result._qcTotals, shopSupplies: 0, tax: 0 };
+      // Fill in shop supplies and tax from the full estimate data
+      try {
+        const estData = result._qcEstData;
         if (estData) {
-          // AutoLeap API returns estData.total as an OBJECT:
-          // { parts: 0, labor: 150, total: 150, grand: 150, afterTax: 150, ... }
           const t = estData.total || {};
-          if (typeof t === "object" && t !== null) {
-            totals.labor = t.labor || 0;
-            totals.parts = t.parts || 0;
+          if (typeof t === "object") {
             totals.shopSupplies = t.shopFee || t.shopSupplyFee?.value || 0;
-            totals.tax = (typeof t.tax === "object") ? 0 : (t.tax || 0); // tax field is config, not amount
-            totals.grandTotal = t.grand || t.total || t.afterTax || 0;
-            // taxedAmount is the actual tax dollar amount
+            totals.tax = (typeof t.tax === "object") ? 0 : (t.tax || 0);
             if (t.taxedAmount) totals.tax = t.taxedAmount;
-          } else if (typeof t === "number") {
-            totals.grandTotal = t;
           }
-
-          // Also check billableHours
-          if (estData.billableHours) {
-            result.laborHours = estData.billableHours;
-          }
-
-          totals.source = "api";
-          console.log(`${LOG} Phase 6: API totals — labor: $${totals.labor}, parts: $${totals.parts}, grand: $${totals.grandTotal}`);
+          if (estData.billableHours) result.laborHours = estData.billableHours;
         }
+      } catch { /* use QC totals as-is */ }
+      console.log(`${LOG} Phase 6: Using QC totals — labor: $${totals.labor}, parts: $${totals.parts}, grand: $${totals.grandTotal}`);
+    } else {
+      try {
+        const token = await getToken();
+        if (token && result.estimateId) {
+          const estData = await getEstimate(token, result.estimateId);
+          if (estData) {
+            const t = estData.total || {};
+            if (typeof t === "object" && t !== null) {
+              totals.labor = t.labor || 0;
+              totals.parts = t.parts || 0;
+              totals.shopSupplies = t.shopFee || t.shopSupplyFee?.value || 0;
+              totals.tax = (typeof t.tax === "object") ? 0 : (t.tax || 0);
+              totals.grandTotal = t.grand || t.total || t.afterTax || 0;
+              if (t.taxedAmount) totals.tax = t.taxedAmount;
+            } else if (typeof t === "number") {
+              totals.grandTotal = t;
+            }
+            if (estData.billableHours) result.laborHours = estData.billableHours;
+            totals.source = "api";
+            console.log(`${LOG} Phase 6: API totals — labor: $${totals.labor}, parts: $${totals.parts}, grand: $${totals.grandTotal}`);
+          }
+        }
+      } catch (apiErr) {
+        console.log(`${LOG} Phase 6: API totals failed: ${apiErr.message}`);
       }
-    } catch (apiErr) {
-      console.log(`${LOG} Phase 6: API totals failed: ${apiErr.message}`);
     }
 
     // Strategy 2: DOM scraping fallback — click Labor summary tab and parse
@@ -812,30 +633,116 @@ async function runPlaybook({ customer, vehicle, diagnosis, query, parts, progres
     result.totalParts = totals.parts || 0;
     result.total = totals.grandTotal || (result.totalLabor + result.totalParts);
 
-    // Export PDF via REST API first, puppeteer fallback
+    // Export PDF — use AutoLeap's "Print estimate" button for customer-facing PDF
     console.log(`${LOG} Phase 6: Exporting PDF...`);
     const safeName = `${vehicle.year}-${vehicle.make}-${vehicle.model}`.replace(/[^a-zA-Z0-9\-]/g, "").replace(/\s+/g, "-");
     const pdfOutputPath = path.join(os.tmpdir(), `estimate-${safeName}-${Date.now()}.pdf`);
-
-    // Try REST API PDF download first
     let pdfDone = false;
-    try {
-      const { downloadEstimatePDF } = require("./autoleap-api");
-      const token = await getToken();
-      if (token && result.estimateId) {
-        const dlPath = await downloadEstimatePDF(token, result.estimateId, pdfOutputPath);
-        if (dlPath && fs.existsSync(dlPath)) {
-          result.pdfPath = dlPath;
-          const stat = fs.statSync(dlPath);
-          console.log(`${LOG} Phase 6: PDF via REST API → ${dlPath} (${stat.size} bytes)`);
-          pdfDone = true;
-        }
-      }
-    } catch (apiPdfErr) {
-      console.log(`${LOG} Phase 6: REST PDF failed: ${apiPdfErr.message}`);
+
+    // Ensure we're on the estimate page
+    const estUrl = `${AUTOLEAP_APP_URL}/#/estimate/${result.estimateId}`;
+    if (!page.url().includes(result.estimateId)) {
+      await page.goto(estUrl, { waitUntil: "domcontentloaded", timeout: 30000 });
+      await sleep(5000);
     }
 
-    // Fallback: puppeteer page.pdf()
+    // Strategy 1: Click "Print estimate" — opens customer-facing PDF in new tab
+    try {
+      // Click the print dropdown icon (fa-print)
+      const printIcon = await page.evaluate(() => {
+        const icon = document.querySelector("i.fa-print");
+        if (icon) {
+          const clickTarget = icon.closest("div.pointer, div[class*='selected-view']") || icon.parentElement;
+          if (clickTarget) {
+            const r = clickTarget.getBoundingClientRect();
+            return { x: r.x + r.width / 2, y: r.y + r.height / 2 };
+          }
+        }
+        return null;
+      });
+
+      if (printIcon) {
+        console.log(`${LOG} Phase 6: Clicking print dropdown...`);
+        await page.mouse.click(printIcon.x, printIcon.y);
+        await sleep(1500);
+
+        // Click "Print estimate" from dropdown
+        const printEstBtn = await page.evaluate(() => {
+          const items = Array.from(document.querySelectorAll("li, a, div, span, button"));
+          for (const el of items) {
+            if (!el.offsetParent) continue;
+            const text = el.textContent.trim();
+            if (text === "Print estimate" || text === "Print Estimate") {
+              const r = el.getBoundingClientRect();
+              return { x: r.x + r.width / 2, y: r.y + r.height / 2, text };
+            }
+          }
+          return null;
+        });
+
+        if (printEstBtn) {
+          console.log(`${LOG} Phase 6: Clicking "${printEstBtn.text}"...`);
+
+          // Listen for new tab (print estimate opens in a new tab)
+          const newTabPromise = new Promise((resolve) => {
+            const timer = setTimeout(() => resolve(null), 15000);
+            browser.once("targetcreated", async (target) => {
+              clearTimeout(timer);
+              await sleep(3000);
+              try { resolve(await target.page()); } catch { resolve(null); }
+            });
+          });
+
+          await page.mouse.click(printEstBtn.x, printEstBtn.y);
+          const printPage = await newTabPromise;
+
+          if (printPage) {
+            await sleep(3000);
+            console.log(`${LOG} Phase 6: Print estimate tab opened: ${printPage.url().substring(0, 80)}`);
+
+            const pdfBuffer = await printPage.pdf({
+              format: "Letter",
+              printBackground: true,
+              margin: { top: "10mm", bottom: "10mm", left: "8mm", right: "8mm" },
+            });
+
+            if (pdfBuffer.length > 5000) {
+              fs.writeFileSync(pdfOutputPath, pdfBuffer);
+              result.pdfPath = pdfOutputPath;
+              console.log(`${LOG} Phase 6: Customer-facing PDF → ${pdfOutputPath} (${pdfBuffer.length} bytes)`);
+              pdfDone = true;
+            }
+
+            try { await printPage.close(); } catch { /* ok */ }
+          } else {
+            console.log(`${LOG} Phase 6: Print estimate did not open new tab`);
+          }
+        }
+      }
+    } catch (printErr) {
+      console.log(`${LOG} Phase 6: Print estimate approach failed: ${printErr.message}`);
+    }
+
+    // Strategy 2: REST API PDF download
+    if (!pdfDone) {
+      try {
+        const { downloadEstimatePDF } = require("./autoleap-api");
+        const token = await getToken();
+        if (token && result.estimateId) {
+          const dlPath = await downloadEstimatePDF(token, result.estimateId, pdfOutputPath);
+          if (dlPath && fs.existsSync(dlPath)) {
+            result.pdfPath = dlPath;
+            const stat = fs.statSync(dlPath);
+            console.log(`${LOG} Phase 6: PDF via REST API → ${dlPath} (${stat.size} bytes)`);
+            pdfDone = true;
+          }
+        }
+      } catch (apiPdfErr) {
+        console.log(`${LOG} Phase 6: REST PDF failed: ${apiPdfErr.message}`);
+      }
+    }
+
+    // Strategy 3: Raw puppeteer page.pdf() (last resort — shows editor UI)
     if (!pdfDone) {
       try {
         const pdfBuffer = await page.pdf({
@@ -845,7 +752,7 @@ async function runPlaybook({ customer, vehicle, diagnosis, query, parts, progres
         });
         fs.writeFileSync(pdfOutputPath, pdfBuffer);
         result.pdfPath = pdfOutputPath;
-        console.log(`${LOG} Phase 6: PDF via puppeteer → ${pdfOutputPath} (${pdfBuffer.length} bytes)`);
+        console.log(`${LOG} Phase 6: PDF via puppeteer fallback → ${pdfOutputPath} (${pdfBuffer.length} bytes)`);
       } catch (pdfErr) {
         console.log(`${LOG} Phase 6: PDF export failed: ${pdfErr.message}`);
         result.warnings.push({ code: "PDF_FAILED", msg: pdfErr.message });
@@ -855,6 +762,9 @@ async function runPlaybook({ customer, vehicle, diagnosis, query, parts, progres
     result.success = true;
     const laborRate = Number(process.env.AUTOLEAP_LABOR_RATE) || 120;
     result.laborRate = laborRate;
+    // Clean up internal QC fields
+    delete result._qcTotals;
+    delete result._qcEstData;
     console.log(`${LOG} Complete: ${result.roNumber || result.estimateId}, Labor $${result.totalLabor}, Parts $${result.totalParts}, Total $${result.total}`);
 
   } catch (err) {
@@ -1148,24 +1058,42 @@ async function createEstimateWithCustomerVehicle(page, customer, vehicle) {
     return { success: false, error: "Estimate page 404 — URL pattern may have changed" };
   }
 
-  await page.screenshot({ path: "/tmp/debug-estimate-page.png" });
+  try { await page.screenshot({ path: "/tmp/debug-estimate-page.png" }); } catch { /* optional */ }
 
   // Check vehicle status on the page
+  // NOTE: Angular PrimeNG autocomplete renders a selected item as a chip/token
+  // inside .p-autocomplete-multiple-container, NOT as input.value. We must check
+  // for chip text OR the placeholder absence OR body text containing the vehicle.
   const vehiclePageCheck = await page.evaluate((year, make, model) => {
     const text = document.body?.innerText || "";
     const vStr = `${year} ${make} ${model}`.trim();
     const vInput = document.querySelector("#estimate-vehicle");
     const dropdownBtn = document.querySelector(".p-autocomplete-dropdown");
-    // Check all possible overlay containers
-    const overlays = document.querySelectorAll(
-      ".p-autocomplete-panel, .p-autocomplete-overlay, .p-overlay, .p-connected-overlay, .cdk-overlay-pane, [class*='autocomplete']"
-    );
+
+    // Check for PrimeNG chip/token (Angular renders selected item as chip, not input.value)
+    const chipEls = Array.from(document.querySelectorAll(
+      ".p-autocomplete-token-label, .p-autocomplete-multiple-container li .p-autocomplete-token-label, " +
+      "[class*='autocomplete'] [class*='token-label'], [class*='autocomplete'] [class*='chip']"
+    ));
+    const chipText = chipEls.map(el => el.textContent.trim()).join(" ");
+
+    // Also check the input value directly AND the placeholder
+    const inputVal = vInput?.value?.trim() || "";
+    const placeholder = (vInput?.placeholder || vInput?.getAttribute("placeholder") || "").trim();
+
+    // A filled vehicle field shows NO "Select vehicle" placeholder + either has chip or text
+    const hasChip = chipText.length > 3;
+    const vehicleInText = vStr.length > 3 ? (text.includes(vStr) || chipText.includes(year)) : false;
+    const notDefaultPlaceholder = placeholder !== "Select vehicle" && placeholder !== "";
+
     return {
-      vehicleInText: vStr ? text.includes(vStr) : false,
-      inputValue: vInput?.value?.substring(0, 60) || "",
-      placeholder: (vInput?.placeholder || vInput?.getAttribute("placeholder") || "").substring(0, 40),
+      vehicleInText,
+      hasChip,
+      chipText: chipText.substring(0, 80),
+      inputValue: inputVal.substring(0, 60),
+      placeholder,
+      notDefaultPlaceholder,
       hasDropdownBtn: !!dropdownBtn,
-      overlayCount: overlays.length,
       inputExists: !!vInput,
     };
   }, String(vehicle.year || ""), vehicle.make || "", vehicle.model || "");
@@ -1192,9 +1120,191 @@ async function createEstimateWithCustomerVehicle(page, customer, vehicle) {
     success: true,
     estimateId,
     roNumber,
+    customerId: customerId || null,
     vehicleId: vehicleId || null,
-    vehicleInPage: vehiclePageCheck.vehicleInText || !!vehiclePageCheck.inputValue,
+    vehicleInPage: vehiclePageCheck.vehicleInText || vehiclePageCheck.hasChip ||
+      !!vehiclePageCheck.inputValue || vehiclePageCheck.notDefaultPlaceholder,
   };
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// MOTOR Fallback: Manual Service Line
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/**
+ * Extract a clean repair name from diagnosis or query.
+ */
+function getRepairName(diagnosis, query) {
+  const repairPlan = diagnosis?.ai?.repair_plan?.labor?.description;
+  if (repairPlan && repairPlan.length > 3) return repairPlan;
+
+  const firstDiagnosis = diagnosis?.ai?.diagnoses?.[0]?.cause;
+  if (firstDiagnosis && firstDiagnosis.length > 3) return firstDiagnosis;
+
+  if (query) {
+    const cleaned = query
+      .replace(/\b(needs|needed|requires|customer|wants|vehicle|car|truck)\b/gi, "")
+      .replace(/\d{4}\s+\w+\s+\w+/g, "") // strip "2002 Toyota RAV4"
+      .replace(/\s+/g, " ")
+      .trim();
+    if (cleaned.length > 3) return cleaned;
+  }
+
+  return "Labor Service";
+}
+
+/**
+ * Fallback: add a manual service line when MOTOR navigation fails.
+ *
+ * Uses the AutoLeap REST API to add a properly named service line,
+ * then reloads the browser page to show it. This avoids the Browse dialog
+ * approach which always uses a canned service name (e.g., "A/C Recharge").
+ */
+async function addManualServiceLine(page, estimateId, serviceName, hours, laborRate) {
+  console.log(`${LOG} Adding manual service via API: "${serviceName}" (${hours}h @ $${laborRate}/h)...`);
+
+  try {
+    const token = await getToken();
+    if (!token) {
+      console.log(`${LOG} No API token — falling back to browser method`);
+      return addManualServiceViaBrowser(page, estimateId, serviceName, hours, laborRate);
+    }
+
+    const service = {
+      name: serviceName,
+      serviceType: "general",
+      hours: hours,
+      rate: laborRate,
+      quantity: hours,
+      laborRate: laborRate,
+      total: hours * laborRate,
+    };
+
+    const apiResult = await addServiceToEstimate(token, estimateId, service);
+
+    if (apiResult.success) {
+      console.log(`${LOG} Service added via API (${apiResult.method}) ✓`);
+
+      // Reload browser page to show the new service
+      await page.goto(`${AUTOLEAP_APP_URL}/#/workboard`, { waitUntil: "domcontentloaded", timeout: 30000 });
+      await sleep(2000);
+      await page.goto(`${AUTOLEAP_APP_URL}/#/estimate/${estimateId}`, { waitUntil: "domcontentloaded", timeout: 30000 });
+      await sleep(5000);
+
+      return { success: true, method: "api-" + apiResult.method };
+    }
+
+    console.log(`${LOG} API service add failed — falling back to browser method`);
+  } catch (apiErr) {
+    console.log(`${LOG} API service add error: ${apiErr.message} — falling back to browser`);
+  }
+
+  // Fallback: browser-based approach using Browse dialog
+  return addManualServiceViaBrowser(page, estimateId, serviceName, hours, laborRate);
+}
+
+/**
+ * Browser fallback: add a canned service via Browse dialog, then edit its name.
+ */
+async function addManualServiceViaBrowser(page, estimateId, serviceName, hours, laborRate) {
+  console.log(`${LOG} Adding service via Browse dialog...`);
+
+  await page.goto(`${AUTOLEAP_APP_URL}/#/workboard`, { waitUntil: "domcontentloaded", timeout: 30000 });
+  await sleep(3000);
+  await page.goto(`${AUTOLEAP_APP_URL}/#/estimate/${estimateId}`, { waitUntil: "domcontentloaded", timeout: 30000 });
+  await sleep(5000);
+
+  await clickTab(page, "Services");
+  await sleep(2000);
+
+  // Open Browse dialog
+  const browseBtn = await page.evaluate(() => {
+    for (const btn of document.querySelectorAll("button")) {
+      if (btn.offsetParent && btn.textContent.trim() === "Browse") {
+        const r = btn.getBoundingClientRect();
+        return { x: r.x + r.width / 2, y: r.y + r.height / 2 };
+      }
+    }
+    return null;
+  });
+
+  if (!browseBtn) {
+    return { success: false, error: "Browse button not found" };
+  }
+
+  await page.mouse.click(browseBtn.x, browseBtn.y);
+  await sleep(3000);
+
+  // Click AutoLeap tab
+  await page.evaluate(() => {
+    for (const el of document.querySelectorAll("p, span, div")) {
+      if (!el.offsetParent) continue;
+      if (el.textContent.trim() === "AutoLeap" && el.className.includes("service-tab")) {
+        el.click(); return;
+      }
+    }
+  });
+  await sleep(2000);
+
+  // Click "Add" on first canned service (DIV.add-est-btn, NOT <button>)
+  const addResult = await page.evaluate(() => {
+    const addBtns = Array.from(document.querySelectorAll("div.add-est-btn, div[class*='add-est-btn']"))
+      .filter(b => b.offsetParent !== null && b.textContent.trim() === "Add");
+    if (addBtns.length === 0) {
+      const fallback = Array.from(document.querySelectorAll("div, span, a, button"))
+        .filter(el => el.offsetParent !== null && el.textContent.trim() === "Add" && el.children.length === 0);
+      if (fallback.length > 0) addBtns.push(...fallback);
+    }
+    if (addBtns.length === 0) return { found: false };
+    const btn = addBtns[0];
+    const r = btn.getBoundingClientRect();
+    return { found: true, x: r.x + r.width / 2, y: r.y + r.height / 2 };
+  });
+
+  if (!addResult.found) {
+    return { success: false, error: "No Add buttons in Browse dialog" };
+  }
+
+  await page.mouse.click(addResult.x, addResult.y);
+  await sleep(3000);
+
+  // Close Browse dialog
+  const doneBtn = await page.evaluate(() => {
+    for (const btn of document.querySelectorAll("button")) {
+      if (btn.textContent.trim() === "Done" && btn.offsetParent !== null) {
+        const r = btn.getBoundingClientRect();
+        return { x: r.x + r.width / 2, y: r.y + r.height / 2 };
+      }
+    }
+    return null;
+  });
+  if (doneBtn) {
+    await page.mouse.click(doneBtn.x, doneBtn.y);
+    await sleep(2000);
+  }
+
+  // Now rename via API (overwrite the canned service name in the DB)
+  try {
+    const token = await getToken();
+    if (token) {
+      const est = await getEstimate(token, estimateId);
+      if (est?.services?.length > 0) {
+        const lastService = est.services[est.services.length - 1];
+        lastService.name = serviceName;
+        lastService.hours = hours;
+        lastService.quantity = hours;
+        lastService.rate = laborRate;
+        lastService.laborRate = laborRate;
+        lastService.total = hours * laborRate;
+        const patchRes = await addServiceToEstimate(token, estimateId, { services: est.services });
+        console.log(`${LOG} Renamed service via API: ${patchRes.success}`);
+      }
+    }
+  } catch (renameErr) {
+    console.log(`${LOG} Service rename via API failed (non-fatal): ${renameErr.message}`);
+  }
+
+  return { success: true, method: "browse-add-canned" };
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -1593,6 +1703,227 @@ async function progress(cb, phase) {
     try {
       await cb(phase);
     } catch { /* non-fatal */ }
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Phase 2b Fallback: Select vehicle via Angular autocomplete
+//
+// Only used when fresh navigate fails to render vehicle in UI.
+// Prerequisite: customer must be re-selected first so Angular loads the
+// vehicle list for the customer. Without a customer-selection event, the
+// vehicle dropdown returns 0 items.
+// ═══════════════════════════════════════════════════════════════════════════════
+
+async function selectVehicleViaAutocomplete(page, customer, vehicle, result) {
+  const vehicleStr = `${vehicle.year || ""} ${vehicle.make || ""} ${vehicle.model || ""}`.trim();
+  const NAV_TEXTS = ["Dashboard", "Work Board", "Calendar", "Customers", "Catalog", "Inventory", "CRM", "Reviews", "Reports", "User Center"];
+
+  // ── Step A: Re-select the customer to trigger Angular to load vehicle list ──
+  // AutoLeap's vehicle autocomplete only populates AFTER a customer-selection
+  // event fires (Angular reactive form updates vehicleOptions$ observable).
+  // We must clear + re-select the customer to trigger this.
+  console.log(`${LOG}   Autocomplete fallback: Re-selecting customer to load vehicle list...`);
+
+  const custInput = await page.$("#estimate-customer");
+  if (custInput) {
+    const phoneDigits = (customer.phone || "").replace(/\D/g, "");
+    const nameParts = (customer.name || "").split(/\s+/);
+    const lastName = nameParts.slice(1).join(" ") || "";
+    const firstName = nameParts[0] || "";
+    const searchTerm = phoneDigits.length >= 4 ? phoneDigits.slice(-4) : (lastName || firstName);
+
+    // Try to clear the existing customer value first (so autocomplete fires)
+    await custInput.click({ clickCount: 3 });
+    await sleep(300);
+    await custInput.type(searchTerm, { delay: 100 });
+    await sleep(3000);
+
+    try { await page.screenshot({ path: "/tmp/debug-customer-autocomplete.png" }); } catch { /* optional */ }
+
+    // Pick the matching customer from dropdown
+    const custDropdown = await page.evaluate((fullName, phoneDigitsStr, navTexts) => {
+      const items = Array.from(document.querySelectorAll(
+        ".p-autocomplete-panel li, .p-autocomplete-items li, " +
+        "[class*='autocomplete'] [class*='list'] li, [role='option']"
+      )).filter(li => {
+        if (!li.offsetParent) return false;
+        const t = li.textContent.trim();
+        return t.length >= 3 && !navTexts.includes(t) &&
+          !li.closest("nav, [class*='sidebar-nav'], [class*='nav-menu']");
+      });
+      const stripDigits = (s) => (s || "").replace(/\D/g, "");
+      let bestIdx = -1, matchType = "";
+      for (let i = 0; i < items.length; i++) {
+        const t = items[i].textContent;
+        const tDigits = stripDigits(t);
+        const tLower = t.toLowerCase();
+        if (phoneDigitsStr && phoneDigitsStr.length >= 4) {
+          const phoneEnd = phoneDigitsStr.slice(-7);
+          if (tDigits.includes(phoneEnd) || phoneEnd.includes(tDigits.slice(-7))) {
+            bestIdx = i; matchType = "phone"; break;
+          }
+        }
+        if (fullName) {
+          const parts = fullName.toLowerCase().split(/\s+/).filter(p => p.length > 1);
+          if (parts.length >= 2 && parts.every(p => tLower.includes(p))) {
+            bestIdx = i; matchType = "fullName"; break;
+          }
+        }
+      }
+      if (bestIdx === -1 && items.length === 1) { bestIdx = 0; matchType = "onlyResult"; }
+      if (bestIdx >= 0) {
+        const rect = items[bestIdx].getBoundingClientRect();
+        return {
+          selected: true, matchType,
+          rect: { x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 },
+          text: items[bestIdx].textContent.trim().substring(0, 80),
+          count: items.length,
+        };
+      }
+      return { selected: false, count: items.length };
+    }, customer.name, phoneDigits, NAV_TEXTS);
+
+    console.log(`${LOG}   Customer dropdown: ${JSON.stringify(custDropdown)}`);
+    if (custDropdown.selected && custDropdown.rect) {
+      await page.mouse.click(custDropdown.rect.x, custDropdown.rect.y);
+      console.log(`${LOG}   Customer re-selected (${custDropdown.matchType}): "${custDropdown.text}"`);
+      await sleep(5000); // Wait for Angular to load vehicle list
+    } else {
+      console.log(`${LOG}   Customer not found in dropdown (${custDropdown.count} items) — vehicle dropdown may be empty`);
+    }
+  }
+
+  // Close any open autocomplete panels
+  await page.keyboard.press("Escape");
+  await sleep(500);
+  await page.mouse.click(600, 500);
+  await sleep(1000);
+
+  try { await page.screenshot({ path: "/tmp/debug-before-vehicle-select.png" }); } catch { /* optional */ }
+
+  // ── Step B: Select VEHICLE from autocomplete ──
+  console.log(`${LOG}   Autocomplete fallback: Selecting vehicle "${vehicleStr}"...`);
+  const vehInput = await page.$("#estimate-vehicle");
+  let vehicleSelected = false;
+
+  if (vehInput) {
+    await vehInput.click();
+    await sleep(2000);
+
+    const vehDropdown = await page.evaluate((yr, mk, navTexts) => {
+      const items = Array.from(document.querySelectorAll(
+        ".p-autocomplete-panel li, .p-autocomplete-items li, " +
+        "[class*='autocomplete'] [class*='list'] li, [role='option']"
+      )).filter(li => {
+        if (!li.offsetParent) return false;
+        const t = li.textContent.trim();
+        return t.length > 0 && !navTexts.includes(t) &&
+          !li.closest("nav, [class*='sidebar-nav'], [class*='nav-menu']");
+      });
+      const texts = items.map(li => li.textContent.trim().substring(0, 60));
+      let bestIdx = -1;
+      for (let i = 0; i < items.length; i++) {
+        const t = items[i].textContent.toLowerCase();
+        if ((yr && t.includes(String(yr))) && (mk && t.includes(mk.toLowerCase()))) {
+          bestIdx = i; break;
+        }
+      }
+      if (bestIdx === -1 && items.length > 0 && items.length <= 2) bestIdx = 0;
+      if (bestIdx >= 0) {
+        const rect = items[bestIdx].getBoundingClientRect();
+        return {
+          found: true, bestIdx,
+          rect: { x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 },
+          text: items[bestIdx].textContent.trim().substring(0, 60),
+          count: items.length, all: texts,
+        };
+      }
+      return { found: false, count: items.length, all: texts };
+    }, vehicle.year, vehicle.make, NAV_TEXTS);
+    console.log(`${LOG}   Vehicle dropdown: ${JSON.stringify(vehDropdown)}`);
+
+    if (vehDropdown.found && vehDropdown.rect) {
+      await page.mouse.click(vehDropdown.rect.x, vehDropdown.rect.y);
+      console.log(`${LOG}   Vehicle clicked (native): "${vehDropdown.text}"`);
+      await sleep(2000);
+      await clickVehicleConfirmModal(page);
+      vehicleSelected = true;
+    } else if (vehDropdown.count === 0) {
+      // No items — try typing year to search
+      console.log(`${LOG}   No dropdown items — typing "${vehicle.year}" to search...`);
+      await vehInput.click({ clickCount: 3 });
+      await sleep(200);
+      await vehInput.type(String(vehicle.year || ""), { delay: 80 });
+      await sleep(3000);
+
+      const typedVeh = await page.evaluate((yr, mk, navTexts) => {
+        const items = Array.from(document.querySelectorAll(
+          ".p-autocomplete-panel li, .p-autocomplete-items li, " +
+          "[class*='autocomplete'] [class*='list'] li, [role='option']"
+        )).filter(li => {
+          if (!li.offsetParent) return false;
+          const t = li.textContent.trim();
+          return t.length > 0 && !navTexts.includes(t) &&
+            !li.closest("nav, [class*='sidebar-nav'], [class*='nav-menu']");
+        });
+        let bestIdx = -1;
+        for (let i = 0; i < items.length; i++) {
+          const t = items[i].textContent.toLowerCase();
+          if ((yr && t.includes(String(yr))) && (mk && t.includes(mk.toLowerCase()))) {
+            bestIdx = i; break;
+          }
+        }
+        if (bestIdx === -1 && items.length > 0 && items.length <= 2) bestIdx = 0;
+        if (bestIdx >= 0) {
+          const rect = items[bestIdx].getBoundingClientRect();
+          return { found: true, rect: { x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 }, text: items[bestIdx].textContent.trim().substring(0, 60), count: items.length };
+        }
+        return { found: false, count: items.length };
+      }, vehicle.year, vehicle.make, NAV_TEXTS);
+      console.log(`${LOG}   Vehicle type search: ${JSON.stringify(typedVeh)}`);
+      if (typedVeh.found && typedVeh.rect) {
+        await page.mouse.click(typedVeh.rect.x, typedVeh.rect.y);
+        await sleep(2000);
+        await clickVehicleConfirmModal(page);
+        vehicleSelected = true;
+        await sleep(3000);
+      }
+    }
+
+    if (!vehicleSelected) {
+      // Last resort: ArrowDown + Enter (PrimeNG keyboard selection)
+      console.log(`${LOG}   Trying keyboard selection (ArrowDown + Enter)...`);
+      await vehInput.click();
+      await sleep(1000);
+      await page.keyboard.press("ArrowDown");
+      await sleep(500);
+      await page.keyboard.press("Enter");
+      await sleep(2000);
+      await clickVehicleConfirmModal(page);
+      await sleep(3000);
+    }
+  }
+
+  // Save estimate to commit any UI vehicle selection
+  console.log(`${LOG}   Saving estimate after autocomplete selection...`);
+  const saveBtn = await page.evaluate(() => {
+    const btns = Array.from(document.querySelectorAll("button"));
+    const save = btns.find(b =>
+      b.textContent.trim() === "Save" &&
+      b.classList.contains("btn-primary") &&
+      !b.disabled
+    );
+    if (save) {
+      const rect = save.getBoundingClientRect();
+      return { found: true, rect: { x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 } };
+    }
+    return { found: false };
+  });
+  if (saveBtn.found) {
+    await page.mouse.click(saveBtn.rect.x, saveBtn.rect.y);
+    console.log(`${LOG}   Save clicked — waiting...`);
+    await sleep(4000);
   }
 }
 
