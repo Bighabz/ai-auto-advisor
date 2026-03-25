@@ -401,7 +401,7 @@ async function runPlaybook({ customer, vehicle, diagnosis, query, parts, progres
       await page.goto(`${AUTOLEAP_APP_URL}/#/estimate/${result.estimateId}`, { waitUntil: "domcontentloaded", timeout: 30000 });
       await sleep(6000);
 
-      // Dismiss overlays + enter edit mode (same as Phase 3 — redirected page may be in view mode)
+      // Dismiss overlays + enter edit mode (same as Phase 3)
       await page.evaluate(() => {
         document.querySelectorAll(".p-dialog-mask-scrollblocker, .p-component-overlay").forEach(m => m.remove());
         const btn = Array.from(document.querySelectorAll("button")).find(b =>
@@ -410,17 +410,43 @@ async function runPlaybook({ customer, vehicle, diagnosis, query, parts, progres
       });
       await page.keyboard.press("Escape");
       await sleep(1000);
+
+      // Check for Edit button — log either way for debugging
       try {
         const editBtn = await page.$("button.btn-brown");
         if (editBtn) {
           console.log(`${LOG} Phase 5: Clicking "Edit" to enter edit mode...`);
           await editBtn.click({ timeout: 10000 });
           await sleep(5000);
+        } else {
+          // Debug: what buttons ARE on the page?
+          const pageButtons = await page.evaluate(() =>
+            Array.from(document.querySelectorAll("button"))
+              .filter(b => b.offsetParent !== null)
+              .slice(0, 10)
+              .map(b => ({ text: b.textContent.trim().substring(0, 30), cls: b.className.substring(0, 40) }))
+          );
+          console.log(`${LOG} Phase 5: No Edit button found. Visible buttons: ${JSON.stringify(pageButtons)}`);
         }
-      } catch { /* no edit button = already in edit mode */ }
+      } catch (e) {
+        console.log(`${LOG} Phase 5: Edit button error: ${e.message}`);
+      }
+
+      // Take debug screenshot before linking
+      await safeScreenshot(page, "/tmp/debug-phase5-before-link.png");
 
       console.log(`${LOG} Phase 5: Linking parts to labor service...`);
-      const linkResult = await linkPartsToServices(page, result.partsAdded, motorResult);
+
+      // Try linking with retries — dropdown options may load asynchronously
+      let linkResult = null;
+      for (let attempt = 1; attempt <= 3; attempt++) {
+        linkResult = await linkPartsToServices(page, result.partsAdded, motorResult);
+        if (linkResult.linked > 0) break;
+        if (attempt < 3) {
+          console.log(`${LOG} Phase 5: Linking attempt ${attempt} failed (0 options) — waiting 5s and retrying...`);
+          await sleep(5000);
+        }
+      }
       if (linkResult.linked > 0) {
         console.log(`${LOG} Phase 5: Markup matrix triggered (${linkResult.linked} parts linked)`);
       } else {
