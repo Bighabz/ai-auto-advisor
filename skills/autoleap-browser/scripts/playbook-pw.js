@@ -276,7 +276,11 @@ async function runPlaybook({ customer, vehicle, diagnosis, query, parts, progres
       await progress(progressCallback, "adding_parts");
       console.log(`${LOG} Phase 4: Opening PartsTech tab...`);
 
-      const { ptPage, isIframe } = await openPartsTechTab(page, browser, result.estimateId, result.vehicleId);
+      // vehicleId may be a full object from API — extract string ID
+      const vehIdStr = (typeof result.vehicleId === "object" && result.vehicleId)
+        ? (result.vehicleId._id || result.vehicleId.vehicleId || String(result.vehicleId))
+        : result.vehicleId;
+      const { ptPage, isIframe } = await openPartsTechTab(page, browser, result.estimateId, vehIdStr);
 
       // Get the working page for PartsTech (either new tab or iframe content)
       let ptWorkPage = ptPage;
