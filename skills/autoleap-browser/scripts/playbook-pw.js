@@ -116,23 +116,36 @@ async function runPlaybook({ customer, vehicle, diagnosis, query, parts, progres
 
     // AutoLeap estimate may load in VIEW mode with "Click 'Edit' to update RO" banner.
     // Must click "Edit" to enter edit mode before Browse/MOTOR will work.
-    const editBtnClicked = await page.evaluate(() => {
-      const btns = Array.from(document.querySelectorAll("button"));
-      const editBtn = btns.find(b =>
-        b.offsetParent !== null &&
-        b.textContent.trim() === "Edit" &&
-        (b.className || "").includes("btn-brown")
-      );
+    // Use Playwright's native click (handles Angular event dispatching properly).
+    try {
+      const editBtn = await page.$("button.btn-brown");
       if (editBtn) {
-        const rect = editBtn.getBoundingClientRect();
-        return { found: true, x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 };
+        console.log(`${LOG} Phase 3: Clicking "Edit" to enter edit mode (Playwright click)...`);
+        await editBtn.click();
+        await sleep(5000);
+        // Verify edit mode — the Edit banner should disappear
+        const stillViewMode = await page.evaluate(() =>
+          !!Array.from(document.querySelectorAll("button")).find(b =>
+            b.offsetParent !== null && b.textContent.trim() === "Edit" && (b.className || "").includes("btn-brown")
+          )
+        );
+        if (stillViewMode) {
+          console.log(`${LOG} Phase 3: Edit click didn't work — trying dispatchEvent fallback...`);
+          await page.evaluate(() => {
+            const btn = Array.from(document.querySelectorAll("button")).find(b =>
+              b.offsetParent !== null && b.textContent.trim() === "Edit" && (b.className || "").includes("btn-brown")
+            );
+            if (btn) {
+              btn.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+            }
+          });
+          await sleep(5000);
+        } else {
+          console.log(`${LOG} Phase 3: Edit mode activated ✓`);
+        }
       }
-      return { found: false };
-    });
-    if (editBtnClicked.found) {
-      console.log(`${LOG} Phase 3: Clicking "Edit" to enter edit mode...`);
-      await page.mouse.click(editBtnClicked.x, editBtnClicked.y);
-      await sleep(3000);
+    } catch (editErr) {
+      console.log(`${LOG} Phase 3: Edit button not found or click failed: ${editErr.message}`);
     }
 
     let motorResult = await navigateMotorTree(page, diagnosis, vehicle, query);
