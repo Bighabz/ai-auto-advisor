@@ -1183,6 +1183,10 @@ async function createEstimateViaUI(page, customer, vehicle) {
     console.log(`${LOG}   Vehicle bound: "${vehResult.text}" ✓`);
     await sleep(2000);
     await clickVehicleConfirmModal(page);
+    // Save immediately to persist vehicle binding before any page refresh
+    await saveEstimate(page);
+    await sleep(3000);
+    console.log(`${LOG}   Estimate saved with vehicle binding ✓`);
   } else {
     console.log(`${LOG}   Autocomplete returned 0 items — trying sidebar fallback...`);
 
@@ -1358,6 +1362,9 @@ async function createEstimateViaUI(page, customer, vehicle) {
             console.log(`${LOG}   Vehicle bound via autocomplete: "${vehResult.text}" ✓`);
             await sleep(2000);
             await clickVehicleConfirmModal(page);
+            await saveEstimate(page);
+            await sleep(3000);
+            console.log(`${LOG}   Estimate saved with vehicle binding ✓`);
           } else {
             console.log(`${LOG}   Autocomplete binding failed: ${JSON.stringify(vehResult)}`);
             vehicleSelected = false;
