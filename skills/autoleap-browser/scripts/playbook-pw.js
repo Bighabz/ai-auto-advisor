@@ -2309,33 +2309,6 @@ async function linkPartsToServices(page, addedParts, laborResult) {
       }
       await sleep(2000);
 
-      // Debug: dump dropdown DOM state after click
-      const dropdownDebug = await page.evaluate(() => {
-        const showWrappers = document.querySelectorAll(".dropdown-list-wrapper.show");
-        const allListItems = document.querySelectorAll("li.dropdown-list-item");
-        const anyDropdownOpen = document.querySelectorAll("[class*='dropdown-list-wrapper']");
-        const overlays = document.querySelectorAll(".p-overlay, .cdk-overlay-pane, [class*='overlay']");
-        // Check ALL APP-DROPDOWN elements for any open state
-        const appDDs = Array.from(document.querySelectorAll("app-dropdown, APP-DROPDOWN"));
-        const ddStates = appDDs.map(dd => ({
-          text: (dd.textContent || "").trim().substring(0, 40),
-          hasShow: !!dd.querySelector(".show"),
-          wrapperClasses: dd.querySelector("[class*='dropdown-list']")?.className || "none",
-          itemCount: dd.querySelectorAll("li").length,
-          html: dd.innerHTML.substring(0, 200),
-        }));
-        return {
-          showWrappers: showWrappers.length,
-          allListItems: allListItems.length,
-          anyDropdownOpen: anyDropdownOpen.length,
-          overlays: overlays.length,
-          appDropdowns: ddStates,
-        };
-      });
-      console.log(`${LOG} Phase 5: Dropdown DOM debug: ${JSON.stringify(dropdownDebug)}`);
-
-      await safeScreenshot(page, "/tmp/debug-phase5-dropdown-open.png");
-
       // Select the MOTOR service from the dropdown-list-wrapper overlay.
       // Options are LI.dropdown-list-item inside UL.dropdown-list inside the now-visible
       // DIV.dropdown-list-wrapper.show within the same APP-DROPDOWN.
