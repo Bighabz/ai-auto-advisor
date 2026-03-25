@@ -1296,44 +1296,54 @@ async function fillAddVehicleForm(page, vehicle) {
       });
 
       const texts = items.map(li => li.textContent.trim().substring(0, 80));
-      let bestIdx = -1;
 
-      // Year + make + model match
+      // Scored engine chooser — prefer GAS over EV/BEV (same logic as ProDemand)
+      let bestIdx = -1;
+      let bestScore = -999;
+
       for (let i = 0; i < items.length; i++) {
         const t = items[i].textContent.toLowerCase();
-        if (year && t.includes(year) && make && t.includes(make) && model && t.includes(model)) {
-          bestIdx = i; break;
+        if (t.includes("create manually")) continue; // skip manual option
+
+        let score = 0;
+        if (year && t.includes(year)) score += 3;
+        if (make && t.includes(make)) score += 3;
+        if (model && t.includes(model)) score += 5;
+
+        // Engine scoring — strongly prefer GAS, penalize EV/BATTERY
+        if (t.includes("gas") || t.includes("gasoline") || t.includes("gas fi")) score += 6;
+        if (t.includes("ev") || t.includes("bev") || t.includes("battery") || t.includes("electric") || t.includes("ev/bev")) score -= 8;
+        if (t.includes("hybrid")) score -= 2;
+
+        // Must at least match year + make
+        if (!(year && t.includes(year) && make && t.includes(make))) continue;
+
+        if (score > bestScore) {
+          bestScore = score;
+          bestIdx = i;
         }
       }
-      // Year + make match
-      if (bestIdx === -1) {
-        for (let i = 0; i < items.length; i++) {
-          const t = items[i].textContent.toLowerCase();
-          if (year && t.includes(year) && make && t.includes(make)) {
-            bestIdx = i; break;
-          }
-        }
-      }
-      // Year match only
-      if (bestIdx === -1) {
-        for (let i = 0; i < items.length; i++) {
-          const t = items[i].textContent.toLowerCase();
-          if (year && t.includes(year)) {
-            bestIdx = i; break;
-          }
-        }
-      }
-      // Single result or first of few
+
+      // Fallback: single result or first of few
       if (bestIdx === -1 && items.length > 0 && items.length <= 3) {
-        bestIdx = 0;
+        // Still avoid "create manually"
+        for (let i = 0; i < items.length; i++) {
+          if (!items[i].textContent.toLowerCase().includes("create manually")) {
+            bestIdx = i; break;
+          }
+        }
       }
 
       if (bestIdx >= 0) {
-        items[bestIdx].click();
+        // Return coordinates for mouse.click (Angular needs real mouse events)
+        const rect = items[bestIdx].getBoundingClientRect();
         return {
           found: true,
           text: items[bestIdx].textContent.trim().substring(0, 80),
           count: items.length,
+          x: rect.x + rect.width / 2,
+          y: rect.y + rect.height / 2,
+          engine: items[bestIdx].textContent.includes("GAS") ? "gas" : items[bestIdx].textContent.includes("EV") ? "ev" : "unknown",
         };
       }
 
@@ -1343,33 +1353,34 @@ async function fillAddVehicleForm(page, vehicle) {
     console.log(`${LOG}   #ac-vehicle autocomplete: ${JSON.stringify(picked)}`);
 
     if (picked.found) {
-      console.log(`${LOG}   Vehicle selected from #ac-vehicle: "${picked.text}"`);
-      await sleep(2000);
+      // Click the autocomplete item via mouse (Angular needs real events)
+      console.log(`${LOG}   Vehicle matched: "${picked.text}" (engine: ${picked.engine}) — clicking via mouse...`);
+      await page.mouse.click(picked.x, picked.y);
+      await sleep(3000);
 
-      // Immediately try to click Save in the dialog before it might close
-      // The "Create new vehicle" dialog Save button is at the bottom-right
-      // We know from probing it's a button with class "btn btn-primary btn-submit not-quick-tir"
-      const dialogSaveClicked = await page.evaluate(() => {
+      // Click Save in the dialog via mouse.click (DOM .click() doesn't trigger Angular)
+      const dialogSavePos = await page.evaluate(() => {
         const dialog = document.querySelector(".add-dialog, [class*='add-dialog']");
         if (dialog && (dialog.offsetParent !== null || dialog.offsetHeight > 0)) {
           const btns = Array.from(dialog.querySelectorAll("button")).filter(b =>
             b.offsetParent !== null && b.textContent.trim().toLowerCase() === "save"
           );
           if (btns.length > 0) {
-            btns[btns.length - 1].click();
-            return { clicked: true, source: "dialog-dom-click" };
+            const btn = btns[btns.length - 1];
+            const rect = btn.getBoundingClientRect();
+            return { found: true, x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 };
           }
         }
-        return { clicked: false };
+        return { found: false };
       });
 
-      if (dialogSaveClicked.clicked) {
-        console.log(`${LOG}   Dialog Save clicked via DOM (${dialogSaveClicked.source})`);
+      if (dialogSavePos.found) {
+        console.log(`${LOG}   Dialog Save at (${Math.round(dialogSavePos.x)}, ${Math.round(dialogSavePos.y)}) — mouse clicking...`);
+        await page.mouse.click(dialogSavePos.x, dialogSavePos.y);
         await sleep(5000);
       } else {
         // Fallback: try mouse click at known position
-        console.log(`${LOG}   Dialog Save not found via DOM — trying mouse click...`);
-        // The Save button was probed at approximately (1187, 605)
+        console.log(`${LOG}   Dialog Save not found — trying fallback position...`);
         await page.mouse.click(1187, 605);
         await sleep(5000);
       }
