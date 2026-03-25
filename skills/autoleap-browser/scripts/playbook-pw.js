@@ -114,6 +114,27 @@ async function runPlaybook({ customer, vehicle, diagnosis, query, parts, progres
     await progress(progressCallback, "adding_labor");
     console.log(`${LOG} Phase 3: Opening MOTOR catalog (runs before PartsTech to connect vehicle)...`);
 
+    // AutoLeap estimate may load in VIEW mode with "Click 'Edit' to update RO" banner.
+    // Must click "Edit" to enter edit mode before Browse/MOTOR will work.
+    const editBtnClicked = await page.evaluate(() => {
+      const btns = Array.from(document.querySelectorAll("button"));
+      const editBtn = btns.find(b =>
+        b.offsetParent !== null &&
+        b.textContent.trim() === "Edit" &&
+        (b.className || "").includes("btn-brown")
+      );
+      if (editBtn) {
+        const rect = editBtn.getBoundingClientRect();
+        return { found: true, x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 };
+      }
+      return { found: false };
+    });
+    if (editBtnClicked.found) {
+      console.log(`${LOG} Phase 3: Clicking "Edit" to enter edit mode...`);
+      await page.mouse.click(editBtnClicked.x, editBtnClicked.y);
+      await sleep(3000);
+    }
+
     let motorResult = await navigateMotorTree(page, diagnosis, vehicle, query);
 
     if (motorResult.success) {
