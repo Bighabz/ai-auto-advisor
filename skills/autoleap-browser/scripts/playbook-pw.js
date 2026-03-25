@@ -406,6 +406,24 @@ async function runPlaybook({ customer, vehicle, diagnosis, query, parts, progres
         await sleep(2000);
       }
 
+      // Dismiss overlays + enter edit mode (same as Phase 3 — redirected page may be in view mode)
+      await page.evaluate(() => {
+        document.querySelectorAll(".p-dialog-mask-scrollblocker, .p-component-overlay").forEach(m => m.remove());
+        const btn = Array.from(document.querySelectorAll("button")).find(b =>
+          b.offsetParent !== null && /^(Confirm|OK|Yes|Close|Got it)$/i.test(b.textContent.trim()));
+        if (btn) btn.click();
+      });
+      await page.keyboard.press("Escape");
+      await sleep(1000);
+      try {
+        const editBtn = await page.$("button.btn-brown");
+        if (editBtn) {
+          console.log(`${LOG} Phase 5: Clicking "Edit" to enter edit mode...`);
+          await editBtn.click({ timeout: 10000 });
+          await sleep(5000);
+        }
+      } catch { /* no edit button = already in edit mode */ }
+
       console.log(`${LOG} Phase 5: Linking parts to labor service...`);
       const linkResult = await linkPartsToServices(page, result.partsAdded, motorResult);
       if (linkResult.linked > 0) {
