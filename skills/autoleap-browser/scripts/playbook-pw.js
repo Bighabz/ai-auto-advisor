@@ -392,19 +392,14 @@ async function runPlaybook({ customer, vehicle, diagnosis, query, parts, progres
     if (result.partsAdded.length > 0 && motorResult.success) {
       await progress(progressCallback, "linking_parts");
 
-      // Ensure we're on the estimate page with parts visible
-      // If we swapped to the redirected PT→AutoLeap page, parts should already be here.
-      // Otherwise, reload to pick them up.
-      const currentUrl = page.url();
-      if (!currentUrl.includes(result.estimateId)) {
-        console.log(`${LOG} Phase 5: Navigating to estimate...`);
-        const estUrl = `${AUTOLEAP_APP_URL}/#/estimate/${result.estimateId}`;
-        await page.goto(estUrl, { waitUntil: "domcontentloaded", timeout: 30000 });
-        await sleep(5000);
-      } else {
-        console.log(`${LOG} Phase 5: Already on estimate page (parts should be visible)`);
-        await sleep(2000);
-      }
+      // Force full Angular reload: workboard → estimate.
+      // The redirected PT→AutoLeap page has partial Angular state — dropdown options
+      // won't populate. A clean navigation resets Angular lifecycle.
+      console.log(`${LOG} Phase 5: Reloading estimate page (workboard → estimate) for full Angular init...`);
+      await page.goto(`${AUTOLEAP_APP_URL}/#/workboard`, { waitUntil: "domcontentloaded", timeout: 30000 });
+      await sleep(3000);
+      await page.goto(`${AUTOLEAP_APP_URL}/#/estimate/${result.estimateId}`, { waitUntil: "domcontentloaded", timeout: 30000 });
+      await sleep(6000);
 
       // Dismiss overlays + enter edit mode (same as Phase 3 — redirected page may be in view mode)
       await page.evaluate(() => {
