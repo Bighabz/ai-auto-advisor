@@ -2260,20 +2260,23 @@ async function linkPartsToServices(page, addedParts, laborResult) {
   const maxLinks = Math.min(dropdownCount, Math.max(addedParts.length, 1));
   for (let i = 0; i < maxLinks; i++) {
     try {
-      // Find the i-th APP-DROPDOWN with "Select service" and get its selected-view click target
+      // Find the i-th APP-DROPDOWN with "Select service" and get its INPUT click target.
+      // The dropdown is input-based (autocomplete style) — must click/focus the <input>
+      // to trigger Angular's dropdown open logic, not the .selected-view div.
       const dropdownInfo = await page.evaluate(() => {
         const appDropdowns = Array.from(document.querySelectorAll("app-dropdown, APP-DROPDOWN"));
         const svcDropdowns = appDropdowns.filter(dd => dd.textContent.includes("Select service"));
         if (svcDropdowns.length === 0) return { found: false };
-        // Always click the first remaining "Select service" (once linked, text changes)
         const dd = svcDropdowns[0];
-        const selectedView = dd.querySelector(".selected-view");
-        if (!selectedView) return { found: false };
-        const rect = selectedView.getBoundingClientRect();
+        // Priority: input element (triggers Angular focus/open), fallback to .selected-view
+        const target = dd.querySelector("input[type='text']") || dd.querySelector(".selected-view") || dd.querySelector("input");
+        if (!target) return { found: false };
+        const rect = target.getBoundingClientRect();
         return {
           found: true,
           x: rect.x + rect.width / 2,
           y: rect.y + rect.height / 2,
+          tag: target.tagName,
         };
       });
 
@@ -2282,20 +2285,26 @@ async function linkPartsToServices(page, addedParts, laborResult) {
         break;
       }
 
-      console.log(`${LOG} Phase 5: Clicking "Select service" at (${Math.round(dropdownInfo.x)}, ${Math.round(dropdownInfo.y)})`);
+      console.log(`${LOG} Phase 5: Clicking "Select service" ${dropdownInfo.tag} at (${Math.round(dropdownInfo.x)}, ${Math.round(dropdownInfo.y)})`);
 
-      // Use Playwright native click on the APP-DROPDOWN selected-view for proper Angular event dispatch
+      // Click the input to trigger Angular focus/open, then click again to ensure dropdown opens
       try {
-        const ddElements = await page.$$("app-dropdown .selected-view, APP-DROPDOWN .selected-view");
-        for (const el of ddElements) {
-          const text = await el.evaluate(e => e.textContent || "");
-          if (text.includes("Select service")) {
+        const ddInputs = await page.$$("app-dropdown input[type='text'], APP-DROPDOWN input[type='text']");
+        let clicked = false;
+        for (const el of ddInputs) {
+          const parentText = await el.evaluate(e => (e.closest("app-dropdown") || e.closest("APP-DROPDOWN"))?.textContent || "");
+          if (parentText.includes("Select service")) {
             await el.click();
+            await sleep(500);
+            await el.click(); // Double click to ensure dropdown opens
+            clicked = true;
             break;
           }
         }
+        if (!clicked) {
+          await page.mouse.click(dropdownInfo.x, dropdownInfo.y);
+        }
       } catch {
-        // Fallback to mouse.click
         await page.mouse.click(dropdownInfo.x, dropdownInfo.y);
       }
       await sleep(2000);
@@ -2331,16 +2340,29 @@ async function linkPartsToServices(page, addedParts, laborResult) {
       // Options are LI.dropdown-list-item inside UL.dropdown-list inside the now-visible
       // DIV.dropdown-list-wrapper.show within the same APP-DROPDOWN.
       const selected = await page.evaluate((svcName) => {
-        // Primary: AutoLeap custom APP-DROPDOWN list items
-        let options = Array.from(document.querySelectorAll(
-          "li.dropdown-list-item"
-        )).filter(el => {
-          // Must be visible (not the hidden "Loading" item)
-          if (el.hidden || getComputedStyle(el).display === "none") return false;
-          // Must be inside a .show wrapper (i.e., an open dropdown)
-          const wrapper = el.closest(".dropdown-list-wrapper");
-          return wrapper && wrapper.classList.contains("show");
-        });
+        // Primary: find the "Select service" APP-DROPDOWN and get its list items
+        const appDropdowns = Array.from(document.querySelectorAll("app-dropdown, APP-DROPDOWN"));
+        const svcDD = appDropdowns.find(dd => dd.textContent.includes("Select service"));
+
+        let options = [];
+        if (svcDD) {
+          // Get all LI items inside this specific dropdown (not from other dropdowns)
+          options = Array.from(svcDD.querySelectorAll("li.dropdown-list-item, li")).filter(el => {
+            const text = (el.textContent || "").trim();
+            // Skip loading/empty/placeholder items
+            if (!text || /^loading$/i.test(text) || /^select service$/i.test(text)) return false;
+            return true;
+          });
+        }
+
+        // Fallback: look for visible dropdown items with .show class (original logic)
+        if (options.length === 0) {
+          options = Array.from(document.querySelectorAll("li.dropdown-list-item")).filter(el => {
+            if (el.hidden || getComputedStyle(el).display === "none") return false;
+            const wrapper = el.closest(".dropdown-list-wrapper");
+            return wrapper && wrapper.classList.contains("show");
+          });
+        }
 
         // Fallback: PrimeNG or generic dropdown items
         if (options.length === 0) {
