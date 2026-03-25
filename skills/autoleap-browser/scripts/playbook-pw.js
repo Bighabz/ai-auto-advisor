@@ -114,6 +114,34 @@ async function runPlaybook({ customer, vehicle, diagnosis, query, parts, progres
     await progress(progressCallback, "adding_labor");
     console.log(`${LOG} Phase 3: Opening MOTOR catalog (runs before PartsTech to connect vehicle)...`);
 
+    // Dismiss any PrimeNG dialog overlay left from sidebar interaction.
+    // These overlays (p-dialog-mask-scrollblocker) block ALL pointer events.
+    const overlayDismissed = await page.evaluate(() => {
+      // Try clicking Confirm/OK/Yes on any visible modal first
+      const modalBtns = Array.from(document.querySelectorAll("button")).filter(b =>
+        b.offsetParent !== null && /^(Confirm|OK|Yes|Close|Got it)$/i.test(b.textContent.trim())
+      );
+      if (modalBtns.length > 0) {
+        modalBtns[0].click();
+        return { method: "modal-button", text: modalBtns[0].textContent.trim() };
+      }
+      // Remove any blocking overlay masks
+      const masks = document.querySelectorAll(".p-dialog-mask-scrollblocker, .p-component-overlay");
+      if (masks.length > 0) {
+        masks.forEach(m => m.remove());
+        return { method: "overlay-removed", count: masks.length };
+      }
+      return { method: "none" };
+    });
+    if (overlayDismissed.method !== "none") {
+      console.log(`${LOG} Phase 3: Dismissed overlay: ${JSON.stringify(overlayDismissed)}`);
+      await sleep(2000);
+    }
+
+    // Also press Escape to close any remaining dialogs
+    await page.keyboard.press("Escape");
+    await sleep(1000);
+
     // AutoLeap estimate may load in VIEW mode with "Click 'Edit' to update RO" banner.
     // Must click "Edit" to enter edit mode before Browse/MOTOR will work.
     // Use Playwright's native click (handles Angular event dispatching properly).
@@ -121,7 +149,7 @@ async function runPlaybook({ customer, vehicle, diagnosis, query, parts, progres
       const editBtn = await page.$("button.btn-brown");
       if (editBtn) {
         console.log(`${LOG} Phase 3: Clicking "Edit" to enter edit mode (Playwright click)...`);
-        await editBtn.click();
+        await editBtn.click({ timeout: 10000 });
         await sleep(5000);
         // Verify edit mode — the Edit banner should disappear
         const stillViewMode = await page.evaluate(() =>
