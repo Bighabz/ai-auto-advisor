@@ -1377,6 +1377,23 @@ async function buildEstimate(params) {
           results.warnings.push(...playbookResult.warnings);
         }
 
+        // REVIEW GATE — block estimate delivery if reviewer found errors
+        if (playbookResult.reviewBlocked) {
+          console.log(`  → ⛔ REVIEW BLOCKED — estimate not ready for customer`);
+          for (const err of (playbookResult.reviewErrors || [])) {
+            console.log(`  →   🛑 ${err}`);
+          }
+          results.reviewBlocked = true;
+          results.reviewErrors = playbookResult.reviewErrors || [];
+          results.reviewNotes = playbookResult.reviewNotes || [];
+          // Clear PDF so it doesn't get sent to customer
+          results.pdfPath = null;
+          results.pdfSource = null;
+        }
+        if (playbookResult.reviewNotes?.length > 0) {
+          results.reviewNotes = playbookResult.reviewNotes;
+        }
+
         trackEvent(shopId, "estimate_created", {
           vehicle: { year: vehicle.year, make: vehicle.make, model: vehicle.model },
           total: playbookResult.total,
