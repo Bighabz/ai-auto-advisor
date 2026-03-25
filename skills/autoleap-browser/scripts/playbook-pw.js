@@ -2701,11 +2701,13 @@ async function reviewEstimate({ vehicle, query, diagnosis, services, totals, par
 
   const vehStr = `${vehicle.year} ${vehicle.make} ${vehicle.model}`;
   const svcLines = services.map(s => {
+    const svcName = s.name || s.title || s.serviceName || laborResult?.procedure || "unnamed";
+    const svcHours = s.hours || s.quantity || laborResult?.hours || laborHours || 0;
     const items = (s.items || s.serviceItems || []).map(i =>
       `  - ${i.name || i.description || "item"}: qty ${i.quantity || 1}, $${i.total || i.amount || 0}`
     ).join("\n");
-    return `Service: ${s.name || "unnamed"} (${s.hours || 0}h, $${s.total || 0})\n${items}`;
-  }).join("\n");
+    return `Service: ${svcName} (${svcHours}h, $${s.total || 0})\n${items}`;
+  }).join("\n") || `Service: ${laborResult?.procedure || "Labor"} (${laborHours || 0}h, $${totals?.labor || 0})`;
 
   const partsLines = (partsAdded || []).map(p =>
     `Part: ${p.description || p.brand || "unknown"} — wholesale $${p.price}, qty submitted to AutoLeap`
