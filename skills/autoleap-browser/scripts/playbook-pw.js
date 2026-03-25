@@ -2738,6 +2738,7 @@ IMPORTANT CONTEXT:
 - Additional parts (gaskets, hardware, bolts) are often included in the MOTOR labor procedure or added by the tech later. Do NOT flag common hardware as missing unless it's a major component.
 - MOTOR labor hours are industry-standard book times. They are correct as-is.
 - AutoLeap always shows a blank placeholder row at the bottom of every estimate with $0 values. This is normal UI behavior — IGNORE it completely.
+- MOTOR labor line items may show $0 cost in the API data, but the actual estimate has correct pricing. The TOTALS line is authoritative — if Labor total matches hours × rate, the pricing is correct. Do NOT flag $0 cost on individual service line items.
 
 Only flag REAL issues that would embarrass the shop or lose the deal:
 1. QUANTITY: Wrong number of parts (e.g., 2 catalytic converters when the car has 1, 1 brake pad when you need 2 per axle)
