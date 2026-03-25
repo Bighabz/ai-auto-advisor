@@ -75,12 +75,19 @@ if (process.env.AUTOLEAP_EMAIL) {
 }
 
 // AutoLeap browser playbook — 100% browser-driven estimate (MOTOR labor + PartsTech parts)
+// Prefer Playwright version (better auto-waiting), fall back to Puppeteer
 let autoLeapPlaybook = null;
 if (process.env.AUTOLEAP_EMAIL) {
   try {
-    autoLeapPlaybook = require("../../autoleap-browser/scripts/playbook");
+    autoLeapPlaybook = require("../../autoleap-browser/scripts/playbook-pw");
+    console.log("[orchestrator] Loaded Playwright playbook ✓");
   } catch {
-    // playbook not available — falls back to REST API estimate
+    try {
+      autoLeapPlaybook = require("../../autoleap-browser/scripts/playbook");
+      console.log("[orchestrator] Loaded Puppeteer playbook (Playwright unavailable)");
+    } catch {
+      // playbook not available — falls back to REST API estimate
+    }
   }
 }
 
@@ -1342,6 +1349,15 @@ async function buildEstimate(params) {
         results.resolvedLaborHours = playbookResult.laborHours;
         results.resolvedLaborRate  = playbookResult.laborRate;
         results.estimateSource = "autoleap-native";
+
+        // Store IDs for cleanup (test runs)
+        results.autoLeapEstimate = {
+          estimateId: playbookResult.estimateId,
+          customerId: playbookResult.customerId,
+          vehicleId: playbookResult.vehicleId,
+          customerName: params.customer?.name || null,
+          vehicleDesc: `${vehicle.year} ${vehicle.make} ${vehicle.model}`,
+        };
 
         // Playbook provides PDF directly
         if (playbookResult.pdfPath) {
