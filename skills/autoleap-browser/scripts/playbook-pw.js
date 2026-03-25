@@ -1268,47 +1268,36 @@ async function createEstimateViaUI(page, customer, vehicle) {
         // Fill vehicle form via #ac-vehicle autocomplete
         const dialogResult = await fillAddVehicleForm(page, vehicle);
 
-        // After dialog creates vehicle, it appears in the sidebar Vehicles list
-        // but is NOT yet assigned to the estimate. Must click the vehicle row.
+        // After dialog creates vehicle on the customer, close sidebar and use
+        // the #estimate-vehicle autocomplete to BIND it to the estimate.
+        // Clicking the vehicle row in the sidebar doesn't assign it — only the
+        // main page autocomplete triggers Angular's vehicle binding.
         if (dialogResult) {
-          console.log(`${LOG}   Vehicle created — now clicking it in sidebar to assign to estimate...`);
-          await sleep(3000);
-          await safeScreenshot(page, "/tmp/debug-phase2-after-dialog-save.png");
+          console.log(`${LOG}   Vehicle created on customer — closing sidebar to bind via autocomplete...`);
+          await sleep(2000);
 
-          // Re-read sidebar vehicles and click the one matching our year+make
-          const assignResult = await page.evaluate((yearStr, makeStr) => {
+          // Close the sidebar
+          await page.evaluate(() => {
             const sidebar = document.querySelector(".p-sidebar, [class*='p-sidebar']");
-            if (!sidebar) return { assigned: false, error: "no sidebar" };
-
-            const items = Array.from(sidebar.querySelectorAll(
-              "[class*='vehicle'], tr, li, [class*='card'], [class*='row'], div"
-            )).filter(el => {
-              if (!el.offsetParent) return false;
-              const t = (el.textContent || "").toLowerCase();
-              return t.includes(yearStr) && t.includes(makeStr) && t.length < 200;
-            });
-
-            if (items.length > 0) {
-              const target = items[0];
-              const clickable = target.querySelector("input[type='radio'], input[type='checkbox'], a, button") || target;
-              const rect = clickable.getBoundingClientRect();
-              return {
-                assigned: true,
-                x: rect.x + rect.width / 2,
-                y: rect.y + rect.height / 2,
-                text: target.textContent.trim().substring(0, 60),
-              };
+            if (sidebar) {
+              const closeBtn = sidebar.querySelector(".p-sidebar-close, [class*='close'], button[aria-label='Close']");
+              if (closeBtn) closeBtn.click();
             }
-            return { assigned: false, sidebarText: (sidebar.innerText || "").substring(0, 300) };
-          }, String(vehicle.year || ""), (vehicle.make || "").toLowerCase());
+          });
+          await page.keyboard.press("Escape");
+          await sleep(2000);
+          sidebarOpen = false;
 
-          if (assignResult.assigned) {
-            await page.mouse.click(assignResult.x, assignResult.y);
-            console.log(`${LOG}   Clicked vehicle in sidebar: "${assignResult.text}" ✓`);
+          // Now use #estimate-vehicle autocomplete to bind vehicle
+          console.log(`${LOG}   Binding vehicle via #estimate-vehicle autocomplete...`);
+          const vehResult = await selectVehicleFromAutocomplete(page, vehicle);
+          if (vehResult.found) {
             vehicleSelected = true;
-            await sleep(3000);
+            console.log(`${LOG}   Vehicle bound via autocomplete: "${vehResult.text}" ✓`);
+            await sleep(2000);
+            await clickVehicleConfirmModal(page);
           } else {
-            console.log(`${LOG}   Vehicle not found in sidebar after creation: ${JSON.stringify(assignResult)}`);
+            console.log(`${LOG}   Autocomplete binding failed: ${JSON.stringify(vehResult)}`);
             vehicleSelected = false;
           }
         }
