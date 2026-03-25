@@ -2716,15 +2716,21 @@ ${partsLines}
 
 TOTALS: Labor $${totals?.labor || 0} (${laborHours || 0}h), Parts $${totals?.parts || 0}, Grand $${totals?.grandTotal || 0}
 
-Check for:
-1. QUANTITY: Does the parts quantity make sense? (e.g., 1 catalytic converter not 2, 4 spark plugs for a 4-cyl, 2 brake pads per axle)
-2. PRICING: Is the total reasonable for this repair? Flag if wildly high or low.
-3. MISSING: Are essential parts or labor missing? (e.g., gaskets for a converter job, rotors with brake pads)
-4. VEHICLE MATCH: Does the repair match the vehicle? (no turbo parts for a non-turbo car)
-5. LABOR: Are the hours reasonable for this job?
+IMPORTANT CONTEXT:
+- The shop applies a markup matrix on parts. Wholesale→retail markup of 40-60% is NORMAL and expected. Do NOT flag markup as an issue.
+- Parts are sourced from PartsTech at wholesale cost. The "Parts" total is the retail (customer) price AFTER markup. This is correct.
+- Additional parts (gaskets, hardware, bolts) are often included in the MOTOR labor procedure or added by the tech later. Do NOT flag common hardware as missing unless it's a major component.
+- MOTOR labor hours are industry-standard book times. They are correct as-is.
+
+Only flag REAL issues that would embarrass the shop or lose the deal:
+1. QUANTITY: Wrong number of parts (e.g., 2 catalytic converters when the car has 1, 1 brake pad when you need 2 per axle)
+2. PRICING: Grand total wildly unreasonable for this repair (e.g., $5000 for an oil change, or $50 for an engine rebuild)
+3. WRONG PART: Part doesn't match the repair (e.g., alternator listed for a brake job)
+4. WRONG VEHICLE: Repair doesn't make sense for this vehicle
+5. ZERO TOTAL: Estimate is $0 or missing labor/parts entirely
 
 Respond with ONLY a JSON array of issues. Each issue: {"severity":"warn"|"error","msg":"brief description"}
-If the estimate looks correct, respond with an empty array: []
+If the estimate looks correct and ready to send, respond with: []
 No markdown, no explanation — just the JSON array.`;
 
   return new Promise((resolve) => {
