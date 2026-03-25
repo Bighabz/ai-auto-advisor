@@ -548,6 +548,35 @@ async function runPlaybook({ customer, vehicle, diagnosis, query, parts, progres
       console.log(`${LOG} Quality check failed (non-fatal): ${qcErr.message}`);
     }
 
+    // ═══════════════════════════════════════════════════════════════════════════
+    // REVIEW GATE — Claude sanity-checks the estimate before it goes to customer
+    // Catches: wrong qty, suspicious pricing, missing items, vehicle mismatch
+    // ═══════════════════════════════════════════════════════════════════════════
+    if (result._qcEstData && process.env.ANTHROPIC_API_KEY) {
+      try {
+        const reviewResult = await reviewEstimate({
+          vehicle,
+          query,
+          diagnosis,
+          services: result._qcEstData.services || [],
+          totals: result._qcTotals,
+          partsAdded: result.partsAdded,
+          laborResult: result.laborResult,
+        });
+        if (reviewResult.issues.length > 0) {
+          console.log(`${LOG} REVIEW: ${reviewResult.issues.length} issue(s) found:`);
+          for (const issue of reviewResult.issues) {
+            console.log(`${LOG}   ⚠ [${issue.severity}] ${issue.msg}`);
+            result.warnings.push({ code: `REVIEW_${issue.severity.toUpperCase()}`, msg: issue.msg });
+          }
+        } else {
+          console.log(`${LOG} REVIEW: Estimate looks good ✓`);
+        }
+      } catch (reviewErr) {
+        console.log(`${LOG} Review step failed (non-fatal): ${reviewErr.message}`);
+      }
+    }
+
     // Take QC screenshot — show the estimate Services view
     try {
       const estUrl = `${AUTOLEAP_APP_URL}/#/estimate/${result.estimateId}`;
@@ -2640,6 +2669,99 @@ async function progress(cb, phase) {
       await cb(phase);
     } catch { /* non-fatal */ }
   }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// REVIEW GATE — Claude validates the estimate before customer delivery
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/**
+ * Ask Claude to review the estimate for common issues before sending to customer.
+ * Returns { issues: [{ severity: 'warn'|'error', msg: string }] }
+ */
+async function reviewEstimate({ vehicle, query, diagnosis, services, totals, partsAdded, laborResult }) {
+  const https = require("https");
+  const apiKey = process.env.ANTHROPIC_API_KEY;
+  if (!apiKey) return { issues: [] };
+
+  const vehStr = `${vehicle.year} ${vehicle.make} ${vehicle.model}`;
+  const svcLines = services.map(s => {
+    const items = (s.items || s.serviceItems || []).map(i =>
+      `  - ${i.name || i.description || "item"}: qty ${i.quantity || 1}, $${i.total || i.amount || 0}`
+    ).join("\n");
+    return `Service: ${s.name || "unnamed"} (${s.hours || 0}h, $${s.total || 0})\n${items}`;
+  }).join("\n");
+
+  const partsLines = (partsAdded || []).map(p =>
+    `Part: ${p.description || p.brand || "unknown"} — wholesale $${p.price}, qty submitted to AutoLeap`
+  ).join("\n");
+
+  const prompt = `You are a senior auto repair shop quality reviewer. Review this estimate BEFORE it goes to the customer. Flag any issues.
+
+VEHICLE: ${vehStr}
+CUSTOMER REQUEST: ${query || "N/A"}
+DIAGNOSIS: ${diagnosis?.ai?.diagnoses?.[0]?.cause || "N/A"}
+
+ESTIMATE:
+${svcLines}
+
+PARTS SOURCED:
+${partsLines}
+
+TOTALS: Labor $${totals?.labor || 0}, Parts $${totals?.parts || 0}, Grand $${totals?.grandTotal || 0}
+
+Check for:
+1. QUANTITY: Does the parts quantity make sense? (e.g., 1 catalytic converter not 2, 4 spark plugs for a 4-cyl, 2 brake pads per axle)
+2. PRICING: Is the total reasonable for this repair? Flag if wildly high or low.
+3. MISSING: Are essential parts or labor missing? (e.g., gaskets for a converter job, rotors with brake pads)
+4. VEHICLE MATCH: Does the repair match the vehicle? (no turbo parts for a non-turbo car)
+5. LABOR: Are the hours reasonable for this job?
+
+Respond with ONLY a JSON array of issues. Each issue: {"severity":"warn"|"error","msg":"brief description"}
+If the estimate looks correct, respond with an empty array: []
+No markdown, no explanation — just the JSON array.`;
+
+  return new Promise((resolve) => {
+    const body = JSON.stringify({
+      model: "claude-haiku-4-5-20251001",
+      max_tokens: 500,
+      messages: [{ role: "user", content: prompt }],
+    });
+
+    const req = https.request({
+      hostname: "api.anthropic.com",
+      path: "/v1/messages",
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "x-api-key": apiKey,
+        "anthropic-version": "2023-06-01",
+        "Content-Length": Buffer.byteLength(body),
+      },
+    }, (res) => {
+      let data = "";
+      res.on("data", (c) => data += c);
+      res.on("end", () => {
+        try {
+          const resp = JSON.parse(data);
+          const text = resp.content?.[0]?.text || "[]";
+          // Extract JSON array from response (handle markdown fencing)
+          const jsonMatch = text.match(/\[[\s\S]*\]/);
+          const issues = jsonMatch ? JSON.parse(jsonMatch[0]) : [];
+          resolve({ issues: Array.isArray(issues) ? issues : [] });
+        } catch (e) {
+          console.log(`${LOG} Review parse error: ${e.message}`);
+          resolve({ issues: [] });
+        }
+      });
+    });
+    req.on("error", (e) => {
+      console.log(`${LOG} Review API error: ${e.message}`);
+      resolve({ issues: [] });
+    });
+    req.write(body);
+    req.end();
+  });
 }
 
 module.exports = {
