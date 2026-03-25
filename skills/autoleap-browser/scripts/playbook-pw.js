@@ -1139,12 +1139,74 @@ async function createEstimateViaUI(page, customer, vehicle) {
     await safeScreenshot(page, "/tmp/debug-phase2-sidebar-retry.png");
   }
 
-  // ── B3: Select vehicle via sidebar Vehicles tab ──
-  console.log(`${LOG} B3: Selecting vehicle via sidebar...`);
+  // ── B3: Assign vehicle via estimate-page autocomplete ──
+  // Close sidebar first, click Edit, then use #estimate-vehicle directly.
+  // This is more reliable than the sidebar Vehicles tab (which has no Save button).
+  console.log(`${LOG} B3: Assigning vehicle via estimate page...`);
   let vehicleSelected = false;
 
+  // Close sidebar if open
   if (sidebarOpen) {
-    // Click "Vehicles" tab in the sidebar — MUST use page.mouse.click (PrimeNG ignores DOM .click())
+    await page.evaluate(() => {
+      const sidebar = document.querySelector(".p-sidebar, [class*='p-sidebar']");
+      if (sidebar) {
+        const closeBtn = sidebar.querySelector(".p-sidebar-close, [class*='close'], button[aria-label='Close']");
+        if (closeBtn) closeBtn.click();
+      }
+    });
+    await page.keyboard.press("Escape");
+    await sleep(2000);
+    sidebarOpen = false;
+    console.log(`${LOG}   Sidebar closed`);
+  }
+
+  // Dismiss any PrimeNG overlay + enter edit mode
+  await page.evaluate(() => {
+    document.querySelectorAll(".p-dialog-mask-scrollblocker, .p-component-overlay").forEach(m => m.remove());
+  });
+  await page.keyboard.press("Escape");
+  await sleep(1000);
+  try {
+    const editBtn = await page.$("button.btn-brown");
+    if (editBtn) {
+      console.log(`${LOG}   Clicking Edit to enter edit mode...`);
+      await editBtn.click({ timeout: 10000 });
+      await sleep(5000);
+    }
+  } catch { /* already in edit mode */ }
+
+  // Now use #estimate-vehicle autocomplete to search and bind vehicle
+  console.log(`${LOG}   Typing vehicle into #estimate-vehicle autocomplete...`);
+  const vehResult = await selectVehicleFromAutocomplete(page, vehicle);
+  if (vehResult.found) {
+    vehicleSelected = true;
+    console.log(`${LOG}   Vehicle bound: "${vehResult.text}" ✓`);
+    await sleep(2000);
+    await clickVehicleConfirmModal(page);
+  } else {
+    console.log(`${LOG}   Autocomplete returned 0 items — trying sidebar fallback...`);
+
+    // Fallback: open sidebar, create vehicle via dialog, then retry autocomplete
+    // Click customer area to open sidebar
+    const custClickTarget2 = await page.evaluate(() => {
+      const chip = document.querySelector(".p-autocomplete-token-label, #estimate-customer");
+      if (chip && chip.offsetParent) {
+        const rect = chip.getBoundingClientRect();
+        return { found: true, x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 };
+      }
+      const custArea = document.querySelector("[class*='customer-name'], [class*='customer-info']");
+      if (custArea && custArea.offsetParent) {
+        const rect = custArea.getBoundingClientRect();
+        return { found: true, x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 };
+      }
+      return { found: false };
+    });
+    if (custClickTarget2.found) {
+      await page.mouse.click(custClickTarget2.x, custClickTarget2.y);
+      await sleep(4000);
+    }
+
+    // Click Vehicles tab + Add Vehicle
     const vehiclesTabPos = await page.evaluate(() => {
       const sidebar = document.querySelector(".p-sidebar, [class*='p-sidebar']");
       if (!sidebar) return null;
@@ -1309,17 +1371,7 @@ async function createEstimateViaUI(page, customer, vehicle) {
     } else {
       console.log(`${LOG}   "Vehicles" tab not found in sidebar`);
     }
-  } else {
-    console.log(`${LOG}   Sidebar not open — trying #estimate-vehicle autocomplete fallback...`);
-    // Fallback: try the autocomplete on the main estimate page
-    const vehResult = await selectVehicleFromAutocomplete(page, vehicle);
-    if (vehResult.found) {
-      vehicleSelected = true;
-      console.log(`${LOG}   Vehicle via autocomplete fallback: "${vehResult.text}"`);
-      await sleep(2000);
-      await clickVehicleConfirmModal(page);
-    }
-  }
+  } // end sidebar fallback
 
   // ── B4: Close sidebar and save ──
   console.log(`${LOG} B4: Closing sidebar and saving...`);
