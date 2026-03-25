@@ -564,14 +564,28 @@ async function runPlaybook({ customer, vehicle, diagnosis, query, parts, progres
           laborResult: result.laborResult,
           laborHours: result.laborHours,
         });
-        if (reviewResult.issues.length > 0) {
-          console.log(`${LOG} REVIEW: ${reviewResult.issues.length} issue(s) found:`);
-          for (const issue of reviewResult.issues) {
-            console.log(`${LOG}   ⚠ [${issue.severity}] ${issue.msg}`);
-            result.warnings.push({ code: `REVIEW_${issue.severity.toUpperCase()}`, msg: issue.msg });
+        const errors = reviewResult.issues.filter(i => i.severity === "error");
+        const warns = reviewResult.issues.filter(i => i.severity !== "error");
+
+        if (errors.length > 0) {
+          console.log(`${LOG} REVIEW: ${errors.length} ERROR(s) — estimate BLOCKED from auto-send:`);
+          for (const issue of errors) {
+            console.log(`${LOG}   🛑 ${issue.msg}`);
+            result.warnings.push({ code: "REVIEW_ERROR", msg: issue.msg });
           }
-        } else {
-          console.log(`${LOG} REVIEW: Estimate looks good ✓`);
+          result.reviewBlocked = true;
+          result.reviewErrors = errors.map(e => e.msg);
+        }
+        if (warns.length > 0) {
+          console.log(`${LOG} REVIEW: ${warns.length} warning(s) (non-blocking):`);
+          for (const issue of warns) {
+            console.log(`${LOG}   ⚠ ${issue.msg}`);
+            result.warnings.push({ code: "REVIEW_WARN", msg: issue.msg });
+          }
+          result.reviewNotes = warns.map(w => w.msg);
+        }
+        if (reviewResult.issues.length === 0) {
+          console.log(`${LOG} REVIEW: Estimate looks good — cleared for customer ✓`);
         }
       } catch (reviewErr) {
         console.log(`${LOG} Review step failed (non-fatal): ${reviewErr.message}`);
@@ -2721,6 +2735,7 @@ IMPORTANT CONTEXT:
 - Parts are sourced from PartsTech at wholesale cost. The "Parts" total is the retail (customer) price AFTER markup. This is correct.
 - Additional parts (gaskets, hardware, bolts) are often included in the MOTOR labor procedure or added by the tech later. Do NOT flag common hardware as missing unless it's a major component.
 - MOTOR labor hours are industry-standard book times. They are correct as-is.
+- AutoLeap always shows a blank placeholder row at the bottom of every estimate with $0 values. This is normal UI behavior — IGNORE it completely.
 
 Only flag REAL issues that would embarrass the shop or lose the deal:
 1. QUANTITY: Wrong number of parts (e.g., 2 catalytic converters when the car has 1, 1 brake pad when you need 2 per axle)
