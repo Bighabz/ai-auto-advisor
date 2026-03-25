@@ -1060,7 +1060,52 @@ async function createEstimateViaUI(page, customer, vehicle) {
         await safeScreenshot(page, "/tmp/debug-phase2-add-vehicle-form.png");
 
         // Fill vehicle form via #ac-vehicle autocomplete
-        vehicleSelected = await fillAddVehicleForm(page, vehicle);
+        const dialogResult = await fillAddVehicleForm(page, vehicle);
+
+        // After dialog creates vehicle, it appears in the sidebar Vehicles list
+        // but is NOT yet assigned to the estimate. Must click the vehicle row.
+        if (dialogResult) {
+          console.log(`${LOG}   Vehicle created — now clicking it in sidebar to assign to estimate...`);
+          await sleep(3000);
+          await safeScreenshot(page, "/tmp/debug-phase2-after-dialog-save.png");
+
+          // Re-read sidebar vehicles and click the one matching our year+make
+          const assignResult = await page.evaluate((yearStr, makeStr) => {
+            const sidebar = document.querySelector(".p-sidebar, [class*='p-sidebar']");
+            if (!sidebar) return { assigned: false, error: "no sidebar" };
+
+            const items = Array.from(sidebar.querySelectorAll(
+              "[class*='vehicle'], tr, li, [class*='card'], [class*='row'], div"
+            )).filter(el => {
+              if (!el.offsetParent) return false;
+              const t = (el.textContent || "").toLowerCase();
+              return t.includes(yearStr) && t.includes(makeStr) && t.length < 200;
+            });
+
+            if (items.length > 0) {
+              const target = items[0];
+              const clickable = target.querySelector("input[type='radio'], input[type='checkbox'], a, button") || target;
+              const rect = clickable.getBoundingClientRect();
+              return {
+                assigned: true,
+                x: rect.x + rect.width / 2,
+                y: rect.y + rect.height / 2,
+                text: target.textContent.trim().substring(0, 60),
+              };
+            }
+            return { assigned: false, sidebarText: (sidebar.innerText || "").substring(0, 300) };
+          }, String(vehicle.year || ""), (vehicle.make || "").toLowerCase());
+
+          if (assignResult.assigned) {
+            await page.mouse.click(assignResult.x, assignResult.y);
+            console.log(`${LOG}   Clicked vehicle in sidebar: "${assignResult.text}" ✓`);
+            vehicleSelected = true;
+            await sleep(3000);
+          } else {
+            console.log(`${LOG}   Vehicle not found in sidebar after creation: ${JSON.stringify(assignResult)}`);
+            vehicleSelected = false;
+          }
+        }
       } else {
         console.log(`${LOG}   No vehicles listed and no "Add" button found`);
         // Dump sidebar content for debugging
