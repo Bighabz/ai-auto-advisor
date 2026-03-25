@@ -35,6 +35,17 @@ async function connect({ browserURL, defaultViewport }) {
     if (page.__pwShimWrapped) return page;
     page.__pwShimWrapped = true;
 
+    // Handle JavaScript dialogs (alert/confirm/prompt) to prevent crashes.
+    // Playwright auto-detects dialogs and crashes if not handled.
+    page.on("dialog", async (dialog) => {
+      try {
+        console.log(`${LOG} Auto-dismissing dialog: ${dialog.type()} "${dialog.message().substring(0, 60)}"`);
+        await dialog.accept();
+      } catch {
+        // Dialog already dismissed — ignore
+      }
+    });
+
     // Set viewport if requested
     if (defaultViewport) {
       page.setViewportSize(defaultViewport).catch(() => {});

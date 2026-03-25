@@ -37,10 +37,18 @@ const AUTOLEAP_APP_URL = "https://app.myautoleap.com";
  * @returns {Promise<object>} - { success, roNumber, estimateId, total, totalLabor, totalParts, laborHours, pdfPath, pricingSource, partsAdded, laborResult }
  */
 async function runPlaybook({ customer, vehicle, diagnosis, query, parts, progressCallback }) {
+  // Prevent Playwright CDP protocol errors from crashing the process
+  const unhandledHandler = (err) => {
+    if (err?.type === "error" && err?.method?.includes("Dialog")) return; // Dialog race condition
+    console.error(`${LOG} Unhandled rejection (caught): ${err?.message || err}`);
+  };
+  process.on("unhandledRejection", unhandledHandler);
+
   let pwShim;
   try {
     pwShim = require("./helpers/pw-shim");
   } catch (e) {
+    process.removeListener("unhandledRejection", unhandledHandler);
     return { success: false, error: "playwright-core not available: " + e.message };
   }
 
@@ -823,6 +831,7 @@ async function runPlaybook({ customer, vehicle, diagnosis, query, parts, progres
     result.partialResult = { ...result };
   } finally {
     if (browser) browser.disconnect();
+    process.removeListener("unhandledRejection", unhandledHandler);
   }
 
   return result;
