@@ -346,6 +346,54 @@ async function runPlaybook({ customer, vehicle, diagnosis, query, parts, progres
           }
         }
 
+        // Fix PartsTech default quantities before submitting.
+        // Universal-fit parts (e.g., "Right, Left" catalytic converter) default to qty 2
+        // but we only need 1 per part entry. Navigate to cart and adjust.
+        if (result.partsAdded.length > 0) {
+          console.log(`${LOG} Phase 4: Adjusting cart quantities to 1 per part...`);
+          const ptCartUrl = ptWorkPage.url();
+          await ptWorkPage.goto("https://app.partstech.com/review-cart", { waitUntil: "domcontentloaded", timeout: 15000 });
+          await sleep(3000);
+
+          // Find qty inputs and set to 1 using React-compatible approach
+          const qtyFixed = await ptWorkPage.evaluate(() => {
+            const adjusted = [];
+            // Strategy 1: Find input[type=number] or input with qty-related attributes
+            const inputs = Array.from(document.querySelectorAll("input")).filter(inp => {
+              const val = parseInt(inp.value);
+              return val > 1 && inp.offsetParent !== null &&
+                (inp.type === "number" || inp.type === "text") &&
+                !inp.name?.includes("po") && !inp.name?.includes("PO");
+            });
+            for (const inp of inputs) {
+              const oldVal = inp.value;
+              // Use React's native input setter to trigger state update
+              const nativeInputValueSetter = Object.getOwnPropertyDescriptor(
+                window.HTMLInputElement.prototype, "value"
+              ).set;
+              nativeInputValueSetter.call(inp, "1");
+              inp.dispatchEvent(new Event("input", { bubbles: true }));
+              inp.dispatchEvent(new Event("change", { bubbles: true }));
+              // Also try React's onChange via props
+              const propsKey = Object.keys(inp).find(k => k.startsWith("__reactProps$"));
+              if (propsKey && inp[propsKey]?.onChange) {
+                try {
+                  inp[propsKey].onChange({ target: inp, currentTarget: inp });
+                } catch {}
+              }
+              adjusted.push({ from: oldVal, to: "1" });
+            }
+            return adjusted;
+          });
+
+          if (qtyFixed.length > 0) {
+            console.log(`${LOG} Phase 4: Adjusted ${qtyFixed.length} qty field(s): ${JSON.stringify(qtyFixed)}`);
+            await sleep(2000);
+          } else {
+            console.log(`${LOG} Phase 4: No qty fields needed adjustment`);
+          }
+        }
+
         // Submit cart to AutoLeap
         if (result.partsAdded.length > 0) {
           console.log(`${LOG} Phase 4: Added ${result.partsAdded.length} to cart, submitting quote...`);
