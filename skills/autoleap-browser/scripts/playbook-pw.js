@@ -562,6 +562,7 @@ async function runPlaybook({ customer, vehicle, diagnosis, query, parts, progres
           totals: result._qcTotals,
           partsAdded: result.partsAdded,
           laborResult: result.laborResult,
+          laborHours: result.laborHours,
         });
         if (reviewResult.issues.length > 0) {
           console.log(`${LOG} REVIEW: ${reviewResult.issues.length} issue(s) found:`);
@@ -2679,7 +2680,7 @@ async function progress(cb, phase) {
  * Ask Claude to review the estimate for common issues before sending to customer.
  * Returns { issues: [{ severity: 'warn'|'error', msg: string }] }
  */
-async function reviewEstimate({ vehicle, query, diagnosis, services, totals, partsAdded, laborResult }) {
+async function reviewEstimate({ vehicle, query, diagnosis, services, totals, partsAdded, laborResult, laborHours }) {
   const https = require("https");
   const apiKey = process.env.ANTHROPIC_API_KEY;
   if (!apiKey) return { issues: [] };
@@ -2696,19 +2697,24 @@ async function reviewEstimate({ vehicle, query, diagnosis, services, totals, par
     `Part: ${p.description || p.brand || "unknown"} — wholesale $${p.price}, qty submitted to AutoLeap`
   ).join("\n");
 
+  const laborInfo = laborResult
+    ? `${laborResult.procedure || "Service"}: ${laborResult.hours || laborHours || 0}h (MOTOR labor)`
+    : `${laborHours || 0}h`;
+
   const prompt = `You are a senior auto repair shop quality reviewer. Review this estimate BEFORE it goes to the customer. Flag any issues.
 
 VEHICLE: ${vehStr}
 CUSTOMER REQUEST: ${query || "N/A"}
 DIAGNOSIS: ${diagnosis?.ai?.diagnoses?.[0]?.cause || "N/A"}
 
-ESTIMATE:
+LABOR: ${laborInfo}
+ESTIMATE SERVICES:
 ${svcLines}
 
 PARTS SOURCED:
 ${partsLines}
 
-TOTALS: Labor $${totals?.labor || 0}, Parts $${totals?.parts || 0}, Grand $${totals?.grandTotal || 0}
+TOTALS: Labor $${totals?.labor || 0} (${laborHours || 0}h), Parts $${totals?.parts || 0}, Grand $${totals?.grandTotal || 0}
 
 Check for:
 1. QUANTITY: Does the parts quantity make sense? (e.g., 1 catalytic converter not 2, 4 spark plugs for a 4-cyl, 2 brake pads per axle)
