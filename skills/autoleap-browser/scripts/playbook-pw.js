@@ -1336,36 +1336,55 @@ async function createEstimateViaUI(page, customer, vehicle) {
   console.log(`${LOG} B4: Closing sidebar and saving...`);
 
   if (sidebarOpen) {
-    // Click "Save" button in the sidebar (saves customer + vehicle changes)
-    const sidebarSaveClicked = await page.evaluate(() => {
+    // Click "Save" button in the sidebar via mouse.click (DOM .click() doesn't trigger Angular)
+    const sidebarSavePos = await page.evaluate(() => {
       const sidebar = document.querySelector(".p-sidebar, [class*='p-sidebar']");
-      if (!sidebar) return false;
+      if (!sidebar) return { found: false };
       const btns = Array.from(sidebar.querySelectorAll("button")).filter(b =>
         b.offsetParent && /^save$/i.test(b.textContent.trim()) && !b.disabled
       );
-      if (btns.length > 0) { btns[0].click(); return true; }
-      return false;
+      if (btns.length > 0) {
+        const rect = btns[0].getBoundingClientRect();
+        return { found: true, x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 };
+      }
+      return { found: false };
     });
 
-    if (sidebarSaveClicked) {
-      console.log(`${LOG}   Sidebar "Save" clicked`);
-      await sleep(4000);
+    if (sidebarSavePos.found) {
+      console.log(`${LOG}   Sidebar "Save" at (${Math.round(sidebarSavePos.x)}, ${Math.round(sidebarSavePos.y)}) — mouse clicking...`);
+      await page.mouse.click(sidebarSavePos.x, sidebarSavePos.y);
+      await sleep(5000);
     } else {
-      // Close sidebar with X button or Escape
-      const closeClicked = await page.evaluate(() => {
-        const sidebar = document.querySelector(".p-sidebar, [class*='p-sidebar']");
-        if (!sidebar) return false;
-        const closeBtn = sidebar.querySelector(".p-sidebar-close, [class*='close'], button[aria-label='Close']");
-        if (closeBtn) { closeBtn.click(); return true; }
-        return false;
-      });
-      if (closeClicked) {
-        console.log(`${LOG}   Sidebar closed via X button`);
-      } else {
-        await page.keyboard.press("Escape");
-        console.log(`${LOG}   Sidebar closed via Escape`);
+      // Try Playwright native click as fallback
+      try {
+        const saveBtn = await page.$(".p-sidebar button");
+        const allBtns = await page.$$(".p-sidebar button");
+        for (const btn of allBtns) {
+          const text = await btn.evaluate(el => el.textContent.trim());
+          if (/^save$/i.test(text)) {
+            console.log(`${LOG}   Sidebar "Save" via Playwright click...`);
+            await btn.click({ timeout: 5000 });
+            await sleep(5000);
+            break;
+          }
+        }
+      } catch {
+        // Close sidebar with X button or Escape
+        const closeClicked = await page.evaluate(() => {
+          const sidebar = document.querySelector(".p-sidebar, [class*='p-sidebar']");
+          if (!sidebar) return false;
+          const closeBtn = sidebar.querySelector(".p-sidebar-close, [class*='close'], button[aria-label='Close']");
+          if (closeBtn) { closeBtn.click(); return true; }
+          return false;
+        });
+        if (closeClicked) {
+          console.log(`${LOG}   Sidebar closed via X button (Save not found)`);
+        } else {
+          await page.keyboard.press("Escape");
+          console.log(`${LOG}   Sidebar closed via Escape`);
+        }
+        await sleep(2000);
       }
-      await sleep(2000);
     }
   }
 
@@ -1436,6 +1455,55 @@ async function createEstimateViaUI(page, customer, vehicle) {
         });
         console.log(`${LOG}   PATCH estimate vehicle: ${patchResp.status}`);
         vehicleId = vehId;
+      } else if (vehicles.length === 0) {
+        // Vehicle just created — API may not have synced yet. Wait and retry.
+        console.log(`${LOG}   No vehicles yet — waiting 5s for API sync...`);
+        await sleep(5000);
+        const retryResp = await new Promise((resolve, reject) => {
+          const https = require("https");
+          const req = https.request({
+            hostname: "api.myautoleap.com",
+            path: `/api/v1/customers/${customerId}`,
+            method: "GET",
+            headers: { "authorization": token, "Accept": "application/json", "origin": "https://app.myautoleap.com" },
+          }, res => {
+            let data = "";
+            res.on("data", c => data += c);
+            res.on("end", () => { try { resolve(JSON.parse(data)); } catch { resolve(null); } });
+          });
+          req.on("error", reject);
+          req.end();
+        });
+        const retryVehicles = retryResp?.response?.vehicles || retryResp?.vehicles || [];
+        const retryMatch = retryVehicles.find(v => {
+          const name = (v.name || v.vehicleName || "").toLowerCase();
+          return name.includes(yr) && name.includes(mk);
+        });
+        if (retryMatch) {
+          const vehId = retryMatch._id;
+          console.log(`${LOG}   Found vehicle on retry: ${retryMatch.name || retryMatch.vehicleName} (${vehId})`);
+          const patchResp = await new Promise((resolve, reject) => {
+            const https = require("https");
+            const body = JSON.stringify({ vehicleId: vehId });
+            const req = https.request({
+              hostname: "api.myautoleap.com",
+              path: `/api/v1/estimates/${estimateId}`,
+              method: "PATCH",
+              headers: { "Content-Type": "application/json", "authorization": token, "Accept": "application/json", "origin": "https://app.myautoleap.com", "Content-Length": Buffer.byteLength(body) },
+            }, res => {
+              let data = "";
+              res.on("data", c => data += c);
+              res.on("end", () => { try { resolve({ status: res.statusCode }); } catch { resolve({ status: res.statusCode }); } });
+            });
+            req.on("error", reject);
+            req.write(body);
+            req.end();
+          });
+          console.log(`${LOG}   PATCH estimate vehicle (retry): ${patchResp.status}`);
+          vehicleId = vehId;
+        } else {
+          console.log(`${LOG}   Still no matching vehicle after retry (${retryVehicles.length} vehicles)`);
+        }
       } else {
         console.log(`${LOG}   No matching vehicle found on customer (${vehicles.length} vehicles)`);
       }
