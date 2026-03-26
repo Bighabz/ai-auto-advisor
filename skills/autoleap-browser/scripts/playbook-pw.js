@@ -1742,13 +1742,40 @@ async function fillAddVehicleForm(page, vehicle) {
       });
 
       if (dialogSavePos.found) {
-        console.log(`${LOG}   Dialog Save at (${Math.round(dialogSavePos.x)}, ${Math.round(dialogSavePos.y)}) — mouse clicking...`);
-        await page.mouse.click(dialogSavePos.x, dialogSavePos.y);
+        console.log(`${LOG}   Dialog Save at (${Math.round(dialogSavePos.x)}, ${Math.round(dialogSavePos.y)}) — clicking...`);
+
+        // Strategy 1: Playwright native click on the Save button element (best Angular compat)
+        try {
+          const saveBtns = await page.$$(".add-dialog button, [class*='add-dialog'] button");
+          for (const btn of saveBtns) {
+            const text = await btn.evaluate(el => el.textContent.trim());
+            if (/^save$/i.test(text)) {
+              await btn.click({ timeout: 10000 });
+              console.log(`${LOG}   Save clicked via Playwright native`);
+              break;
+            }
+          }
+        } catch (e) {
+          // Strategy 2: mouse.click at coordinates
+          console.log(`${LOG}   Playwright click failed (${e.message.substring(0, 40)}) — mouse click fallback`);
+          await page.mouse.click(dialogSavePos.x, dialogSavePos.y);
+        }
         await sleep(5000);
+
+        // Check if dialog closed (= save worked)
+        const dialogStillOpen = await page.evaluate(() => {
+          const dialog = document.querySelector(".add-dialog, [class*='add-dialog']");
+          return dialog && (dialog.offsetParent !== null || dialog.offsetHeight > 0);
+        });
+        if (dialogStillOpen) {
+          console.log(`${LOG}   Dialog still open — trying Enter key...`);
+          await page.keyboard.press("Enter");
+          await sleep(5000);
+        }
       } else {
-        // Fallback: try mouse click at known position
-        console.log(`${LOG}   Dialog Save not found — trying fallback position...`);
-        await page.mouse.click(1187, 605);
+        // Fallback: try Enter key (Angular forms submit on Enter)
+        console.log(`${LOG}   Dialog Save not found — trying Enter key...`);
+        await page.keyboard.press("Enter");
         await sleep(5000);
       }
 
