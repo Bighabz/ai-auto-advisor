@@ -1378,7 +1378,7 @@ async function createEstimateViaUI(page, customer, vehicle) {
           if (sidebarSaveCoords) {
             // Use CDP Input.dispatchMouseEvent for trusted clicks
             try {
-              const cdpSession = await browser._context.newCDPSession(page);
+              const cdpSession = await page.context().newCDPSession(page);
               await cdpSession.send("Input.dispatchMouseEvent", { type: "mousePressed", x: sidebarSaveCoords.x, y: sidebarSaveCoords.y, button: "left", clickCount: 1 });
               await cdpSession.send("Input.dispatchMouseEvent", { type: "mouseReleased", x: sidebarSaveCoords.x, y: sidebarSaveCoords.y, button: "left", clickCount: 1 });
               await cdpSession.detach();
