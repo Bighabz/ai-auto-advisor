@@ -1360,30 +1360,37 @@ async function createEstimateViaUI(page, customer, vehicle) {
             console.log(`${LOG}   Switched to Contact tab`);
           }
 
-          // Click Save in sidebar — uses same overlay removal + dispatch pattern
-          const sidebarSaved = await page.evaluate(() => {
-            // Remove overlays
+          // Click Save in sidebar using CDP trusted events (Angular ignores synthetic JS events)
+          // Remove overlays first, get button coordinates, then CDP dispatch
+          const sidebarSaveCoords = await page.evaluate(() => {
             document.querySelectorAll(".p-dialog-mask, .p-dialog-mask-scrollblocker, .p-component-overlay").forEach(m => m.remove());
             const sidebar = document.querySelector(".p-sidebar, [class*='p-sidebar']");
-            if (!sidebar) return { success: false, error: "no sidebar" };
+            if (!sidebar) return null;
             const btns = Array.from(sidebar.querySelectorAll("button")).filter(b =>
               b.offsetParent !== null && b.textContent.trim().toLowerCase() === "save" && !b.disabled
             );
             if (btns.length > 0) {
-              const btn = btns[0];
-              btn.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, cancelable: true }));
-              btn.dispatchEvent(new MouseEvent("mouseup", { bubbles: true, cancelable: true }));
-              btn.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
-              return { success: true };
+              const r = btns[0].getBoundingClientRect();
+              return { x: r.x + r.width / 2, y: r.y + r.height / 2 };
             }
-            // List what buttons ARE there
-            const allBtns = Array.from(sidebar.querySelectorAll("button"))
-              .filter(b => b.offsetParent !== null)
-              .map(b => b.textContent.trim().substring(0, 20));
-            return { success: false, buttons: allBtns };
+            return null;
           });
-          console.log(`${LOG}   Sidebar save: ${JSON.stringify(sidebarSaved)}`);
-          await sleep(5000);
+          if (sidebarSaveCoords) {
+            // Use CDP Input.dispatchMouseEvent for trusted clicks
+            try {
+              const cdpSession = await browser._context.newCDPSession(page);
+              await cdpSession.send("Input.dispatchMouseEvent", { type: "mousePressed", x: sidebarSaveCoords.x, y: sidebarSaveCoords.y, button: "left", clickCount: 1 });
+              await cdpSession.send("Input.dispatchMouseEvent", { type: "mouseReleased", x: sidebarSaveCoords.x, y: sidebarSaveCoords.y, button: "left", clickCount: 1 });
+              await cdpSession.detach();
+              console.log(`${LOG}   Sidebar Save clicked via CDP at (${Math.round(sidebarSaveCoords.x)}, ${Math.round(sidebarSaveCoords.y)})`);
+            } catch (cdpErr) {
+              console.log(`${LOG}   CDP click failed: ${cdpErr.message.substring(0, 60)} — mouse fallback`);
+              await page.mouse.click(sidebarSaveCoords.x, sidebarSaveCoords.y);
+            }
+          } else {
+            console.log(`${LOG}   No Save button in sidebar`);
+          }
+          await sleep(8000); // Wait for API to process
 
           // Handle confirm modal
           await clickVehicleConfirmModal(page);
@@ -1765,29 +1772,33 @@ async function fillAddVehicleForm(page, vehicle) {
       if (dialogSavePos.found) {
         console.log(`${LOG}   Dialog Save at (${Math.round(dialogSavePos.x)}, ${Math.round(dialogSavePos.y)}) — clicking...`);
 
-        // Remove PrimeNG overlay AND dispatch click directly via JS.
-        // The overlay blocks Playwright clicks AND mouse.click — only JS dispatch works.
-        const saveDispatched = await page.evaluate(() => {
-          // Remove ALL overlays completely
+        // Remove overlays + use CDP trusted click on dialog Save button
+        const dialogSaveCoords = await page.evaluate(() => {
           document.querySelectorAll(".p-dialog-mask, .p-dialog-mask-scrollblocker, .p-component-overlay").forEach(m => m.remove());
-
-          // Find Save button inside dialog
           const dialog = document.querySelector(".add-dialog, [class*='add-dialog']");
-          if (!dialog) return { success: false, error: "no dialog" };
+          if (!dialog) return null;
           const btns = Array.from(dialog.querySelectorAll("button")).filter(b =>
             b.offsetParent !== null && b.textContent.trim().toLowerCase() === "save"
           );
-          if (btns.length === 0) return { success: false, error: "no save btn" };
-
-          const btn = btns[btns.length - 1];
-          // Dispatch full mouse event sequence (Angular listens for these)
-          btn.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, cancelable: true }));
-          btn.dispatchEvent(new MouseEvent("mouseup", { bubbles: true, cancelable: true }));
-          btn.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
-          return { success: true, text: btn.textContent.trim() };
+          if (btns.length === 0) return null;
+          const r = btns[btns.length - 1].getBoundingClientRect();
+          return { x: r.x + r.width / 2, y: r.y + r.height / 2 };
         });
-        console.log(`${LOG}   Save dispatched: ${JSON.stringify(saveDispatched)}`);
-        await sleep(8000); // Wait for vehicle creation API
+        if (dialogSaveCoords) {
+          try {
+            const cdpSession = await browser._context.newCDPSession(page);
+            await cdpSession.send("Input.dispatchMouseEvent", { type: "mousePressed", x: dialogSaveCoords.x, y: dialogSaveCoords.y, button: "left", clickCount: 1 });
+            await cdpSession.send("Input.dispatchMouseEvent", { type: "mouseReleased", x: dialogSaveCoords.x, y: dialogSaveCoords.y, button: "left", clickCount: 1 });
+            await cdpSession.detach();
+            console.log(`${LOG}   Dialog Save clicked via CDP at (${Math.round(dialogSaveCoords.x)}, ${Math.round(dialogSaveCoords.y)})`);
+          } catch (cdpErr) {
+            console.log(`${LOG}   CDP dialog click failed: ${cdpErr.message.substring(0, 60)} — mouse fallback`);
+            await page.mouse.click(dialogSaveCoords.x, dialogSaveCoords.y);
+          }
+        } else {
+          console.log(`${LOG}   Dialog already closed (auto-saved on autocomplete selection)`);
+        }
+        await sleep(8000);
 
         // Check if dialog closed (= save worked)
         const dialogStillOpen = await page.evaluate(() => {
