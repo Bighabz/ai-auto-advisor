@@ -1730,7 +1730,6 @@ async function fillAddVehicleForm(page, vehicle) {
       }
 
       if (bestIdx >= 0) {
-        // Return coordinates for mouse.click (Angular needs real mouse events)
         const rect = items[bestIdx].getBoundingClientRect();
         return {
           found: true,
@@ -1738,6 +1737,7 @@ async function fillAddVehicleForm(page, vehicle) {
           count: items.length,
           x: rect.x + rect.width / 2,
           y: rect.y + rect.height / 2,
+          targetIdx: bestIdx, // for keyboard ArrowDown navigation
           engine: items[bestIdx].textContent.includes("GAS") ? "gas" : items[bestIdx].textContent.includes("EV") ? "ev" : "unknown",
         };
       }
@@ -1748,10 +1748,17 @@ async function fillAddVehicleForm(page, vehicle) {
     console.log(`${LOG}   #ac-vehicle autocomplete: ${JSON.stringify(picked)}`);
 
     if (picked.found) {
-      // Click the autocomplete item via mouse (Angular needs real events)
-      console.log(`${LOG}   Vehicle matched: "${picked.text}" (engine: ${picked.engine}) — clicking via mouse...`);
-      await page.mouse.click(picked.x, picked.y);
-      await sleep(3000);
+      // Select via keyboard — mouse.click on autocomplete auto-closes dialog before Save.
+      // ArrowDown to navigate to the right item, Enter to select, dialog stays open.
+      console.log(`${LOG}   Vehicle matched: "${picked.text}" (engine: ${picked.engine}) — selecting via keyboard...`);
+      const targetIdx = picked.targetIdx || 0;
+      for (let k = 0; k < targetIdx; k++) {
+        await page.keyboard.press("ArrowDown");
+        await sleep(200);
+      }
+      await page.keyboard.press("ArrowDown"); // highlight first non-header item
+      await page.keyboard.press("Enter");
+      await sleep(2000);
 
       // Click Save in the dialog via mouse.click (DOM .click() doesn't trigger Angular)
       const dialogSavePos = await page.evaluate(() => {
@@ -1772,8 +1779,9 @@ async function fillAddVehicleForm(page, vehicle) {
       if (dialogSavePos.found) {
         console.log(`${LOG}   Dialog Save at (${Math.round(dialogSavePos.x)}, ${Math.round(dialogSavePos.y)}) — clicking...`);
 
-        // Remove overlays + use CDP trusted click on dialog Save button
+        // Remove overlays + raise Save z-index + click via mouse
         const dialogSaveCoords = await page.evaluate(() => {
+          // Remove ALL overlay masks
           document.querySelectorAll(".p-dialog-mask, .p-dialog-mask-scrollblocker, .p-component-overlay").forEach(m => m.remove());
           const dialog = document.querySelector(".add-dialog, [class*='add-dialog']");
           if (!dialog) return null;
@@ -1781,22 +1789,20 @@ async function fillAddVehicleForm(page, vehicle) {
             b.offsetParent !== null && b.textContent.trim().toLowerCase() === "save"
           );
           if (btns.length === 0) return null;
-          const r = btns[btns.length - 1].getBoundingClientRect();
+          const btn = btns[btns.length - 1];
+          // Raise z-index above everything so mouse.click reaches it
+          btn.style.position = "relative";
+          btn.style.zIndex = "999999";
+          dialog.style.zIndex = "999999";
+          const r = btn.getBoundingClientRect();
           return { x: r.x + r.width / 2, y: r.y + r.height / 2 };
         });
         if (dialogSaveCoords) {
-          try {
-            const cdpSession = await browser._context.newCDPSession(page);
-            await cdpSession.send("Input.dispatchMouseEvent", { type: "mousePressed", x: dialogSaveCoords.x, y: dialogSaveCoords.y, button: "left", clickCount: 1 });
-            await cdpSession.send("Input.dispatchMouseEvent", { type: "mouseReleased", x: dialogSaveCoords.x, y: dialogSaveCoords.y, button: "left", clickCount: 1 });
-            await cdpSession.detach();
-            console.log(`${LOG}   Dialog Save clicked via CDP at (${Math.round(dialogSaveCoords.x)}, ${Math.round(dialogSaveCoords.y)})`);
-          } catch (cdpErr) {
-            console.log(`${LOG}   CDP dialog click failed: ${cdpErr.message.substring(0, 60)} — mouse fallback`);
-            await page.mouse.click(dialogSaveCoords.x, dialogSaveCoords.y);
-          }
+          console.log(`${LOG}   Dialog Save (z=999999) at (${Math.round(dialogSaveCoords.x)}, ${Math.round(dialogSaveCoords.y)}) — clicking...`);
+          await page.mouse.click(dialogSaveCoords.x, dialogSaveCoords.y);
         } else {
-          console.log(`${LOG}   Dialog already closed (auto-saved on autocomplete selection)`);
+          console.log(`${LOG}   Dialog closed after keyboard selection — pressing Enter as save fallback...`);
+          await page.keyboard.press("Enter");
         }
         await sleep(8000);
 
