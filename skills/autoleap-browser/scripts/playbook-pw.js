@@ -1748,17 +1748,42 @@ async function fillAddVehicleForm(page, vehicle) {
     console.log(`${LOG}   #ac-vehicle autocomplete: ${JSON.stringify(picked)}`);
 
     if (picked.found) {
-      // Select via keyboard — mouse.click on autocomplete auto-closes dialog before Save.
-      // ArrowDown to navigate to the right item, Enter to select, dialog stays open.
-      console.log(`${LOG}   Vehicle matched: "${picked.text}" (engine: ${picked.engine}) — selecting via keyboard...`);
-      const targetIdx = picked.targetIdx || 0;
-      for (let k = 0; k < targetIdx; k++) {
-        await page.keyboard.press("ArrowDown");
-        await sleep(200);
+      // Click "Create manually" from autocomplete — this shows year/make/model dropdowns
+      // that properly save to the API (unlike autocomplete selection which auto-closes dialog)
+      console.log(`${LOG}   Vehicle found: "${picked.text}" — using "Create manually" to fill dropdowns...`);
+
+      // Click "Create manually" link at bottom of autocomplete
+      const manualClicked = await page.evaluate(() => {
+        const items = Array.from(document.querySelectorAll(
+          ".p-autocomplete-panel li, .p-autocomplete-items li, [role='option'], .add-dialog li"
+        )).filter(li => li.offsetParent);
+        const manual = items.find(li => li.textContent.trim().toLowerCase().includes("create manually"));
+        if (manual) {
+          const r = manual.getBoundingClientRect();
+          return { found: true, x: r.x + r.width / 2, y: r.y + r.height / 2 };
+        }
+        return { found: false };
+      });
+      if (manualClicked.found) {
+        await page.mouse.click(manualClicked.x, manualClicked.y);
+        await sleep(3000);
+        console.log(`${LOG}   "Create manually" clicked — filling year/make/model dropdowns...`);
       }
-      await page.keyboard.press("ArrowDown"); // highlight first non-header item
-      await page.keyboard.press("Enter");
-      await sleep(2000);
+
+      // Fill year/make/model dropdowns
+      await safeScreenshot(page, "/tmp/debug-phase2-manual-vehicle.png");
+      if (vehicle.year) {
+        await selectNativeDropdown(page, 'select[name="year"], [formcontrolname="year"], select[id*="year"]', String(vehicle.year));
+        await sleep(2000);
+      }
+      if (vehicle.make) {
+        await selectNativeDropdown(page, 'select[name="make"], [formcontrolname="make"], select[id*="make"]', vehicle.make);
+        await sleep(2000);
+      }
+      if (vehicle.model) {
+        await selectNativeDropdown(page, 'select[name="model"], [formcontrolname="model"], select[id*="model"]', vehicle.model);
+        await sleep(2000);
+      }
 
       // Click Save in the dialog via mouse.click (DOM .click() doesn't trigger Angular)
       const dialogSavePos = await page.evaluate(() => {
