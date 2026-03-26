@@ -1744,31 +1744,29 @@ async function fillAddVehicleForm(page, vehicle) {
       if (dialogSavePos.found) {
         console.log(`${LOG}   Dialog Save at (${Math.round(dialogSavePos.x)}, ${Math.round(dialogSavePos.y)}) — clicking...`);
 
-        // Remove PrimeNG overlay that blocks all clicks in the dialog
-        await page.evaluate(() => {
-          document.querySelectorAll(".p-dialog-mask, .p-dialog-mask-scrollblocker, .p-component-overlay").forEach(m => {
-            m.style.pointerEvents = "none";
-          });
-        });
-        await sleep(500);
+        // Remove PrimeNG overlay AND dispatch click directly via JS.
+        // The overlay blocks Playwright clicks AND mouse.click — only JS dispatch works.
+        const saveDispatched = await page.evaluate(() => {
+          // Remove ALL overlays completely
+          document.querySelectorAll(".p-dialog-mask, .p-dialog-mask-scrollblocker, .p-component-overlay").forEach(m => m.remove());
 
-        // Strategy 1: Playwright native click with force (bypasses overlay check)
-        try {
-          const saveBtns = await page.$$(".add-dialog button, [class*='add-dialog'] button");
-          for (const btn of saveBtns) {
-            const text = await btn.evaluate(el => el.textContent.trim());
-            if (/^save$/i.test(text)) {
-              await btn.click({ force: true, timeout: 10000 });
-              console.log(`${LOG}   Save clicked via Playwright (force)`);
-              break;
-            }
-          }
-        } catch (e) {
-          // Strategy 2: mouse.click at coordinates
-          console.log(`${LOG}   Playwright click failed (${e.message.substring(0, 40)}) — mouse click fallback`);
-          await page.mouse.click(dialogSavePos.x, dialogSavePos.y);
-        }
-        await sleep(8000); // Wait longer for vehicle creation API
+          // Find Save button inside dialog
+          const dialog = document.querySelector(".add-dialog, [class*='add-dialog']");
+          if (!dialog) return { success: false, error: "no dialog" };
+          const btns = Array.from(dialog.querySelectorAll("button")).filter(b =>
+            b.offsetParent !== null && b.textContent.trim().toLowerCase() === "save"
+          );
+          if (btns.length === 0) return { success: false, error: "no save btn" };
+
+          const btn = btns[btns.length - 1];
+          // Dispatch full mouse event sequence (Angular listens for these)
+          btn.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, cancelable: true }));
+          btn.dispatchEvent(new MouseEvent("mouseup", { bubbles: true, cancelable: true }));
+          btn.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+          return { success: true, text: btn.textContent.trim() };
+        });
+        console.log(`${LOG}   Save dispatched: ${JSON.stringify(saveDispatched)}`);
+        await sleep(8000); // Wait for vehicle creation API
 
         // Check if dialog closed (= save worked)
         const dialogStillOpen = await page.evaluate(() => {
