@@ -1752,15 +1752,17 @@ async function fillAddVehicleForm(page, vehicle) {
       // that properly save to the API (unlike autocomplete selection which auto-closes dialog)
       console.log(`${LOG}   Vehicle found: "${picked.text}" — using "Create manually" to fill dropdowns...`);
 
-      // Click "Create manually" link at bottom of autocomplete
+      // Click "Create manually" link at bottom of autocomplete panel.
+      // It's an <a> tag with green text, NOT an <li> — search ALL elements.
       const manualClicked = await page.evaluate(() => {
-        const items = Array.from(document.querySelectorAll(
-          ".p-autocomplete-panel li, .p-autocomplete-items li, [role='option'], .add-dialog li"
-        )).filter(li => li.offsetParent);
-        const manual = items.find(li => li.textContent.trim().toLowerCase().includes("create manually"));
-        if (manual) {
-          const r = manual.getBoundingClientRect();
-          return { found: true, x: r.x + r.width / 2, y: r.y + r.height / 2 };
+        const allEls = Array.from(document.querySelectorAll("a, li, span, div, p")).filter(el => {
+          if (!el.offsetParent) return false;
+          const t = el.textContent.trim().toLowerCase();
+          return t === "create manually" && el.children.length === 0;
+        });
+        if (allEls.length > 0) {
+          const r = allEls[0].getBoundingClientRect();
+          return { found: true, x: r.x + r.width / 2, y: r.y + r.height / 2, tag: allEls[0].tagName };
         }
         return { found: false };
       });
