@@ -1744,14 +1744,22 @@ async function fillAddVehicleForm(page, vehicle) {
       if (dialogSavePos.found) {
         console.log(`${LOG}   Dialog Save at (${Math.round(dialogSavePos.x)}, ${Math.round(dialogSavePos.y)}) — clicking...`);
 
-        // Strategy 1: Playwright native click on the Save button element (best Angular compat)
+        // Remove PrimeNG overlay that blocks all clicks in the dialog
+        await page.evaluate(() => {
+          document.querySelectorAll(".p-dialog-mask, .p-dialog-mask-scrollblocker, .p-component-overlay").forEach(m => {
+            m.style.pointerEvents = "none";
+          });
+        });
+        await sleep(500);
+
+        // Strategy 1: Playwright native click with force (bypasses overlay check)
         try {
           const saveBtns = await page.$$(".add-dialog button, [class*='add-dialog'] button");
           for (const btn of saveBtns) {
             const text = await btn.evaluate(el => el.textContent.trim());
             if (/^save$/i.test(text)) {
-              await btn.click({ timeout: 10000 });
-              console.log(`${LOG}   Save clicked via Playwright native`);
+              await btn.click({ force: true, timeout: 10000 });
+              console.log(`${LOG}   Save clicked via Playwright (force)`);
               break;
             }
           }
@@ -1760,7 +1768,7 @@ async function fillAddVehicleForm(page, vehicle) {
           console.log(`${LOG}   Playwright click failed (${e.message.substring(0, 40)}) — mouse click fallback`);
           await page.mouse.click(dialogSavePos.x, dialogSavePos.y);
         }
-        await sleep(5000);
+        await sleep(8000); // Wait longer for vehicle creation API
 
         // Check if dialog closed (= save worked)
         const dialogStillOpen = await page.evaluate(() => {
