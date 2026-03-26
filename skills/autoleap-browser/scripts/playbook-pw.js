@@ -1334,41 +1334,62 @@ async function createEstimateViaUI(page, customer, vehicle) {
         // Fill vehicle form via #ac-vehicle autocomplete
         const dialogResult = await fillAddVehicleForm(page, vehicle);
 
-        // After dialog creates vehicle on the customer, close sidebar and use
-        // the #estimate-vehicle autocomplete to BIND it to the estimate.
-        // Clicking the vehicle row in the sidebar doesn't assign it — only the
-        // main page autocomplete triggers Angular's vehicle binding.
+        // After dialog auto-closes (vehicle created in global catalog),
+        // switch to Contact tab in sidebar and click Save to persist the
+        // customer-vehicle link. Then the estimate will pick it up.
         if (dialogResult) {
-          console.log(`${LOG}   Vehicle created on customer — closing sidebar to bind via autocomplete...`);
-          await sleep(2000);
+          console.log(`${LOG}   Vehicle dialog complete — saving via sidebar Contact tab...`);
+          await sleep(3000);
 
-          // Close the sidebar
-          await page.evaluate(() => {
+          // Switch to Contact tab in sidebar (has Save button)
+          const contactTabPos = await page.evaluate(() => {
             const sidebar = document.querySelector(".p-sidebar, [class*='p-sidebar']");
-            if (sidebar) {
-              const closeBtn = sidebar.querySelector(".p-sidebar-close, [class*='close'], button[aria-label='Close']");
-              if (closeBtn) closeBtn.click();
+            if (!sidebar) return null;
+            const tabs = sidebar.querySelectorAll(".p-tabview-nav-link, a[class*='tabview']");
+            for (const tab of tabs) {
+              if (tab.offsetParent && tab.textContent.trim() === "Contact") {
+                const r = tab.getBoundingClientRect();
+                return { x: r.x + r.width / 2, y: r.y + r.height / 2 };
+              }
             }
+            return null;
           });
-          await page.keyboard.press("Escape");
-          await sleep(2000);
-          sidebarOpen = false;
-
-          // Now use #estimate-vehicle autocomplete to bind vehicle
-          console.log(`${LOG}   Binding vehicle via #estimate-vehicle autocomplete...`);
-          const vehResult = await selectVehicleFromAutocomplete(page, vehicle);
-          if (vehResult.found) {
-            vehicleSelected = true;
-            console.log(`${LOG}   Vehicle bound via autocomplete: "${vehResult.text}" ✓`);
+          if (contactTabPos) {
+            await page.mouse.click(contactTabPos.x, contactTabPos.y);
             await sleep(2000);
-            await clickVehicleConfirmModal(page);
-            await saveEstimate(page);
-            await sleep(3000);
-            console.log(`${LOG}   Estimate saved with vehicle binding ✓`);
-          } else {
-            console.log(`${LOG}   Autocomplete binding failed: ${JSON.stringify(vehResult)}`);
-            vehicleSelected = false;
+            console.log(`${LOG}   Switched to Contact tab`);
           }
+
+          // Click Save in sidebar — uses same overlay removal + dispatch pattern
+          const sidebarSaved = await page.evaluate(() => {
+            // Remove overlays
+            document.querySelectorAll(".p-dialog-mask, .p-dialog-mask-scrollblocker, .p-component-overlay").forEach(m => m.remove());
+            const sidebar = document.querySelector(".p-sidebar, [class*='p-sidebar']");
+            if (!sidebar) return { success: false, error: "no sidebar" };
+            const btns = Array.from(sidebar.querySelectorAll("button")).filter(b =>
+              b.offsetParent !== null && b.textContent.trim().toLowerCase() === "save" && !b.disabled
+            );
+            if (btns.length > 0) {
+              const btn = btns[0];
+              btn.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, cancelable: true }));
+              btn.dispatchEvent(new MouseEvent("mouseup", { bubbles: true, cancelable: true }));
+              btn.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+              return { success: true };
+            }
+            // List what buttons ARE there
+            const allBtns = Array.from(sidebar.querySelectorAll("button"))
+              .filter(b => b.offsetParent !== null)
+              .map(b => b.textContent.trim().substring(0, 20));
+            return { success: false, buttons: allBtns };
+          });
+          console.log(`${LOG}   Sidebar save: ${JSON.stringify(sidebarSaved)}`);
+          await sleep(5000);
+
+          // Handle confirm modal
+          await clickVehicleConfirmModal(page);
+          await sleep(2000);
+
+          vehicleSelected = true;
         }
       } else {
         console.log(`${LOG}   No vehicles listed and no "Add" button found`);
